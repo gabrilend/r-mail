@@ -233,6 +233,34 @@ local function handle_delete(data)
     return 404, {error = "message not found"}
 end
 
+local function handle_update_address(data)
+    local sender = data["from"]
+    local new_host = data.host or ""
+    local new_port = data.port
+
+    local text = read_file(MAIL .. "/contacts")
+    if not text or text == "" then
+        return 404, {error = "sender not in contacts"}
+    end
+    local contacts = json.decode(text) or {}
+    if not contacts[sender] then
+        return 404, {error = "sender not in contacts"}
+    end
+
+    contacts[sender].host = new_host
+    if new_port then contacts[sender].port = new_port end
+    write_file(MAIL .. "/contacts", json.encode(contacts, {indent = true}) .. "\n")
+
+    -- drop a notification in inbox (untracked — no delete propagation)
+    local filename = "address-update-" .. sender
+    local body = sender .. "'s address has changed to " .. new_host .. ":" .. tostring(new_port) ..
+        ".\nYour contacts file has been updated automatically."
+    write_file(INBOX .. "/" .. filename, body)
+
+    log("updated address for %s: %s:%s", sender, new_host, tostring(new_port))
+    return 200, {ok = true}
+end
+
 -- ============================================================
 -- Sync (outgoing)
 -- ============================================================
@@ -462,6 +490,89 @@ local function sync_inbox(my_name)
     return did_work
 end
 
+local IP_SERVICES = {
+    {host = "ifconfig.me",            path = "/"},
+    {host = "icanhazip.com",          path = "/"},
+    {host = "api.ipify.org",          path = "/"},
+    {host = "checkip.amazonaws.com",  path = "/"},
+}
+
+local function fetch_public_ip(service)
+    local conn = socket.tcp()
+    conn:settimeout(5)
+    local ok, err = conn:connect(service.host, 80)
+    if not ok then conn:close(); return nil end
+    conn:send("GET " .. service.path .. " HTTP/1.1\r\n" ..
+        "Host: " .. service.host .. "\r\nConnection: close\r\n\r\n")
+
+    local status_line = conn:receive("*l")
+    if not status_line then conn:close(); return nil end
+
+    while true do
+        local line = conn:receive("*l")
+        if not line or line == "" then break end
+    end
+
+    local ip = conn:receive("*l")
+    conn:close()
+    if ip then ip = ip:match("^%s*(.-)%s*$") end
+    return ip
+end
+
+local function check_public_ip()
+    for _, service in ipairs(IP_SERVICES) do
+        local ip = fetch_public_ip(service)
+        if ip then return ip, service end
+    end
+    return nil
+end
+
+local function verify_ip_change(new_ip, used_service)
+    for _, service in ipairs(IP_SERVICES) do
+        if service.host ~= used_service.host then
+            local ip = fetch_public_ip(service)
+            if ip then return ip == new_ip end
+        end
+    end
+    return false
+end
+
+local function sync_address(my_name, port)
+    local new_ip, service = check_public_ip()
+    if not new_ip then return end
+
+    local stored_ip = read_file(STATE .. "/public_ip")
+    if stored_ip then stored_ip = stored_ip:match("^%s*(.-)%s*$") end
+
+    if stored_ip == new_ip then return end
+
+    -- first run: just save it
+    if not stored_ip then
+        log("public IP recorded: %s", new_ip)
+        write_file(STATE .. "/public_ip", new_ip)
+        return
+    end
+
+    -- verify with a second service before notifying
+    if not verify_ip_change(new_ip, service) then
+        log("public IP change not confirmed (%s reported %s)", service.host, new_ip)
+        return
+    end
+
+    log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
+    write_file(STATE .. "/public_ip", new_ip)
+
+    local contacts = load_contacts()
+    for name, contact in pairs(contacts) do
+        if name ~= "me" and contact.host then
+            http_post(contact.host, contact.port, "/update-address",
+                {host = new_ip, port = port},
+                my_name, contact.token)
+            log("notified %s of address change", name)
+        end
+    end
+end
+
 -- ============================================================
 -- Main
 -- ============================================================
@@ -480,6 +591,9 @@ local function main()
     local server = assert(socket.bind("0.0.0.0", port))
     server:settimeout(1)
     log("listening on :%d", port)
+
+    -- check for IP change on startup
+    pcall(sync_address, my_name, port)
 
     local interval = 300
     local MIN_INTERVAL = 60
@@ -501,6 +615,9 @@ local function main()
                         send_response(client, s, r)
                     elseif path == "/delete" then
                         local s, r = handle_delete(data)
+                        send_response(client, s, r)
+                    elseif path == "/update-address" then
+                        local s, r = handle_update_address(data)
                         send_response(client, s, r)
                     else
                         send_response(client, 404, {error = "not found"})

@@ -321,6 +321,14 @@ The daemon checks for outbox/inbox changes on an adaptive timer:
 
 This means the daemon is responsive when you're actively messaging and backs off when idle.
 
+## Dynamic IP
+
+If your ISP changes your public IP, the daemon detects it automatically. On each startup it checks your public IP using multiple services (`ifconfig.me`, `icanhazip.com`, `api.ipify.org`, `checkip.amazonaws.com`). If a change is detected, it verifies with a second service before acting — so a single service returning a bad result won't trigger a false update.
+
+Once confirmed, the daemon notifies all your contacts. Their daemons update your entry in their contacts file and drop a notification in their inbox so they know what happened.
+
+On first startup it just saves the current IP without notifying anyone.
+
 ## Troubleshooting
 
 **"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
