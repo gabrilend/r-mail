@@ -24,11 +24,11 @@ end
 -- Paths & file helpers
 -- ============================================================
 
-local HOME = os.getenv("HOME")
-local MAIL = HOME .. "/mail"
-local INBOX = MAIL .. "/inbox"
+local HOME   = os.getenv("HOME")
+local MAIL   = HOME .. "/mail"
+local INBOX  = MAIL .. "/inbox"
 local OUTBOX = MAIL .. "/outbox"
-local STATE = MAIL .. "/.state"
+local STATE  = MAIL .. "/.state"
 
 local function read_file(path)
     local f = io.open(path, "r")
