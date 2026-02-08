@@ -95,34 +95,10 @@ local function log(fmt, ...)
     io.stderr:flush()
 end
 
-local function load_config()
-    local cfg = {}
-    local text = read_file(MAIL .. "/config")
-    if not text then return cfg end
-    for line in text:gmatch("[^\n]+") do
-        line = line:match("^%s*(.-)%s*$")
-        if line ~= "" and line:sub(1, 1) ~= "#" then
-            local k, v = line:match("^(%S+):%s*(.+)$")
-            if k then cfg[k] = v end
-        end
-    end
-    return cfg
-end
-
 local function load_contacts()
-    local contacts = {}
     local text = read_file(MAIL .. "/contacts")
-    if not text then return contacts end
-    for line in text:gmatch("[^\n]+") do
-        line = line:match("^%s*(.-)%s*$")
-        if line ~= "" and line:sub(1, 1) ~= "#" then
-            local name, host, port, token = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-            if name then
-                contacts[name] = {host = host, port = tonumber(port), token = token}
-            end
-        end
-    end
-    return contacts
+    if not text or text == "" then return {} end
+    return json.decode(text) or {}
 end
 
 local function load_state(name)
@@ -232,14 +208,19 @@ local function handle_delete(data)
     -- recipient telling us they deleted something we sent
     local outbox_state = load_state("outbox.json")
     for filename, meta in pairs(outbox_state) do
-        if meta.message_id == message_id then
-            meta.remote_deleted = true
-            if file_exists(OUTBOX .. "/" .. filename) then
-                os.remove(OUTBOX .. "/" .. filename)
-                log("deleted from outbox: %s (recipient %s deleted)", filename, sender)
+        if meta.recipients then
+            for recipient, rmeta in pairs(meta.recipients) do
+                if rmeta.message_id == message_id and recipient == sender then
+                    meta.recipients[recipient] = nil
+                    local remaining = remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
+                    log("removed recipient %s from %s (they deleted)", recipient, filename)
+                    if not next(meta.recipients) then
+                        outbox_state[filename] = nil
+                    end
+                    save_state("outbox.json", outbox_state)
+                    return 200, {ok = true}
+                end
             end
-            save_state("outbox.json", outbox_state)
-            return 200, {ok = true}
         end
     end
 
@@ -303,12 +284,54 @@ end
 local function parse_outbox_file(path)
     local text = read_file(path)
     if not text then return nil, nil end
-    local first_line, rest = text:match("^([^\n]*)\n?(.*)")
-    if not first_line or not first_line:lower():match("^to:") then
-        return nil, nil
+    local recipients = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        if line:lower():match("^to:") then
+            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if r and r ~= "" then
+                recipients[#recipients + 1] = r
+            end
+            pos = line_end + 1
+        else
+            break
+        end
     end
-    local recipient = first_line:match("^[Tt][Oo]:%s*(.-)%s*$")
-    return recipient, rest or ""
+    if #recipients == 0 then return nil, nil end
+    return recipients, text:sub(pos)
+end
+
+local function remove_recipient_from_file(filepath, recipient)
+    local text = read_file(filepath)
+    if not text then return 0 end
+    local recipients = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        if line:lower():match("^to:") then
+            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if r and r ~= recipient then
+                recipients[#recipients + 1] = r
+            end
+            pos = line_end + 1
+        else
+            break
+        end
+    end
+    local body = text:sub(pos)
+    if #recipients == 0 then
+        os.remove(filepath)
+        return 0
+    end
+    local header = ""
+    for _, r in ipairs(recipients) do
+        header = header .. "to: " .. r .. "\n"
+    end
+    write_file(filepath, header .. body)
+    return #recipients
 end
 
 local function sync_outbox(my_name)
@@ -319,27 +342,66 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- new files
+    -- sync existing and new files
     for name in pairs(current) do
-        if not state[name] then
-            local recipient, body = parse_outbox_file(OUTBOX .. "/" .. name)
-            if not recipient then
-                log("skipping %s: missing 'to:' header", name)
-            elseif not contacts[recipient] then
-                log("skipping %s: unknown contact '%s'", name, recipient)
-            else
-                local contact = contacts[recipient]
-                local mid = uuid()
-                local ok = http_post(contact.host, contact.port, "/deliver",
-                    {subject = name, message_id = mid, body = body},
-                    my_name, contact.token)
-                if ok then
-                    state[name] = {to = recipient, message_id = mid, sent = true}
-                    log("sent: %s -> %s", name, recipient)
+        local recipients, body = parse_outbox_file(OUTBOX .. "/" .. name)
+
+        -- build set of current to: lines
+        local current_set = {}
+        if recipients then
+            for _, r in ipairs(recipients) do current_set[r] = true end
+        end
+
+        if not recipients and not state[name] then
+            log("skipping %s: missing 'to:' header", name)
+        else
+            if not state[name] then state[name] = {recipients = {}} end
+
+            -- detect removed recipients (sender deleted a to: line)
+            for recipient, rmeta in pairs(state[name].recipients) do
+                if not current_set[recipient] then
+                    if contacts[recipient] then
+                        local contact = contacts[recipient]
+                        http_post(contact.host, contact.port, "/delete",
+                            {message_id = rmeta.message_id},
+                            my_name, contact.token)
+                        log("notified %s of removal: %s", recipient, name)
+                    end
+                    state[name].recipients[recipient] = nil
                     did_work = true
-                else
-                    log("failed to send %s to %s", name, recipient)
                 end
+            end
+
+            -- send to new recipients
+            if recipients then
+                for _, recipient in ipairs(recipients) do
+                    if not state[name].recipients[recipient] then
+                        if not contacts[recipient] then
+                            log("skipping %s: unknown contact '%s'", name, recipient)
+                        else
+                            local contact = contacts[recipient]
+                            local mid = uuid()
+                            local ok = http_post(contact.host, contact.port, "/deliver",
+                                {subject = name, message_id = mid, body = body},
+                                my_name, contact.token)
+                            if ok then
+                                state[name].recipients[recipient] = {message_id = mid}
+                                log("sent: %s -> %s", name, recipient)
+                                did_work = true
+                            else
+                                log("failed to send %s to %s", name, recipient)
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- clean up if no recipients left
+            if not next(state[name].recipients) then
+                os.remove(OUTBOX .. "/" .. name)
+                log("cleaned up %s: no recipients left", name)
+                state[name] = nil
+                did_work = true
             end
         end
     end
@@ -347,21 +409,19 @@ local function sync_outbox(my_name)
     -- deleted files
     for name, meta in pairs(state) do
         if not current[name] then
-            if meta.remote_deleted then
-                state[name] = nil
-                did_work = true
-            else
-                local recipient = meta.to or ""
-                if contacts[recipient] then
-                    local contact = contacts[recipient]
-                    http_post(contact.host, contact.port, "/delete",
-                        {message_id = meta.message_id},
-                        my_name, contact.token)
-                    log("notified %s of deletion: %s", recipient, name)
+            if meta.recipients then
+                for recipient, rmeta in pairs(meta.recipients) do
+                    if contacts[recipient] then
+                        local contact = contacts[recipient]
+                        http_post(contact.host, contact.port, "/delete",
+                            {message_id = rmeta.message_id},
+                            my_name, contact.token)
+                        log("notified %s of deletion: %s", recipient, name)
+                    end
                 end
-                state[name] = nil
-                did_work = true
             end
+            state[name] = nil
+            did_work = true
         end
     end
 
@@ -403,9 +463,10 @@ end
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '"')
 
-    local cfg = load_config()
-    local my_name = cfg.name or "user"
-    local port = tonumber(cfg.port or "8025")
+    local contacts = load_contacts()
+    local me = contacts["me"] or {}
+    local my_name = me.name or "user"
+    local port = tonumber(me.port or 8025)
 
     log("rmail starting: name=%s port=%d", my_name, port)
     log("mail dir: %s", MAIL)

@@ -10,8 +10,7 @@ Each person runs an `rmail` daemon. It watches two directories:
 ~/mail/
   inbox/       # received messages appear here
   outbox/      # write files here to send
-  contacts     # address book + shared secrets
-  config       # your name + port
+  contacts     # your identity, address book, shared secrets
   .state/      # sync tracking (managed by daemon)
 ```
 
@@ -23,9 +22,27 @@ to: alice
 Hey, want to grab coffee tomorrow?
 ```
 
-The daemon picks it up and delivers it to Alice's inbox as a plain text file (without the `to:` header).
+You can send to multiple people — one `to:` per line:
 
-Deleting works both ways — delete a file from your outbox or inbox and the daemon notifies the other side to delete it too.
+```
+to: alice
+to: bob
+to: charlie
+
+Meeting at 3pm tomorrow.
+```
+
+Each recipient gets their own independent copy. They only see the message body, not who else received it.
+
+The daemon picks it up and delivers it to each recipient's inbox as a plain text file (without the `to:` headers).
+
+Deleting works both ways:
+
+- **Recipient deletes** from inbox — the sender's copy has that `to:` line removed.
+- **Sender deletes** the outbox file — all recipients are notified to remove it.
+- **Sender removes a `to:` line** — that specific recipient's copy is deleted, others are unaffected.
+
+When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
 ## Dependencies
 
@@ -44,18 +61,20 @@ Before starting the daemon, set up `~/mail/`:
 mkdir -p ~/mail/inbox ~/mail/outbox ~/mail/.state
 ```
 
-Create `~/mail/config`:
+Create `~/mail/contacts`. The first entry is always `"me"` — your name and port. The rest are your contacts:
 
-```
-name: yourname
-port: 8025
-```
-
-Create `~/mail/contacts` with one line per contact:
-
-```
-# name  host         port  token
-alice   192.168.1.10 8025  some-shared-secret
+```json
+{
+  "me": {
+    "name": "yourname",
+    "port": 8025
+  },
+  "alice": {
+    "host": "192.168.1.10",
+    "port": 8025,
+    "token": "some-shared-secret"
+  }
+}
 ```
 
 Both sides must have the same token for a given contact pair. Pick something long and random.
