@@ -51,7 +51,12 @@ When all `to:` lines are gone (everyone deleted or was removed), the outbox file
 
 `dkjson` is bundled in `libs/` — no need to install it separately.
 
-If a dependency is missing, the daemon will tell you exactly what's needed and where to put it.
+If a dependency is missing, the daemon will tell you exactly what's needed and where to put it. You can also check manually:
+
+```
+lua -v                                    # Lua installed?
+lua -e "require('socket'); print('ok')"   # LuaSocket installed?
+```
 
 ## Configuration
 
@@ -94,6 +99,45 @@ You will need your local IP when setting up port forwarding on your router — t
 
 If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like a mailbox for a specific computer.
 
+To find your **local IP** (for router port forwarding):
+
+```
+ip addr show | grep 'inet '
+```
+
+To find your **public IP** (what your contacts put in their file):
+
+```
+curl ifconfig.me
+```
+
+### Opening the firewall
+
+Your OS firewall also needs to allow traffic on your port. To check which firewall you're running:
+
+```
+which ufw && echo "you have ufw" || which nft && echo "you have nftables" || which iptables && echo "you have iptables"
+```
+
+Then open the port:
+
+```sh
+# ufw
+sudo ufw allow 8025/tcp
+
+# iptables
+sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
+
+# nftables (add to your ruleset)
+tcp dport 8025 accept
+```
+
+To verify the port is open and the daemon is listening:
+
+```
+ss -tlnp | grep 8025
+```
+
 ## Installation
 
 ### NixOS
@@ -122,18 +166,6 @@ Install Lua and LuaSocket:
 
 ```
 sudo pacman -S lua lua-socket
-```
-
-Open the firewall port (if using `ufw`):
-
-```
-sudo ufw allow 8025/tcp
-```
-
-Or with raw iptables:
-
-```
-sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 ```
 
 Clone the repo and run:
@@ -178,18 +210,6 @@ Install Lua and LuaSocket:
 sudo xbps-install -S lua54 lua54-luasocket
 ```
 
-Open the firewall port (if using `ufw`):
-
-```
-sudo ufw allow 8025/tcp
-```
-
-Or with raw iptables:
-
-```
-sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
-```
-
 Clone the repo and run:
 
 ```
@@ -225,18 +245,6 @@ Install Lua and LuaSocket:
 
 ```
 sudo emerge dev-lang/lua dev-lua/luasocket
-```
-
-Open the firewall port (if using `iptables`):
-
-```
-sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
-```
-
-Or with `nftables`, add to your ruleset:
-
-```
-tcp dport 8025 accept
 ```
 
 Clone the repo and run:
