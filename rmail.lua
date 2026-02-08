@@ -279,54 +279,124 @@ end
 -- Sync (outgoing)
 -- ============================================================
 
+local function http_post_batch(requests)
+    if #requests == 0 then return {} end
+
+    local entries = {}
+    local lookup = {}
+
+    for i, req in ipairs(requests) do
+        local conn = socket.tcp()
+        conn:settimeout(0)
+        conn:connect(req.host, req.port)
+        entries[i] = {
+            conn = conn, req = req,
+            phase = "connecting",
+            ok = false, data = {},
+        }
+        lookup[conn] = entries[i]
+    end
+
+    local deadline = socket.gettime() + 8
+
+    while socket.gettime() < deadline do
+        local recvt, sendt = {}, {}
+        local any = false
+
+        for _, e in ipairs(entries) do
+            if e.phase == "connecting" then
+                sendt[#sendt + 1] = e.conn
+                any = true
+            elseif e.phase == "sent" then
+                recvt[#recvt + 1] = e.conn
+                any = true
+            end
+        end
+
+        if not any then break end
+
+        local remaining = deadline - socket.gettime()
+        if remaining <= 0 then break end
+
+        local readable, writable = socket.select(
+            #recvt > 0 and recvt or nil,
+            #sendt > 0 and sendt or nil,
+            math.min(remaining, 0.5))
+
+        -- connected sockets: send request immediately
+        if writable then
+            for _, conn in ipairs(writable) do
+                local e = lookup[conn]
+                if e and e.phase == "connecting" then
+                    conn:settimeout(3)
+                    local sent = conn:send(
+                        "POST " .. e.req.path .. " HTTP/1.1\r\n" ..
+                        "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
+                        "Content-Type: application/json\r\n" ..
+                        "Content-Length: " .. #e.req.payload .. "\r\n" ..
+                        "Connection: close\r\n\r\n" ..
+                        e.req.payload)
+                    if sent then
+                        e.phase = "sent"
+                    else
+                        e.phase = "done"
+                        conn:close()
+                    end
+                end
+            end
+        end
+
+        -- readable sockets: read response
+        if readable then
+            for _, conn in ipairs(readable) do
+                local e = lookup[conn]
+                if e and e.phase == "sent" then
+                    conn:settimeout(3)
+                    local status_line = conn:receive("*l")
+                    if status_line then
+                        local status = tonumber(status_line:match("(%d+)"))
+                        local hdrs = {}
+                        while true do
+                            local line = conn:receive("*l")
+                            if not line or line == "" then break end
+                            local k, v = line:match("^(.-):%s*(.+)$")
+                            if k then hdrs[k:lower()] = v end
+                        end
+                        local resp_body = ""
+                        local len = tonumber(hdrs["content-length"] or 0)
+                        if len > 0 then resp_body = conn:receive(len) or "" end
+                        if resp_body ~= "" then
+                            local ok2, dec = pcall(json.decode, resp_body)
+                            if ok2 then e.data = dec or {} end
+                        end
+                        e.ok = (status == 200)
+                    end
+                    e.phase = "done"
+                    conn:close()
+                end
+            end
+        end
+    end
+
+    local results = {}
+    for i, e in ipairs(entries) do
+        if e.phase ~= "done" then
+            log("timeout connecting to %s:%d", e.req.host, e.req.port)
+            e.conn:close()
+        end
+        results[i] = {ok = e.ok, data = e.data}
+    end
+    return results
+end
+
 local function http_post(host, port, path, data, my_name, token)
     data["from"] = my_name
     data.token = token
-    local payload = json.encode(data)
-
-    local conn = socket.tcp()
-    conn:settimeout(10)
-    local ok, err = conn:connect(host, port)
-    if not ok then
-        log("connect failed %s:%d: %s", host, port, err)
-        conn:close()
-        return false, {}
-    end
-
-    conn:send(
-        "POST " .. path .. " HTTP/1.1\r\n" ..
-        "Host: " .. host .. ":" .. port .. "\r\n" ..
-        "Content-Type: application/json\r\n" ..
-        "Content-Length: " .. #payload .. "\r\n" ..
-        "Connection: close\r\n\r\n" ..
-        payload)
-
-    local status_line = conn:receive("*l")
-    if not status_line then conn:close(); return false, {} end
-    local status = tonumber(status_line:match("(%d+)"))
-
-    local resp_headers = {}
-    while true do
-        local line = conn:receive("*l")
-        if not line or line == "" then break end
-        local k, v = line:match("^(.-):%s*(.+)$")
-        if k then resp_headers[k:lower()] = v end
-    end
-
-    local resp_body = ""
-    local length = tonumber(resp_headers["content-length"] or 0)
-    if length > 0 then
-        resp_body = conn:receive(length) or ""
-    end
-    conn:close()
-
-    local resp_data = {}
-    if resp_body ~= "" then
-        local ok2, decoded = pcall(json.decode, resp_body)
-        if ok2 then resp_data = decoded or {} end
-    end
-
-    return status == 200, resp_data
+    local results = http_post_batch({{
+        host = host, port = port, path = path,
+        payload = json.encode(data),
+    }})
+    return results[1].ok, results[1].data
 end
 
 local function parse_outbox_file(path)
@@ -390,11 +460,11 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- sync existing and new files
+    -- Phase 1: collect all pending operations
+    local ops = {}
+
     for name in pairs(current) do
         local recipients, body = parse_outbox_file(OUTBOX .. "/" .. name)
-
-        -- build set of current to: lines
         local current_set = {}
         if recipients then
             for _, r in ipairs(recipients) do current_set[r] = true end
@@ -405,69 +475,117 @@ local function sync_outbox(my_name)
         else
             if not state[name] then state[name] = {recipients = {}} end
 
-            -- detect removed recipients (sender deleted a to: line)
+            -- removed recipients (sender deleted a to: line)
             for recipient, rmeta in pairs(state[name].recipients) do
                 if not current_set[recipient] then
                     if contacts[recipient] then
-                        local contact = contacts[recipient]
-                        http_post(contact.host, contact.port, "/delete",
-                            {message_id = rmeta.message_id},
-                            my_name, contact.token)
-                        log("notified %s of removal: %s", recipient, name)
+                        ops[#ops + 1] = {
+                            type = "notify_removal", filename = name,
+                            recipient = recipient, message_id = rmeta.message_id,
+                            contact = contacts[recipient],
+                        }
+                    else
+                        state[name].recipients[recipient] = nil
+                        did_work = true
                     end
-                    state[name].recipients[recipient] = nil
-                    did_work = true
                 end
             end
 
-            -- send to new recipients
+            -- new recipients
             if recipients then
                 for _, recipient in ipairs(recipients) do
                     if not state[name].recipients[recipient] then
-                        if not contacts[recipient] then
-                            log("skipping %s: unknown contact '%s'", name, recipient)
+                        if contacts[recipient] then
+                            ops[#ops + 1] = {
+                                type = "deliver", filename = name,
+                                recipient = recipient, message_id = uuid(),
+                                subject = name, body = body,
+                                contact = contacts[recipient],
+                            }
                         else
-                            local contact = contacts[recipient]
-                            local mid = uuid()
-                            local ok = http_post(contact.host, contact.port, "/deliver",
-                                {subject = name, message_id = mid, body = body},
-                                my_name, contact.token)
-                            if ok then
-                                state[name].recipients[recipient] = {message_id = mid}
-                                log("sent: %s -> %s", name, recipient)
-                                did_work = true
-                            else
-                                log("failed to send %s to %s", name, recipient)
-                            end
+                            log("skipping %s: unknown contact '%s'", name, recipient)
                         end
                     end
                 end
-            end
-
-            -- clean up if no recipients left
-            if not next(state[name].recipients) then
-                os.remove(OUTBOX .. "/" .. name)
-                log("cleaned up %s: no recipients left", name)
-                state[name] = nil
-                did_work = true
             end
         end
     end
 
     -- deleted files
     for name, meta in pairs(state) do
-        if not current[name] then
-            if meta.recipients then
-                for recipient, rmeta in pairs(meta.recipients) do
-                    if contacts[recipient] then
-                        local contact = contacts[recipient]
-                        http_post(contact.host, contact.port, "/delete",
-                            {message_id = rmeta.message_id},
-                            my_name, contact.token)
-                        log("notified %s of deletion: %s", recipient, name)
-                    end
+        if not current[name] and meta.recipients then
+            for recipient, rmeta in pairs(meta.recipients) do
+                if contacts[recipient] then
+                    ops[#ops + 1] = {
+                        type = "notify_deletion", filename = name,
+                        recipient = recipient, message_id = rmeta.message_id,
+                        contact = contacts[recipient],
+                    }
                 end
             end
+        end
+    end
+
+    -- Phase 2: execute all operations in parallel
+    if #ops > 0 then
+        local requests = {}
+        for i, op in ipairs(ops) do
+            local path, data
+            if op.type == "deliver" then
+                path = "/deliver"
+                data = {["from"] = my_name, token = op.contact.token,
+                        subject = op.subject, message_id = op.message_id, body = op.body}
+            else
+                path = "/delete"
+                data = {["from"] = my_name, token = op.contact.token,
+                        message_id = op.message_id}
+            end
+            requests[i] = {
+                host = op.contact.host, port = op.contact.port,
+                path = path, payload = json.encode(data),
+            }
+        end
+
+        local results = http_post_batch(requests)
+
+        -- Phase 3: process results
+        for i, op in ipairs(ops) do
+            if op.type == "notify_removal" then
+                if state[op.filename] then
+                    state[op.filename].recipients[op.recipient] = nil
+                    remove_recipient_from_file(OUTBOX .. "/" .. op.filename, op.recipient)
+                    log("notified %s of removal: %s", op.recipient, op.filename)
+                    did_work = true
+                end
+            elseif op.type == "deliver" then
+                if results[i].ok then
+                    if state[op.filename] then
+                        state[op.filename].recipients[op.recipient] = {message_id = op.message_id}
+                    end
+                    log("sent: %s -> %s", op.filename, op.recipient)
+                    did_work = true
+                else
+                    log("failed to send %s to %s", op.filename, op.recipient)
+                end
+            elseif op.type == "notify_deletion" then
+                log("notified %s of deletion: %s", op.recipient, op.filename)
+                did_work = true
+            end
+        end
+    end
+
+    -- clean up deleted files from state
+    for name in pairs(state) do
+        if not current[name] then
+            state[name] = nil
+        end
+    end
+
+    -- clean up files with no recipients left
+    for name in pairs(current) do
+        if state[name] and not next(state[name].recipients) then
+            os.remove(OUTBOX .. "/" .. name)
+            log("cleaned up %s: no recipients left", name)
             state[name] = nil
             did_work = true
         end
@@ -485,18 +603,39 @@ local function sync_inbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(INBOX)) do current[name] = true end
 
+    -- collect deletion notifications
+    local ops = {}
     for name, meta in pairs(state) do
         if not current[name] then
             local sender = meta["from"] or ""
             if contacts[sender] then
-                local contact = contacts[sender]
-                http_post(contact.host, contact.port, "/delete",
-                    {message_id = meta.message_id},
-                    my_name, contact.token)
-                log("notified %s of inbox deletion: %s", sender, name)
+                ops[#ops + 1] = {
+                    filename = name, sender = sender,
+                    message_id = meta.message_id,
+                    contact = contacts[sender],
+                }
             end
             state[name] = nil
             did_work = true
+        end
+    end
+
+    -- batch execute
+    if #ops > 0 then
+        local requests = {}
+        for i, op in ipairs(ops) do
+            requests[i] = {
+                host = op.contact.host, port = op.contact.port,
+                path = "/delete",
+                payload = json.encode({
+                    ["from"] = my_name, token = op.contact.token,
+                    message_id = op.message_id,
+                }),
+            }
+        end
+        http_post_batch(requests)
+        for _, op in ipairs(ops) do
+            log("notified %s of inbox deletion: %s", op.sender, op.filename)
         end
     end
 
@@ -577,11 +716,24 @@ local function sync_address(my_name, port)
     write_file(STATE .. "/public_ip", new_ip)
 
     local contacts = load_contacts()
+    local requests = {}
+    local names = {}
     for name, contact in pairs(contacts) do
         if name ~= "me" and contact.host then
-            http_post(contact.host, contact.port, "/update-address",
-                {host = new_ip, port = port, notify = NOTIFY_IP_CHANGE},
-                my_name, contact.token)
+            requests[#requests + 1] = {
+                host = contact.host, port = contact.port,
+                path = "/update-address",
+                payload = json.encode({
+                    ["from"] = my_name, token = contact.token,
+                    host = new_ip, port = port, notify = NOTIFY_IP_CHANGE,
+                }),
+            }
+            names[#names + 1] = name
+        end
+    end
+    if #requests > 0 then
+        http_post_batch(requests)
+        for _, name in ipairs(names) do
             log("notified %s of address change", name)
         end
     end
