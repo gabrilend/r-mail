@@ -60,11 +60,7 @@ lua -e "require('socket'); print('ok')"   # LuaSocket installed?
 
 ## Configuration
 
-Before starting the daemon, set up `~/mail/`:
-
-```
-mkdir -p ~/mail/inbox ~/mail/outbox ~/mail/.state
-```
+The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on startup if they don't exist.
 
 Create `~/mail/contacts`. The first entry is always `"me"` — your name and port. The rest are your contacts:
 
@@ -75,7 +71,7 @@ Create `~/mail/contacts`. The first entry is always `"me"` — your name and por
     "port": 8025
   },
   "alice": {
-    "host": "192.168.1.10",
+    "host": "203.0.113.1",
     "port": 8025,
     "token": "some-shared-secret"
   }
@@ -116,7 +112,9 @@ curl ifconfig.me
 Your OS firewall also needs to allow traffic on your port. To check which firewall you're running:
 
 ```
-which ufw && echo "you have ufw" || which nft && echo "you have nftables" || which iptables && echo "you have iptables"
+which ufw && echo "you have ufw"      || \
+which nft && echo "you have nftables" || \
+which iptables && echo "you have iptables"
 ```
 
 Then open the port:
@@ -132,11 +130,19 @@ sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 tcp dport 8025 accept
 ```
 
-To verify the port is open and the daemon is listening:
+To verify that the port is open, run this from a computer on the network:
+```
+-ss -tlnp | grep 8025
+```
+
+
+To verify the daemon is reachable:
 
 ```
-ss -tlnp | grep 8025
+curl http://localhost:8025/
 ```
+
+This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP to confirm port forwarding is set up correctly.
 
 ## Installation
 

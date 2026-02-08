@@ -1,7 +1,18 @@
 #!/usr/bin/env lua
 -- rmail - file-based messaging daemon
 
--- find our own directory for lib/ imports
+-- ============================================================
+-- Configuration (edit these)
+-- ============================================================
+
+local MAIL   = "/home/ritz/mail"
+local INBOX  = MAIL .. "/inbox"
+local OUTBOX = MAIL .. "/outbox"
+local STATE  = MAIL .. "/.state"
+
+-- ============================================================
+
+-- find our own directory for libs/ imports
 local script_dir = arg[0]:match("(.*/)") or "./"
 package.path = script_dir .. "libs/?.lua;" .. package.path
 
@@ -24,11 +35,6 @@ end
 -- Paths & file helpers
 -- ============================================================
 
-local HOME   = os.getenv("HOME")
-local MAIL   = HOME .. "/mail"
-local INBOX  = MAIL .. "/inbox"
-local OUTBOX = MAIL .. "/outbox"
-local STATE  = MAIL .. "/.state"
 
 local function read_file(path)
     local f = io.open(path, "r")
@@ -484,7 +490,9 @@ local function main()
         if client then
             local ok, err = pcall(function()
                 local method, path, headers, body = parse_request(client)
-                if method == "POST" and body and body ~= "" then
+                if method == "GET" and path == "/" then
+                    send_response(client, 200, {ok = true, name = my_name})
+                elseif method == "POST" and body and body ~= "" then
                     local data = json.decode(body)
                     if not auth_check(data) then
                         send_response(client, 403, {error = "forbidden"})
