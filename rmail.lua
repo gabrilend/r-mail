@@ -3,12 +3,12 @@
 
 -- find our own directory for lib/ imports
 local script_dir = arg[0]:match("(.*/)") or "./"
-package.path = script_dir .. "lib/?.lua;" .. package.path
+package.path = script_dir .. "libs/?.lua;" .. package.path
 
 local ok, json = pcall(require, "dkjson")
 if not ok then
     io.stderr:write("error: dkjson.lua not found.\n")
-    io.stderr:write("       place it at: " .. script_dir .. "lib/dkjson.lua\n")
+    io.stderr:write("       place it at: " .. script_dir .. "libs/dkjson.lua\n")
     os.exit(1)
 end
 

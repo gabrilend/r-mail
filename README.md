@@ -49,7 +49,7 @@ When all `to:` lines are gone (everyone deleted or was removed), the outbox file
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
 
-`dkjson` is bundled in `lib/` — no need to install it separately.
+`dkjson` is bundled in `libs/` — no need to install it separately.
 
 If a dependency is missing, the daemon will tell you exactly what's needed and where to put it.
 
@@ -294,7 +294,7 @@ This means the daemon is responsive when you're actively messaging and backs off
 
 ## Troubleshooting
 
-**"dkjson.lua not found"** — make sure `lib/dkjson.lua` exists relative to `rmail.lua`. If you moved the script, move the `lib/` directory with it.
+**"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
 
 **"luasocket not found"** — install it with your package manager or `luarocks install luasocket`.
 
