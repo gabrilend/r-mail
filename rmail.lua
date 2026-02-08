@@ -10,16 +10,27 @@ local INBOX  = MAIL .. "/inbox"
 local OUTBOX = MAIL .. "/outbox"
 local STATE  = MAIL .. "/.state"
 
+local LIBS   = nil    -- extra libs path (e.g. "/home/you/lua-libs")
+                      -- if set, searched before the bundled libs/ directory
+
+local NOTIFY_IP_CHANGE = true   -- drop a message in contacts' inboxes when IP changes
+                                -- (IP detection and contact updates always happen)
+
 -- ============================================================
 
 -- find our own directory for libs/ imports
 local script_dir = arg[0]:match("(.*/)") or "./"
-package.path = script_dir .. "libs/?.lua;" .. package.path
+if LIBS then
+    package.path = LIBS .. "/?.lua;" .. script_dir .. "libs/?.lua;" .. package.path
+else
+    package.path = script_dir .. "libs/?.lua;" .. package.path
+end
 
 local ok, json = pcall(require, "dkjson")
 if not ok then
     io.stderr:write("error: dkjson.lua not found.\n")
     io.stderr:write("       place it at: " .. script_dir .. "libs/dkjson.lua\n")
+    io.stderr:write("       or set LIBS at the top of rmail.lua to a directory containing it\n")
     os.exit(1)
 end
 
@@ -28,6 +39,7 @@ if not ok2 then
     io.stderr:write("error: luasocket not found.\n")
     io.stderr:write("       install it with your package manager or luarocks:\n")
     io.stderr:write("         luarocks install luasocket\n")
+    io.stderr:write("       or set LIBS at the top of rmail.lua to a directory containing it\n")
     os.exit(1)
 end
 
@@ -251,13 +263,15 @@ local function handle_update_address(data)
     if new_port then contacts[sender].port = new_port end
     write_file(MAIL .. "/contacts", json.encode(contacts, {indent = true}) .. "\n")
 
-    -- drop a notification in inbox (untracked — no delete propagation)
-    local filename = "address-update-" .. sender
-    local body = sender .. "'s address has changed to " .. new_host .. ":" .. tostring(new_port) ..
-        ".\nYour contacts file has been updated automatically."
-    write_file(INBOX .. "/" .. filename, body)
-
     log("updated address for %s: %s:%s", sender, new_host, tostring(new_port))
+
+    -- drop a notification in inbox if the sender requested it
+    if data.notify ~= false then
+        local filename = "address-update-" .. sender
+        local body = sender .. "'s address has changed to " .. new_host .. ":" .. tostring(new_port) ..
+            ".\nYour contacts file has been updated automatically."
+        write_file(INBOX .. "/" .. filename, body)
+    end
     return 200, {ok = true}
 end
 
@@ -566,7 +580,7 @@ local function sync_address(my_name, port)
     for name, contact in pairs(contacts) do
         if name ~= "me" and contact.host then
             http_post(contact.host, contact.port, "/update-address",
-                {host = new_ip, port = port},
+                {host = new_ip, port = port, notify = NOTIFY_IP_CHANGE},
                 my_name, contact.token)
             log("notified %s of address change", name)
         end
