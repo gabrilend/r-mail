@@ -5,16 +5,26 @@
 -- Configuration (edit these)
 -- ============================================================
 
-local MAIL   = "/home/ritz/mail"
-local INBOX  = MAIL .. "/inbox"
-local OUTBOX = MAIL .. "/outbox"
-local STATE  = MAIL .. "/.state"
+local MAIL     = "/home/ritz/mail"
+local INBOX    = MAIL .. "/inbox"       -- received messages appear here
+local OUTBOX   = MAIL .. "/outbox"      -- write files here to send
+local STATE    = MAIL .. "/.state"      -- sync tracking (managed by daemon)
+local CONTACTS = MAIL .. "/contacts"    -- identity + address book
+local PACKAGES = MAIL .. "/packages"    -- received attachments
 
 local LIBS   = nil    -- extra libs path (e.g. "/home/you/lua-libs")
                       -- if set, searched before the bundled libs/ directory
 
 local NOTIFY_IP_CHANGE = true   -- drop a message in contacts' inboxes when IP changes
                                 -- (IP detection and contact updates always happen)
+
+local ON_RECEIVE = nil   -- script to run when a message arrives
+                         -- called with filepath as first argument
+                         -- e.g. "/path/to/scripts/on-message.sh"
+
+local ON_PACKAGE = nil   -- script to run when an attachment arrives
+                         -- called with filepath as first argument
+                         -- e.g. "/path/to/scripts/on-package.sh"
 
 -- ============================================================
 
@@ -43,6 +53,8 @@ if not ok2 then
     os.exit(1)
 end
 
+local mime = require("mime")  -- base64 encoding (part of luasocket)
+
 -- ============================================================
 -- Paths & file helpers
 -- ============================================================
@@ -58,6 +70,22 @@ end
 
 local function write_file(path, content)
     local f = io.open(path, "w")
+    if not f then return false end
+    f:write(content)
+    f:close()
+    return true
+end
+
+local function read_file_binary(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
+local function write_file_binary(path, content)
+    local f = io.open(path, "wb")
     if not f then return false end
     f:write(content)
     f:close()
@@ -82,6 +110,10 @@ local function list_files(dir)
         handle:close()
     end
     return files
+end
+
+local function shell_quote(s)
+    return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
 local function uuid()
@@ -114,7 +146,7 @@ local function log(fmt, ...)
 end
 
 local function load_contacts()
-    local text = read_file(MAIL .. "/contacts")
+    local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
     return json.decode(text) or {}
 end
@@ -175,16 +207,53 @@ local function auth_check(data)
     return contacts[sender].token == token
 end
 
+local function save_attachments(attachments, sender, inbox_meta)
+    if not attachments or #attachments == 0 then return end
+    if not inbox_meta.attachments then inbox_meta.attachments = {} end
+    for _, att in ipairs(attachments) do
+        local att_filename = att.filename
+        local target = PACKAGES .. "/" .. att_filename
+        if file_exists(target) and not inbox_meta.attachments[att_filename] then
+            att_filename = att.filename .. "-from-" .. sender
+            target = PACKAGES .. "/" .. att_filename
+        end
+        local raw = mime.unb64(att.data)
+        write_file_binary(target, raw)
+        os.execute("chmod 444 " .. shell_quote(target))
+        inbox_meta.attachments[att_filename] = {
+            attachment_id = att.attachment_id,
+            path = target,
+        }
+        log("attachment saved: %s from %s", att_filename, sender)
+        if ON_PACKAGE then
+            os.execute(ON_PACKAGE .. " " .. shell_quote(target) .. " &")
+        end
+    end
+end
+
 local function handle_deliver(data)
     local sender = data["from"]
     local subject = data.subject or "untitled"
     local message_id = data.message_id or uuid()
-    local body = data.body or ""
+    local body = data.body
+    local attachments = data.attachments
 
+    local inbox_state = load_state("inbox.json")
+
+    -- check if adding attachments to an existing message
+    for filename, meta in pairs(inbox_state) do
+        if meta.message_id == message_id and meta["from"] == sender then
+            save_attachments(attachments, sender, meta)
+            save_state("inbox.json", inbox_state)
+            return 200, {ok = true}
+        end
+    end
+
+    -- new message
+    if not body then body = "" end
     local filename = subject
     local target = INBOX .. "/" .. filename
     if file_exists(target) then
-        local inbox_state = load_state("inbox.json")
         local existing = inbox_state[filename]
         if existing and existing["from"] ~= sender then
             filename = subject .. "-from-" .. sender
@@ -195,19 +264,58 @@ local function handle_deliver(data)
     write_file(target, body)
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
-    local inbox_state = load_state("inbox.json")
+    if ON_RECEIVE then
+        os.execute(ON_RECEIVE .. " " .. shell_quote(target) .. " &")
+    end
+
     inbox_state[filename] = {
         ["from"] = sender,
         message_id = message_id,
         subject = subject,
     }
+    save_attachments(attachments, sender, inbox_state[filename])
     save_state("inbox.json", inbox_state)
     return 200, {ok = true, filename = filename}
 end
 
+local function delete_inbox_attachments(meta)
+    if not meta.attachments then return end
+    for aname, ameta in pairs(meta.attachments) do
+        if ameta.path and file_exists(ameta.path) then
+            os.remove(ameta.path)
+            log("deleted attachment: %s", aname)
+        end
+    end
+end
+
 local function handle_delete(data)
     local sender = data["from"]
-    local message_id = data.message_id or ""
+    local message_id = data.message_id
+    local attachment_id = data.attachment_id
+
+    -- attachment-specific deletion
+    if attachment_id then
+        local inbox_state = load_state("inbox.json")
+        for filename, meta in pairs(inbox_state) do
+            if meta["from"] == sender and meta.attachments then
+                for aname, ameta in pairs(meta.attachments) do
+                    if ameta.attachment_id == attachment_id then
+                        if ameta.path and file_exists(ameta.path) then
+                            os.remove(ameta.path)
+                            log("deleted attachment: %s (by sender %s)", aname, sender)
+                        end
+                        meta.attachments[aname] = nil
+                        if not next(meta.attachments) then meta.attachments = nil end
+                        save_state("inbox.json", inbox_state)
+                        return 200, {ok = true}
+                    end
+                end
+            end
+        end
+        return 404, {error = "attachment not found"}
+    end
+
+    if not message_id then return 404, {error = "missing message_id"} end
 
     -- sender asking us to delete from our inbox
     local inbox_state = load_state("inbox.json")
@@ -217,6 +325,7 @@ local function handle_delete(data)
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
             end
+            delete_inbox_attachments(meta)
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             return 200, {ok = true}
@@ -250,7 +359,7 @@ local function handle_update_address(data)
     local new_host = data.host or ""
     local new_port = data.port
 
-    local text = read_file(MAIL .. "/contacts")
+    local text = read_file(CONTACTS)
     if not text or text == "" then
         return 404, {error = "sender not in contacts"}
     end
@@ -261,7 +370,7 @@ local function handle_update_address(data)
 
     contacts[sender].host = new_host
     if new_port then contacts[sender].port = new_port end
-    write_file(MAIL .. "/contacts", json.encode(contacts, {indent = true}) .. "\n")
+    write_file(CONTACTS, json.encode(contacts, {indent = true}) .. "\n")
 
     log("updated address for %s: %s:%s", sender, new_host, tostring(new_port))
 
@@ -402,54 +511,125 @@ end
 local function parse_outbox_file(path)
     local text = read_file(path)
     if not text then return nil, nil end
-    local recipients = {}
+
+    -- collect all header lines (to: and attach:)
+    local header_lines = {}
     local pos = 1
     while pos <= #text do
         local line_end = text:find("\n", pos) or #text + 1
         local line = text:sub(pos, line_end - 1)
-        if line:lower():match("^to:") then
-            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
-            if r and r ~= "" then
-                recipients[#recipients + 1] = r
-            end
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:") then
+            header_lines[#header_lines + 1] = line
             pos = line_end + 1
         else
             break
         end
     end
-    if #recipients == 0 then return nil, nil end
-    return recipients, text:sub(pos)
+
+    -- build per-recipient entries: each to: gets all attach: lines after it
+    local entries = {}
+    for i, line in ipairs(header_lines) do
+        if line:lower():match("^to:") then
+            local name = line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if name and name ~= "" then
+                local attachments = {}
+                for j = i + 1, #header_lines do
+                    if header_lines[j]:lower():match("^attach:") then
+                        local fp = header_lines[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+                        if fp and fp ~= "" then
+                            attachments[#attachments + 1] = fp
+                        end
+                    end
+                end
+                entries[#entries + 1] = {name = name, attachments = attachments}
+            end
+        end
+    end
+
+    if #entries == 0 then return nil, nil end
+    return entries, text:sub(pos)
 end
 
 local function remove_recipient_from_file(filepath, recipient)
     local text = read_file(filepath)
     if not text then return 0 end
-    local recipients = {}
+
+    -- parse header lines
+    local header_lines = {}
     local pos = 1
     while pos <= #text do
         local line_end = text:find("\n", pos) or #text + 1
         local line = text:sub(pos, line_end - 1)
-        if line:lower():match("^to:") then
-            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
-            if r and r ~= recipient then
-                recipients[#recipients + 1] = r
-            end
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:") then
+            header_lines[#header_lines + 1] = line
             pos = line_end + 1
         else
             break
         end
     end
     local body = text:sub(pos)
-    if #recipients == 0 then
+
+    -- remove the matching to: line
+    local kept = {}
+    for _, line in ipairs(header_lines) do
+        if line:lower():match("^to:") then
+            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if r ~= recipient then
+                kept[#kept + 1] = line
+            end
+        else
+            kept[#kept + 1] = line
+        end
+    end
+
+    -- remove orphan attach: lines (no to: above them)
+    local cleaned = {}
+    local has_to = false
+    for _, line in ipairs(kept) do
+        if line:lower():match("^to:") then
+            has_to = true
+            cleaned[#cleaned + 1] = line
+        elseif has_to then
+            cleaned[#cleaned + 1] = line
+        end
+    end
+
+    -- count remaining recipients
+    local count = 0
+    for _, line in ipairs(cleaned) do
+        if line:lower():match("^to:") then count = count + 1 end
+    end
+
+    if count == 0 then
         os.remove(filepath)
         return 0
     end
+
     local header = ""
-    for _, r in ipairs(recipients) do
-        header = header .. "to: " .. r .. "\n"
+    for _, line in ipairs(cleaned) do
+        header = header .. line .. "\n"
     end
     write_file(filepath, header .. body)
-    return #recipients
+    return count
+end
+
+local function encode_attachments(filepaths)
+    local result = {}
+    for _, filepath in ipairs(filepaths) do
+        local raw = read_file_binary(filepath)
+        if raw then
+            result[#result + 1] = {
+                filename = filepath:match("([^/]+)$"),
+                attachment_id = uuid(),
+                data = mime.b64(raw),
+            }
+        else
+            log("attachment not found: %s", filepath)
+        end
+    end
+    return result
 end
 
 local function sync_outbox(my_name)
@@ -464,13 +644,21 @@ local function sync_outbox(my_name)
     local ops = {}
 
     for name in pairs(current) do
-        local recipients, body = parse_outbox_file(OUTBOX .. "/" .. name)
+        local entries, body = parse_outbox_file(OUTBOX .. "/" .. name)
         local current_set = {}
-        if recipients then
-            for _, r in ipairs(recipients) do current_set[r] = true end
+        local current_attach = {}  -- name -> {filename -> filepath}
+        if entries then
+            for _, e in ipairs(entries) do
+                current_set[e.name] = true
+                local amap = {}
+                for _, fp in ipairs(e.attachments) do
+                    amap[fp:match("([^/]+)$")] = fp
+                end
+                current_attach[e.name] = amap
+            end
         end
 
-        if not recipients and not state[name] then
+        if not entries and not state[name] then
             log("skipping %s: missing 'to:' header", name)
         else
             if not state[name] then state[name] = {recipients = {}} end
@@ -491,19 +679,56 @@ local function sync_outbox(my_name)
                 end
             end
 
-            -- new recipients
-            if recipients then
-                for _, recipient in ipairs(recipients) do
-                    if not state[name].recipients[recipient] then
-                        if contacts[recipient] then
+            if entries then
+                for _, entry in ipairs(entries) do
+                    local rname = entry.name
+                    if not state[name].recipients[rname] then
+                        -- new recipient: deliver message + attachments
+                        if contacts[rname] then
                             ops[#ops + 1] = {
                                 type = "deliver", filename = name,
-                                recipient = recipient, message_id = uuid(),
+                                recipient = rname, message_id = uuid(),
                                 subject = name, body = body,
-                                contact = contacts[recipient],
+                                contact = contacts[rname],
+                                attach_paths = entry.attachments,
                             }
                         else
-                            log("skipping %s: unknown contact '%s'", name, recipient)
+                            log("skipping %s: unknown contact '%s'", name, rname)
+                        end
+                    elseif contacts[rname] then
+                        -- existing recipient: check attachment changes
+                        local rmeta = state[name].recipients[rname]
+                        local state_att = rmeta.attachments or {}
+                        local cur_att = current_attach[rname] or {}
+
+                        -- new attachments
+                        local new_att = {}
+                        for fname, fpath in pairs(cur_att) do
+                            if not state_att[fname] then
+                                new_att[#new_att + 1] = fpath
+                            end
+                        end
+                        if #new_att > 0 then
+                            ops[#ops + 1] = {
+                                type = "deliver_attachment", filename = name,
+                                recipient = rname,
+                                message_id = rmeta.message_id,
+                                contact = contacts[rname],
+                                attach_paths = new_att,
+                            }
+                        end
+
+                        -- removed attachments
+                        for fname, ameta in pairs(state_att) do
+                            if not cur_att[fname] then
+                                ops[#ops + 1] = {
+                                    type = "delete_attachment", filename = name,
+                                    recipient = rname,
+                                    attachment_name = fname,
+                                    attachment_id = ameta.attachment_id,
+                                    contact = contacts[rname],
+                                }
+                            end
                         end
                     end
                 end
@@ -526,15 +751,28 @@ local function sync_outbox(my_name)
         end
     end
 
-    -- Phase 2: execute all operations in parallel
+    -- Phase 2: encode attachments and build requests
     if #ops > 0 then
         local requests = {}
         for i, op in ipairs(ops) do
             local path, data
             if op.type == "deliver" then
                 path = "/deliver"
+                local encoded = encode_attachments(op.attach_paths or {})
                 data = {["from"] = my_name, token = op.contact.token,
                         subject = op.subject, message_id = op.message_id, body = op.body}
+                if #encoded > 0 then data.attachments = encoded end
+                op.encoded_attachments = encoded
+            elseif op.type == "deliver_attachment" then
+                path = "/deliver"
+                local encoded = encode_attachments(op.attach_paths or {})
+                data = {["from"] = my_name, token = op.contact.token,
+                        message_id = op.message_id, attachments = encoded}
+                op.encoded_attachments = encoded
+            elseif op.type == "delete_attachment" then
+                path = "/delete"
+                data = {["from"] = my_name, token = op.contact.token,
+                        attachment_id = op.attachment_id}
             else
                 path = "/delete"
                 data = {["from"] = my_name, token = op.contact.token,
@@ -560,13 +798,42 @@ local function sync_outbox(my_name)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
-                        state[op.filename].recipients[op.recipient] = {message_id = op.message_id}
+                        local att_state = {}
+                        for _, att in ipairs(op.encoded_attachments or {}) do
+                            att_state[att.filename] = {attachment_id = att.attachment_id}
+                        end
+                        state[op.filename].recipients[op.recipient] = {
+                            message_id = op.message_id,
+                            attachments = next(att_state) and att_state or nil,
+                        }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
                     did_work = true
                 else
                     log("failed to send %s to %s", op.filename, op.recipient)
                 end
+            elseif op.type == "deliver_attachment" then
+                if results[i].ok then
+                    if state[op.filename] and state[op.filename].recipients[op.recipient] then
+                        local rmeta = state[op.filename].recipients[op.recipient]
+                        if not rmeta.attachments then rmeta.attachments = {} end
+                        for _, att in ipairs(op.encoded_attachments or {}) do
+                            rmeta.attachments[att.filename] = {attachment_id = att.attachment_id}
+                        end
+                    end
+                    log("sent attachments to %s: %s", op.recipient, op.filename)
+                    did_work = true
+                end
+            elseif op.type == "delete_attachment" then
+                if state[op.filename] and state[op.filename].recipients[op.recipient] then
+                    local rmeta = state[op.filename].recipients[op.recipient]
+                    if rmeta.attachments then
+                        rmeta.attachments[op.attachment_name] = nil
+                        if not next(rmeta.attachments) then rmeta.attachments = nil end
+                    end
+                end
+                log("notified %s of attachment removal: %s", op.recipient, op.attachment_name)
+                did_work = true
             elseif op.type == "notify_deletion" then
                 log("notified %s of deletion: %s", op.recipient, op.filename)
                 did_work = true
@@ -744,7 +1011,8 @@ end
 -- ============================================================
 
 local function main()
-    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '"')
+    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. PACKAGES .. '"')
+    write_file(STATE .. "/new-mail", "")
 
     local contacts = load_contacts()
     local me = contacts["me"] or {}
