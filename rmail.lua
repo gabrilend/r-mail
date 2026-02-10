@@ -20,6 +20,9 @@ mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
 # notify contacts when your IP changes
 notify_ip_change = true
 
+# use TLS-PSK encryption for all connections
+encrypt = false
+
 # script hooks (all called with a temp file path as first argument)
 
 # runs while a received message is still in RAM, before writing to disk
@@ -76,6 +79,7 @@ local ON_RECEIVE       = config.on_receive
 local ON_PACKAGE       = config.on_package
 local ON_SEND          = config.on_send
 local ON_DELETE        = config.on_delete
+local ENCRYPT          = config.encrypt == true
 
 -- ============================================================
 
@@ -107,6 +111,22 @@ if not ok2 then
 end
 
 local mime = require("mime")  -- base64 encoding (part of luasocket)
+
+local ssl
+if ENCRYPT then
+    local ok3, _ssl = pcall(require, "ssl")
+    if not ok3 then
+        io.stderr:write("error: luasec not found (required when encrypt = true in config)\n")
+        io.stderr:write("       run: scripts/install-deps.sh\n")
+        os.exit(1)
+    end
+    ssl = _ssl
+    if not ssl.config or not ssl.config.capabilities or not ssl.config.capabilities.psk then
+        io.stderr:write("error: luasec was not compiled with PSK support\n")
+        io.stderr:write("       run: scripts/install-deps.sh\n")
+        os.exit(1)
+    end
+end
 
 -- ============================================================
 -- Paths & file helpers
@@ -468,6 +488,102 @@ end
 -- Sync (outgoing)
 -- ============================================================
 
+local function http_send_request(e)
+    e.conn:settimeout(3)
+    local sent = e.conn:send(
+        "POST " .. e.req.path .. " HTTP/1.1\r\n" ..
+        "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
+        "Content-Type: application/json\r\n" ..
+        "Content-Length: " .. #e.req.payload .. "\r\n" ..
+        "Connection: close\r\n\r\n" ..
+        e.req.payload)
+    if sent then
+        e.phase = "sent"
+    else
+        e.phase = "done"
+        e.conn:close()
+    end
+end
+
+local function http_read_response(e)
+    e.conn:settimeout(3)
+    local status_line = e.conn:receive("*l")
+    if status_line then
+        local status = tonumber(status_line:match("(%d+)"))
+        local hdrs = {}
+        while true do
+            local line = e.conn:receive("*l")
+            if not line or line == "" then break end
+            local k, v = line:match("^(.-):%s*(.+)$")
+            if k then hdrs[k:lower()] = v end
+        end
+        local resp_body = ""
+        local len = tonumber(hdrs["content-length"] or 0)
+        if len > 0 then resp_body = e.conn:receive(len) or "" end
+        if resp_body ~= "" then
+            local ok2, dec = pcall(json.decode, resp_body)
+            if ok2 then e.data = dec or {} end
+        end
+        e.ok = (status == 200)
+    end
+    e.phase = "done"
+    e.conn:close()
+end
+
+local function http_start_tls(e, lookup)
+    local ctx = ssl.newcontext({
+        mode = "client",
+        protocol = "tlsv1_2",
+        ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
+        psk = function(hint, max_identity_len, max_psk_len)
+            return e.req.psk_identity, e.req.psk_key
+        end,
+    })
+    if not ctx then
+        e.phase = "done"
+        e.conn:close()
+        return
+    end
+    local old_conn = e.conn
+    local ssl_conn = ssl.wrap(old_conn, ctx)
+    if not ssl_conn then
+        e.phase = "done"
+        old_conn:close()
+        return
+    end
+    lookup[old_conn] = nil
+    e.conn = ssl_conn
+    lookup[ssl_conn] = e
+    ssl_conn:settimeout(0)
+    local hok, herr = ssl_conn:dohandshake()
+    if hok then
+        http_send_request(e)
+    elseif herr == "wantread" then
+        e.phase = "handshaking"
+        e.want = "read"
+    elseif herr == "wantwrite" then
+        e.phase = "handshaking"
+        e.want = "write"
+    else
+        e.phase = "done"
+        ssl_conn:close()
+    end
+end
+
+local function http_retry_handshake(e)
+    local hok, herr = e.conn:dohandshake()
+    if hok then
+        http_send_request(e)
+    elseif herr == "wantread" then
+        e.want = "read"
+    elseif herr == "wantwrite" then
+        e.want = "write"
+    else
+        e.phase = "done"
+        e.conn:close()
+    end
+end
+
 local function http_post_batch(requests)
     if #requests == 0 then return {} end
 
@@ -496,6 +612,12 @@ local function http_post_batch(requests)
             if e.phase == "connecting" then
                 sendt[#sendt + 1] = e.conn
                 any = true
+            elseif e.phase == "handshaking" and e.want == "write" then
+                sendt[#sendt + 1] = e.conn
+                any = true
+            elseif e.phase == "handshaking" and e.want == "read" then
+                recvt[#recvt + 1] = e.conn
+                any = true
             elseif e.phase == "sent" then
                 recvt[#recvt + 1] = e.conn
                 any = true
@@ -512,56 +634,28 @@ local function http_post_batch(requests)
             #sendt > 0 and sendt or nil,
             math.min(remaining, 0.5))
 
-        -- connected sockets: send request immediately
         if writable then
             for _, conn in ipairs(writable) do
                 local e = lookup[conn]
                 if e and e.phase == "connecting" then
-                    conn:settimeout(3)
-                    local sent = conn:send(
-                        "POST " .. e.req.path .. " HTTP/1.1\r\n" ..
-                        "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
-                        "Content-Type: application/json\r\n" ..
-                        "Content-Length: " .. #e.req.payload .. "\r\n" ..
-                        "Connection: close\r\n\r\n" ..
-                        e.req.payload)
-                    if sent then
-                        e.phase = "sent"
+                    if ENCRYPT and e.req.psk_identity then
+                        http_start_tls(e, lookup)
                     else
-                        e.phase = "done"
-                        conn:close()
+                        http_send_request(e)
                     end
+                elseif e and e.phase == "handshaking" then
+                    http_retry_handshake(e)
                 end
             end
         end
 
-        -- readable sockets: read response
         if readable then
             for _, conn in ipairs(readable) do
                 local e = lookup[conn]
-                if e and e.phase == "sent" then
-                    conn:settimeout(3)
-                    local status_line = conn:receive("*l")
-                    if status_line then
-                        local status = tonumber(status_line:match("(%d+)"))
-                        local hdrs = {}
-                        while true do
-                            local line = conn:receive("*l")
-                            if not line or line == "" then break end
-                            local k, v = line:match("^(.-):%s*(.+)$")
-                            if k then hdrs[k:lower()] = v end
-                        end
-                        local resp_body = ""
-                        local len = tonumber(hdrs["content-length"] or 0)
-                        if len > 0 then resp_body = conn:receive(len) or "" end
-                        if resp_body ~= "" then
-                            local ok2, dec = pcall(json.decode, resp_body)
-                            if ok2 then e.data = dec or {} end
-                        end
-                        e.ok = (status == 200)
-                    end
-                    e.phase = "done"
-                    conn:close()
+                if e and e.phase == "handshaking" then
+                    http_retry_handshake(e)
+                elseif e and e.phase == "sent" then
+                    http_read_response(e)
                 end
             end
         end
@@ -584,6 +678,7 @@ local function http_post(host, port, path, data, my_name, token)
     local results = http_post_batch({{
         host = host, port = port, path = path,
         payload = json.encode(data),
+        psk_identity = my_name, psk_key = token,
     }})
     return results[1].ok, results[1].data
 end
@@ -867,6 +962,7 @@ local function sync_outbox(my_name)
             requests[i] = {
                 host = op.contact.host, port = op.contact.port,
                 path = path, payload = json.encode(data),
+                psk_identity = my_name, psk_key = op.contact.token,
             }
         end
 
@@ -984,6 +1080,7 @@ local function sync_inbox(my_name)
                     ["from"] = my_name, token = op.contact.token,
                     message_id = op.message_id,
                 }),
+                psk_identity = my_name, psk_key = op.contact.token,
             }
         end
         http_post_batch(requests)
@@ -1080,6 +1177,7 @@ local function sync_address(my_name, port)
                     ["from"] = my_name, token = contact.token,
                     host = new_ip, port = port, notify = NOTIFY_IP_CHANGE,
                 }),
+                psk_identity = my_name, psk_key = contact.token,
             }
             names[#names + 1] = name
         end
@@ -1123,6 +1221,27 @@ local function main()
 
     log("rmail starting: name=%s port=%d", my_name, port)
     log("mail dir: %s", MAIL)
+    if ENCRYPT then log("TLS-PSK encryption enabled") end
+
+    local server_ssl_ctx
+    if ENCRYPT then
+        server_ssl_ctx = ssl.newcontext({
+            mode = "server",
+            protocol = "tlsv1_2",
+            ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
+            psk = function(identity, max_psk_len)
+                local c = load_contacts()
+                if c[identity] and c[identity].token then
+                    return c[identity].token
+                end
+                return nil
+            end,
+        })
+        if not server_ssl_ctx then
+            log("error: failed to create TLS context")
+            os.exit(1)
+        end
+    end
 
     local server = assert(socket.bind("0.0.0.0", port))
     server:settimeout(1)
@@ -1137,6 +1256,24 @@ local function main()
 
     while true do
         local client = server:accept()
+        if client and ENCRYPT then
+            local ssl_client = ssl.wrap(client, server_ssl_ctx)
+            if ssl_client then
+                ssl_client:settimeout(5)
+                local hok, herr = ssl_client:dohandshake()
+                if hok then
+                    client = ssl_client
+                else
+                    log("TLS handshake failed: %s", tostring(herr))
+                    ssl_client:close()
+                    client = nil
+                end
+            else
+                log("TLS wrap failed")
+                client:close()
+                client = nil
+            end
+        end
         if client then
             local ok, err = pcall(function()
                 local method, path, headers, body = parse_request(client)
