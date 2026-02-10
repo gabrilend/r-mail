@@ -1,0 +1,236 @@
+Android port — r-mail
+
+The android app is a mobile frontend for a linux daemon. It
+communicates using the same protocol but pulls messages instead
+of listening for pushes. Every user still needs a linux daemon
+running somewhere (home machine, VPS, etc.) as their always-on
+mailbox.
+
+Android-to-Android routing:
+  Alice's phone -> Alice's daemon -> Bob's daemon <- Bob's phone
+  Standalone android-to-android (no daemon) is not feasible due
+  to carrier-grade NAT (CGNAT). NAT hole punching (UDP/STUN) is
+  unreliable through CGNAT. Tor hidden services could bypass NAT
+  but add a large dependency. For now, a daemon is required.
+
+
+ARCHITECTURE
+
+  The android app does NOT need a "poll" contact type or any
+  special daemon-side config. The existing protocol already
+  handles it:
+
+  - Undelivered messages sit in the sender's outbox and retry
+    each sync cycle. The daemon already does this.
+  - The /poll endpoint lets the android app pull those pending
+    messages. Once pulled, they're marked delivered in outbox
+    state and the daemon stops retrying.
+  - Failed push attempts to android devices don't speed up the
+    sync timer (did_work is only set on success).
+  - The daemon now uses socket.select() for parallel outgoing
+    connections, so multiple unreachable contacts hit one shared
+    timeout instead of sequential timeouts.
+
+
+LINUX DAEMON CHANGES
+
+  New endpoint: POST /poll
+    Request:  {"from": "alice", "token": "secret"}
+    Response: {
+      "messages": [
+        {"subject": "hello", "message_id": "uuid", "body": "text"}
+      ],
+      "deletions": ["msg-id-1", "msg-id-2"]
+    }
+
+    The daemon checks outbox state for undelivered messages to
+    this contact, returns them, and marks them delivered. Also
+    returns any pending deletions.
+
+  Pending deletion queue
+    Currently delete notifications are fire-and-forget. For
+    contacts that poll, deletions need to be queued in state
+    until the next poll picks them up.
+
+    Stored in .state/pending-deletions.json:
+      {"alice": ["msg-id-1", "msg-id-2"], "bob": ["msg-id-3"]}
+
+    When the sender deletes an outbox file (or removes a to: line),
+    if the push notification to the recipient fails, queue the
+    message_id here. The /poll endpoint returns and clears these.
+
+  No "poll" field needed in contacts
+    The daemon just tries to push. If push fails, the message
+    stays pending. If the contact polls, they get it that way.
+    The only cost is wasted connection timeouts on push attempts,
+    which are now parallel (socket.select) and bounded at 8s total
+    regardless of contact count.
+
+
+ANDROID APP
+
+  Language: C + HTML5 + WASM
+    Core logic (networking, polling, state) written in C,
+    compiled to WASM. UI in plain HTML5 (no CSS, no JavaScript).
+    Wrapped in a minimal Android WebView shell (~50 lines Kotlin).
+    The same WASM build also runs in a desktop browser.
+
+  Core
+    - Local inbox/outbox stored in app private storage
+    - Contacts/secrets management
+    - Background polling via Android WorkManager (survives doze)
+    - Adaptive poll timer per contact:
+      starts at 5 min, shrinks on new messages, grows on idle
+    - All timers reset on app/phone restart
+
+  Sending
+    - User writes message in app, picks contact(s)
+    - App sends POST /deliver to each recipient's daemon
+    - Outgoing connections — no NAT issues
+    - Retry queue for failed sends
+
+  Receiving
+    - WorkManager job polls each contact's daemon via POST /poll
+    - New messages saved to local inbox
+    - Deletions applied to local inbox
+    - Android notification for new messages
+
+  Deletion
+    - User deletes from inbox -> app sends POST /delete to
+      sender's daemon (outgoing, no NAT issue)
+    - Sender deletes -> next poll returns deletion ID -> app
+      removes locally
+
+  Self-hosting web UI
+    - The app hosts the HTML5 interface on a local port
+    - Accessible at localhost:8025 on the phone
+    - If the phone's port is forwarded on wifi router, friends
+      can visit the interface from their devices on the LAN
+    - Same interface the daemon could serve on linux
+
+  UI
+    - Inbox list (sender, subject, preview)
+    - Message view (plain text body)
+    - Compose screen (to: field, subject/filename, body)
+    - Contacts screen (add/edit/remove, host/port/token)
+    - Settings (poll intervals, notification preferences)
+
+  Storage
+    - SQLite for messages and state
+    - Encrypted storage for contacts/tokens
+
+
+BROWSER UI (shared between android and linux)
+
+  The linux daemon already serves HTTP. It could serve an HTML5
+  interface on the same port, replacing the JSON health check on
+  GET / with a full web UI (move health check to GET /status).
+
+  This gives linux users a browser-based option:
+    - Visit localhost:8025 to read/write/delete messages
+    - Same HTML5+WASM code used by the android app
+    - No new dependencies — the daemon is already an HTTP server
+    - Could be toggled with a config option (WEB_UI = true)
+
+  The web UI talks to the daemon via the existing JSON endpoints
+  (/deliver, /delete, /poll). The only new thing is serving
+  static files (the HTML and WASM).
+
+
+PROTOCOL SUMMARY
+
+  Existing (no changes):
+    POST /deliver  — send a message
+    POST /delete   — notify of deletion
+    GET /          — health check (or web UI)
+
+  New:
+    POST /poll     — pull pending messages and deletions
+
+  The android app uses /deliver and /delete as a client (outgoing).
+  It uses /poll to receive (also outgoing — it initiates).
+  It never needs to listen on a port.
+
+
+OPEN QUESTIONS
+
+  - How to handle the initial sync when the app is first set up?
+    Poll with no "since" param could return all undelivered
+    messages (i.e. everything pending for this contact).
+
+  - Should the linux daemon auto-detect poll contacts (if someone
+    polls you, mark them as poll-capable) or just always queue
+    deletions for everyone? Queuing for everyone is simpler and
+    avoids the distinction entirely.
+
+  - How much of the C/WASM core can be shared between the android
+    app and the linux browser UI? Ideally all of it — the same
+    .wasm file runs in both contexts.
+
+  - For the web UI: authentication? Currently the daemon trusts
+    localhost. If serving a web UI, it should probably only bind
+    to 127.0.0.1 for the UI, or require a local auth token.
+
+
+NAT RESEARCH NOTES
+
+  Why phones can't receive connections:
+
+  Phones sit behind carrier-grade NAT (CGNAT). The carrier
+  assigns the phone a private IP (e.g. 10.x.x.x) and many
+  phones share one public IP. There's no router to configure
+  port forwarding on — the carrier controls the NAT.
+
+  Approaches considered and rejected:
+
+  1. Phone wifi-to-mobile-data loopback
+     Idea: phone sends a packet over wifi to its own cellular IP,
+     tricking the cellular NAT into creating an inbound mapping.
+     Why it fails:
+     - The OS kernel routes traffic to its own IP via loopback
+       internally. The packet never leaves the phone, never
+       touches the cellular NAT, no mapping is created.
+     - Even if forced out wifi, the cellular IP is private
+       (behind CGNAT). The wifi network has no route to it.
+     - NAT mappings are destination-specific. A mapping created
+       by sending to 1.2.3.4:9000 only allows replies from
+       1.2.3.4:9000, not arbitrary inbound connections.
+
+  2. Spoofing local IP / MAC address
+     Idea: phone spoofs a LAN IP or MAC to trick the carrier
+     NAT into thinking it's local traffic.
+     Why it fails:
+     - Cellular networks don't use Ethernet. Device identity is
+       at the radio/SIM/IMEI level, not MAC.
+     - Even on wifi, spoofing a local IP just impersonates
+       another LAN device. Doesn't create inbound NAT mappings
+       from the internet.
+
+  3. UDP hole punching (how games/WebRTC do it)
+     Both sides send packets to each other simultaneously,
+     creating NAT mappings that let the other's packet through.
+     Requires a STUN/signaling server to coordinate timing
+     and exchange addresses. Unreliable through CGNAT / symmetric
+     NAT, which is what most carriers use.
+
+  4. Hamachi / Tailscale / ZeroTier approach
+     These create a VPN tunnel. Every client connects OUTWARD
+     to a central coordination server. The server brokers P2P
+     connections (via hole punching) and relays traffic when
+     P2P fails. A virtual network adapter makes it look like
+     a LAN. This works, but requires a central server.
+
+  What actually works:
+
+  - Central relay server (both sides connect outward to it)
+  - IPv6 (no NAT at all, globally routable — but not universal)
+  - Tor hidden services (.onion, NAT-transparent, but heavy)
+  - Just having a linux daemon with an open port (current design)
+
+  Conclusion:
+
+  The r-mail design already solves this: users share public IPs
+  and open ports manually. The android app is a frontend for a
+  linux daemon that has an open port. Standalone android-to-android
+  without any server is not feasible with current internet
+  infrastructure unless both sides have IPv6.
