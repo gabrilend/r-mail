@@ -20,13 +20,23 @@ mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
 # notify contacts when your IP changes
 notify_ip_change = true
 
-# script hooks (all called with filepath as first argument)
+# script hooks (all called with a temp file path as first argument)
+
+# runs while a received message is still in RAM, before writing to disk
+# stdout replaces the message body written to disk
+# on_receive_raw = /path/to/on-receive-raw.sh
 
 # runs immediately after a message is written to inbox on disk
 # on_receive = /path/to/on-message.sh
 
 # runs immediately after an attachment is written to packages/ on disk
 # on_package = /path/to/on-package.sh
+
+# runs before sending a message from outbox (stdout replaces body)
+# on_send = /path/to/on-send.sh
+
+# runs when a delete request is received
+# on_delete = /path/to/on-delete.sh
 ]]
 
 local function load_config()
@@ -61,8 +71,11 @@ local PACKAGES = MAIL .. "/packages"
 
 local LIBS             = config.libs
 local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
+local ON_RECEIVE_RAW   = config.on_receive_raw
 local ON_RECEIVE       = config.on_receive
 local ON_PACKAGE       = config.on_package
+local ON_SEND          = config.on_send
+local ON_DELETE        = config.on_delete
 
 -- ============================================================
 
@@ -154,6 +167,20 @@ end
 
 local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function run_hook(script, data)
+    local tmp = os.tmpname()
+    write_file(tmp, data)
+    local handle = io.popen(script .. " " .. shell_quote(tmp))
+    if not handle then
+        os.remove(tmp)
+        return nil
+    end
+    local output = handle:read("*a")
+    handle:close()
+    os.remove(tmp)
+    return output
 end
 
 local function uuid()
@@ -271,7 +298,7 @@ local function save_attachments(attachments, sender, inbox_meta)
     end
 end
 
-local function handle_deliver(data)
+local function handle_deliver(data, raw_request)
     local sender = data["from"]
     local subject = data.subject or "untitled"
     local message_id = data.message_id or uuid()
@@ -299,6 +326,11 @@ local function handle_deliver(data)
             filename = subject .. "-from-" .. sender
             target = INBOX .. "/" .. filename
         end
+    end
+
+    if ON_RECEIVE_RAW then
+        local transformed = run_hook(ON_RECEIVE_RAW, raw_request)
+        if transformed and transformed ~= "" then body = transformed end
     end
 
     write_file(target, body)
@@ -361,6 +393,10 @@ local function handle_delete(data)
     local inbox_state = load_state("inbox.json")
     for filename, meta in pairs(inbox_state) do
         if meta.message_id == message_id and meta["from"] == sender then
+            if ON_DELETE then
+                local content = read_file(INBOX .. "/" .. filename) or ""
+                run_hook(ON_DELETE, "from: " .. sender .. "\n" .. content)
+            end
             if file_exists(INBOX .. "/" .. filename) then
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
@@ -378,6 +414,10 @@ local function handle_delete(data)
         if meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.message_id == message_id and recipient == sender then
+                    if ON_DELETE then
+                        local _, file_body = parse_outbox_file(OUTBOX .. "/" .. filename)
+                        run_hook(ON_DELETE, "to: " .. recipient .. "\n" .. (file_body or ""))
+                    end
                     meta.recipients[recipient] = nil
                     local remaining = remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     log("removed recipient %s from %s (they deleted)", recipient, filename)
@@ -798,9 +838,15 @@ local function sync_outbox(my_name)
             local path, data
             if op.type == "deliver" then
                 path = "/deliver"
+                local send_body = op.body
+                if ON_SEND then
+                    local hook_input = "to: " .. op.recipient .. "\n" .. (op.body or "")
+                    local transformed = run_hook(ON_SEND, hook_input)
+                    if transformed and transformed ~= "" then send_body = transformed end
+                end
                 local encoded = encode_attachments(op.attach_paths or {})
                 data = {["from"] = my_name, token = op.contact.token,
-                        subject = op.subject, message_id = op.message_id, body = op.body}
+                        subject = op.subject, message_id = op.message_id, body = send_body}
                 if #encoded > 0 then data.attachments = encoded end
                 op.encoded_attachments = encoded
             elseif op.type == "deliver_attachment" then
@@ -1101,7 +1147,7 @@ local function main()
                     if not auth_check(data) then
                         send_response(client, 403, {error = "forbidden"})
                     elseif path == "/deliver" then
-                        local s, r = handle_deliver(data)
+                        local s, r = handle_deliver(data, body)
                         send_response(client, s, r)
                     elseif path == "/delete" then
                         local s, r = handle_delete(data)
