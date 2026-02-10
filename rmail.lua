@@ -2,29 +2,67 @@
 -- rmail - file-based messaging daemon
 
 -- ============================================================
--- Configuration (edit these)
+-- Configuration (loaded from ~/.config/rmail/config)
 -- ============================================================
 
-local MAIL     = "/home/ritz/mail"
-local INBOX    = MAIL .. "/inbox"       -- received messages appear here
-local OUTBOX   = MAIL .. "/outbox"      -- write files here to send
-local STATE    = MAIL .. "/.state"      -- sync tracking (managed by daemon)
-local CONTACTS = MAIL .. "/contacts"    -- identity + address book
-local PACKAGES = MAIL .. "/packages"    -- received attachments
+local CONFIG_DIR  = (os.getenv("HOME") or "/tmp") .. "/.config/rmail"
+local CONFIG_PATH = CONFIG_DIR .. "/config"
 
-local LIBS   = nil    -- extra libs path (e.g. "/home/you/lua-libs")
-                      -- if set, searched before the bundled libs/ directory
+local DEFAULT_CONFIG = [[
+# rmail configuration
 
-local NOTIFY_IP_CHANGE = true   -- drop a message in contacts' inboxes when IP changes
-                                -- (IP detection and contact updates always happen)
+# path to your mailbox directory
+mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
 
-local ON_RECEIVE = nil   -- script to run when a message arrives
-                         -- called with filepath as first argument
-                         -- e.g. "/path/to/scripts/on-message.sh"
+# extra lua libs path (searched before bundled libs/)
+# libs = /path/to/lua-libs
 
-local ON_PACKAGE = nil   -- script to run when an attachment arrives
-                         -- called with filepath as first argument
-                         -- e.g. "/path/to/scripts/on-package.sh"
+# notify contacts when your IP changes
+notify_ip_change = true
+
+# script hooks (all called with filepath as first argument)
+
+# runs immediately after a message is written to inbox on disk
+# on_receive = /path/to/on-message.sh
+
+# runs immediately after an attachment is written to packages/ on disk
+# on_package = /path/to/on-package.sh
+]]
+
+local function load_config()
+    local f = io.open(CONFIG_PATH, "r")
+    if not f then return {} end
+    local cfg = {}
+    for line in f:lines() do
+        line = line:match("^%s*(.-)%s*$")
+        if line ~= "" and line:sub(1, 1) ~= "#" then
+            local key, value = line:match("^(%S+)%s*=%s*(.+)$")
+            if key and value then
+                value = value:match("^(.-)%s*$")
+                if value == "true" then value = true
+                elseif value == "false" then value = false
+                end
+                cfg[key] = value
+            end
+        end
+    end
+    f:close()
+    return cfg
+end
+
+local config = load_config()
+
+local MAIL     = config.mail or (os.getenv("HOME") .. "/mail")
+local INBOX    = MAIL .. "/inbox"
+local OUTBOX   = MAIL .. "/outbox"
+local STATE    = MAIL .. "/.state"
+local CONTACTS = MAIL .. "/contacts"
+local PACKAGES = MAIL .. "/packages"
+
+local LIBS             = config.libs
+local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
+local ON_RECEIVE       = config.on_receive
+local ON_PACKAGE       = config.on_package
 
 -- ============================================================
 
@@ -32,15 +70,17 @@ local ON_PACKAGE = nil   -- script to run when an attachment arrives
 local script_dir = arg[0]:match("(.*/)") or "./"
 if LIBS then
     package.path = LIBS .. "/?.lua;" .. script_dir .. "libs/?.lua;" .. package.path
+    package.cpath = LIBS .. "/?.so;" .. script_dir .. "libs/?.so;" .. package.cpath
 else
     package.path = script_dir .. "libs/?.lua;" .. package.path
+    package.cpath = script_dir .. "libs/?.so;" .. package.cpath
 end
 
 local ok, json = pcall(require, "dkjson")
 if not ok then
     io.stderr:write("error: dkjson.lua not found.\n")
     io.stderr:write("       place it at: " .. script_dir .. "libs/dkjson.lua\n")
-    io.stderr:write("       or set LIBS at the top of rmail.lua to a directory containing it\n")
+    io.stderr:write("       or set libs in ~/.config/rmail/config to a directory containing it\n")
     os.exit(1)
 end
 
@@ -49,7 +89,7 @@ if not ok2 then
     io.stderr:write("error: luasocket not found.\n")
     io.stderr:write("       install it with your package manager or luarocks:\n")
     io.stderr:write("         luarocks install luasocket\n")
-    io.stderr:write("       or set LIBS at the top of rmail.lua to a directory containing it\n")
+    io.stderr:write("       or set libs in ~/.config/rmail/config to a directory containing it\n")
     os.exit(1)
 end
 
@@ -1010,8 +1050,24 @@ end
 -- Main
 -- ============================================================
 
+local function ensure_config()
+    os.execute('mkdir -p "' .. CONFIG_DIR .. '"')
+    local f = io.open(CONFIG_PATH, "r")
+    if f then
+        f:close()
+    else
+        write_file(CONFIG_PATH, DEFAULT_CONFIG)
+        log("created default config: %s", CONFIG_PATH)
+    end
+    -- symlink in project directory
+    os.execute('ln -sf "' .. CONFIG_PATH .. '" "' .. script_dir .. 'config"')
+    -- symlink in mail directory (next to contacts)
+    os.execute('ln -sf "' .. CONFIG_PATH .. '" "' .. MAIL .. '/config"')
+end
+
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. PACKAGES .. '"')
+    ensure_config()
     write_file(STATE .. "/new-mail", "")
 
     local contacts = load_contacts()
