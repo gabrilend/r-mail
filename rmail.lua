@@ -541,7 +541,6 @@ local function save_attachments(attachments, sender, inbox_meta)
         end
         local raw = mime.unb64(att.data)
         write_file_binary(target, raw)
-        os.execute("chmod 444 " .. shell_quote(target))
         inbox_meta.attachments[att_filename] = {
             attachment_id = att.attachment_id,
             path = target,

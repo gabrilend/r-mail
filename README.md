@@ -40,7 +40,7 @@ The daemon picks it up and delivers it to each recipient's inbox as a plain text
 Deleting works both ways:
 
 - **Recipient deletes** from inbox — the sender's copy has that `to:` line removed.
-- **Sender deletes** the outbox file — all recipients are notified to remove it.
+- **Sender deletes** the outbox file — all recipients are notified to automatically remove it.
 - **Sender removes a `to:` line** — that specific recipient's copy is deleted, others are unaffected.
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
@@ -61,13 +61,14 @@ Both alice and bob get `photo.jpg`. To send an attachment to only some recipient
 
 ```
 to: alice
+to: sarah
 attach: /path/to/notes.pdf
 to: bob
 
-Alice gets the PDF, bob just gets the message body.
+Alice and Sarah get the PDF, bob just gets the message body.
 ```
 
-Attachments are base64-encoded and sent inline with the message. The recipient gets them in `~/mail/attachments/` with read-only permissions.
+Attachments are base64-encoded and sent inline with the message. The recipient gets them in `~/mail/attachments/`.
 
 Removing an `attach:` line from the outbox file deletes that attachment from the recipient's side. Deleting the whole outbox file removes everything.
 
