@@ -10,46 +10,71 @@ local CONFIG_PATH = CONFIG_DIR .. "/config"
 
 local DEFAULT_CONFIG = [[
 # rmail configuration
+# see README.md for full documentation
 
-# path to your mailbox directory
+# ---- directories ----
+
+# path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
 mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
 
-# extra lua libs path (searched before bundled libs/)
+# extra lua module path — searched before the bundled libs/ directory.
+# use this if you installed luasocket/luasec/dkjson somewhere non-standard.
 # libs = /path/to/lua-libs
 
-# notify contacts when your IP changes
+# ---- networking ----
+
+# on startup, rmail checks your public IP using multiple services.
+# if a change is detected and confirmed, all contacts are notified
+# and their contacts file is updated automatically.
 notify_ip_change = true
 
-# use TLS-PSK encryption for all connections
+# ---- encryption ----
+
+# encrypt all peer connections with TLS-PSK (pre-shared key).
+# both sides must have encrypt = true and the same token in their contacts file.
+# requires luasec compiled with PSK support — run scripts/install-deps.sh to set up.
 encrypt = false
 
-# automatic port forwarding via UPnP/NAT-PMP (default: off)
-# WARNING: these protocols are insecure. any device on your LAN can open ports
-# on your router without authentication. consider disabling UPnP/NAT-PMP on
-# your router and using manual port forwarding instead.
+# ---- NAT / port forwarding ----
+
+# attempt automatic port forwarding via UPnP or NAT-PMP on startup.
+# WARNING: these protocols are insecure — any device on your LAN can open ports
+# on your router without authentication. malware commonly exploits this.
+# prefer manual port forwarding through your router's admin panel.
+# requires upnpc (miniupnpc) and/or natpmpc (libnatpmp) to be installed.
 # auto_port_forward = false
 
 # set to true if you manually configured port forwarding on your router.
-# this skips the startup security check for insecure NAT protocols.
+# this suppresses the startup security probe that checks whether your router
+# has UPnP/NAT-PMP enabled and warns your contacts if it does.
 # manual_port_forward = false
 
-# script hooks (all called with a temp file path as first argument)
+# ---- hooks ----
+# hooks let you run scripts in response to message events.
+# each hook receives a temp file as its first argument containing event data.
+# hooks run asynchronously (in the background) unless noted otherwise.
 
-# runs while a received message is still in RAM, before writing to disk
-# stdout replaces the message body written to disk
-# on_receive_raw = /path/to/on-receive-raw.sh
+# on_receive_raw: runs while a received message is still in RAM, before
+# writing to disk. the script's stdout REPLACES the message body that gets
+# saved. runs synchronously. use for content filtering or transformation.
+# on_receive_raw = /path/to/script.sh
 
-# runs immediately after a message is written to inbox on disk
-# on_receive = /path/to/on-message.sh
+# on_receive: runs immediately after a message is written to inbox/.
+# the temp file contains the path to the saved message.
+# on_receive = /path/to/script.sh
 
-# runs immediately after an attachment is written to attachments/ on disk
-# on_package = /path/to/on-package.sh
+# on_package: runs immediately after an attachment is saved to attachments/.
+# the temp file contains the path to the saved attachment.
+# on_package = /path/to/script.sh
 
-# runs before sending a message from outbox (stdout replaces body)
-# on_send = /path/to/on-send.sh
+# on_send: runs before sending a message from outbox/. the temp file contains
+# "to: <recipient>\n<body>". stdout REPLACES the body sent to that recipient.
+# runs synchronously. use for per-recipient message transformation.
+# on_send = /path/to/script.sh
 
-# runs when a delete request is received
-# on_delete = /path/to/on-delete.sh
+# on_delete: runs when a message is deleted (either by sender or recipient).
+# the temp file contains "from: <sender>\n<body>" or "to: <recipient>\n<body>".
+# on_delete = /path/to/script.sh
 ]]
 
 local function load_config()
