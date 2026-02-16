@@ -67,9 +67,10 @@ encrypt = false
 # the temp file contains the path to the saved attachment.
 # on_package = /path/to/script.sh
 
-# on_send: runs before sending a message from outbox/. the temp file contains
-# "to: <recipient>\n<body>". stdout REPLACES the body sent to that recipient.
-# runs synchronously. use for per-recipient message transformation.
+# on_send: runs once per recipient before sending a message from outbox/.
+# called as: script <tmpfile> <recipient_name>
+# the temp file contains the message body. stdout REPLACES the body sent
+# to that recipient. runs synchronously. use for per-recipient transformation.
 # on_send = /path/to/script.sh
 
 # on_delete: runs when a message is deleted (either by sender or recipient).
@@ -226,10 +227,14 @@ local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
-local function run_hook(script, data)
+local function run_hook(script, data, ...)
     local tmp = os.tmpname()
     write_file(tmp, data)
-    local handle = io.popen(script .. " " .. shell_quote(tmp))
+    local args = shell_quote(tmp)
+    for _, extra in ipairs({...}) do
+        args = args .. " " .. shell_quote(extra)
+    end
+    local handle = io.popen(script .. " " .. args)
     if not handle then
         os.remove(tmp)
         return nil
@@ -1177,8 +1182,7 @@ local function sync_outbox(my_name)
                 path = "/deliver"
                 local send_body = op.body
                 if ON_SEND then
-                    local hook_input = "to: " .. op.recipient .. "\n" .. (op.body or "")
-                    local transformed = run_hook(ON_SEND, hook_input)
+                    local transformed = run_hook(ON_SEND, op.body or "", op.recipient)
                     if transformed and transformed ~= "" then send_body = transformed end
                 end
                 local encoded = encode_attachments(op.attach_paths or {})

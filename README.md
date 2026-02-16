@@ -261,7 +261,7 @@ sudo pacman -S lua lua-socket
 Clone the repo and run:
 
 ```
-git clone https://github.com/YOURUSER/r-mail.git
+git clone https://github.com/gabrilend/r-mail.git
 cd r-mail
 lua rmail.lua
 ```
@@ -303,7 +303,7 @@ sudo xbps-install -S lua54 lua54-luasocket
 Clone the repo and run:
 
 ```
-git clone https://github.com/YOURUSER/r-mail.git
+git clone https://github.com/gabrilend/r-mail.git
 cd r-mail
 lua rmail.lua
 ```
@@ -340,7 +340,7 @@ sudo emerge dev-lang/lua dev-lua/luasocket
 Clone the repo and run:
 
 ```
-git clone https://github.com/YOURUSER/r-mail.git
+git clone https://github.com/gabrilend/r-mail.git
 cd r-mail
 lua rmail.lua
 ```
@@ -395,6 +395,8 @@ curl -X POST http://localhost:8025/deliver \
   -d '{"from":"alice","token":"your-shared-secret","subject":"test","message_id":"test-1","body":"hello from curl"}'
 ```
 
+be sure to fill in the correct ip and port number where it says `localhost:8025`
+
 ## Sync timing
 
 The daemon checks for outbox/inbox changes on an adaptive timer:
@@ -429,10 +431,10 @@ Both sides of a contact pair must have encryption enabled and the same token. If
 
 Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
 
-- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering.
-- **`on_receive`** — runs after a message is saved to inbox. Use for notifications.
+- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering or .
+- **`on_receive`** — runs after a message is saved to inbox. Use for notifications or backups.
 - **`on_package`** — runs after an attachment is saved. Use for notifications or processing.
-- **`on_send`** — runs before sending a message. Your script's stdout replaces the body for that recipient. Use for per-recipient transformation.
+- **`on_send`** — runs once per recipient before sending. Called as `script <tmpfile> <recipient_name>`. Your script's stdout replaces the body for that recipient.
 - **`on_delete`** — runs when a message is deleted by either side.
 
 Each hook receives a temp file path as its first argument containing the event data. See the config file comments for details on what each temp file contains.
