@@ -240,6 +240,8 @@ in {
 }
 ```
 
+be sure to fill in the correct value where it says YOURUSER.
+
 If you need encryption, run `scripts/install-deps.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
 
 Then rebuild:
@@ -284,7 +286,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Then enable and start:
+be sure to insert the correct value for YOURUSER. Then, enable and start:
 
 ```
 sudo systemctl daemon-reload
@@ -321,7 +323,7 @@ Create `/etc/sv/rmail/run`:
 exec chpst -u YOURUSER lua /path/to/r-mail/rmail.lua 2>&1
 ```
 
-Make it executable and enable:
+be sure to put your username where it says YOURUSER above, then make it executable and enable:
 
 ```
 sudo chmod +x /etc/sv/rmail/run
@@ -360,7 +362,7 @@ output_log="/var/log/rmail.log"
 error_log="/var/log/rmail.log"
 ```
 
-Make it executable and enable:
+be sure to fill in your username where it says YOURUSER. Then, make it executable and enable:
 
 ```
 sudo chmod +x /etc/init.d/rmail
@@ -431,7 +433,7 @@ Both sides of a contact pair must have encryption enabled and the same token. If
 
 Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
 
-- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering or .
+- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering or non-urgent remote code execution.
 - **`on_receive`** — runs after a message is saved to inbox. Use for notifications or backups.
 - **`on_package`** — runs after an attachment is saved. Use for notifications or processing.
 - **`on_send`** — runs once per recipient before sending. Called as `script <tmpfile> <recipient_name>`. Your script's stdout replaces the body for that recipient.
@@ -452,10 +454,11 @@ Each hook receives a temp file path as its first argument containing the event d
 4. Is the port open in their OS firewall?
 5. Is the host/port in your contacts file correct (public IP, not local IP)?
 6. Do both sides have the same token?
-7. Did you wait long enough for the daemon to try sending the messages again?
+7. Do both sides have the same encryption setting? TLS-PSK must be enabled manually if you want to have Transport Level Security with a Pre Shared Key.
+8. Did you wait long enough for the daemon to try sending the messages again?
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
+**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. (highly recommended) - System packages often don't include PSK.
 
 **Port already in use** — another instance may be running, or change the port in your contacts file under `"me"` to something not in use by another application.
