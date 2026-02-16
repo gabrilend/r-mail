@@ -198,17 +198,37 @@ Then set up a manual port forward for your rmail port. See [nat-traversal-report
 
 ### NixOS
 
-A NixOS module is included. It handles Lua + LuaSocket, the systemd service, and the firewall port.
-
-Add to your `configuration.nix`:
+Add to your `configuration.nix` (change the user, path, and port to match your setup):
 
 ```nix
-imports = [
-  /path/to/r-mail/mail.nix
-];
+{ config, pkgs, ... }:
+
+let
+  rmailPort = 8025;  # must match your contacts file
+  luaEnv = pkgs.lua5_4.withPackages (ps: [ ps.luasocket ]);
+in {
+  networking.firewall.allowedTCPPorts = [ rmailPort ];
+
+  systemd.services.rmail = {
+    description = "rmail messaging daemon";
+    after = [ "network.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "YOURUSER";
+      Group = "users";
+      ExecStart = "${luaEnv}/bin/lua /path/to/r-mail/rmail.lua";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+}
 ```
 
-Edit `mail.nix` to set `User` to your username if it isn't `ritz`. Then rebuild:
+If you need encryption, run `scripts/install-deps.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
+
+Then rebuild:
 
 ```
 sudo nixos-rebuild switch
