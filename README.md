@@ -8,10 +8,11 @@ Each person runs an `rmail` daemon. It watches two directories:
 
 ```
 ~/mail/
-  inbox/       # received messages appear here
-  outbox/      # write files here to send
-  contacts     # your identity, address book, shared secrets
-  .state/      # sync tracking (managed by daemon)
+  inbox/         # received messages appear here
+  outbox/        # write files here to send
+  attachments/   # received attachments
+  contacts       # your identity, address book, shared secrets
+  .state/        # sync tracking (managed by daemon)
 ```
 
 To send a message, create a file in `outbox/`. The filename becomes the subject:
@@ -44,12 +45,39 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
+### Attachments
+
+Add `attach:` lines to send files. Each recipient receives all `attach:` lines that appear below their `to:` line:
+
+```
+to: alice
+to: bob
+attach: /path/to/photo.jpg
+
+Here's the photo from yesterday.
+```
+
+Both alice and bob get `photo.jpg`. To send an attachment to only some recipients, put it between their `to:` line and the next:
+
+```
+to: alice
+attach: /path/to/notes.pdf
+to: bob
+
+Alice gets the PDF, bob just gets the message body.
+```
+
+Attachments are base64-encoded and sent inline with the message. The recipient gets them in `~/mail/attachments/` with read-only permissions.
+
+Removing an `attach:` line from the outbox file deletes that attachment from the recipient's side. Deleting the whole outbox file removes everything.
+
 ## Dependencies
 
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
+- **LuaSec** (optional) — required for TLS-PSK encryption, must be compiled with PSK support
 
-`dkjson` is bundled in `libs/` — no need to install it separately.
+`dkjson` is bundled in `libs/` — no need to install it separately. Running `scripts/install-deps.sh` compiles all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
 
 If a dependency is missing, the daemon will tell you exactly what's needed and where to put it. You can also check manually:
 
@@ -82,7 +110,7 @@ Both sides must have the same token for a given contact pair. Pick something lon
 
 ## Ports
 
-Each person runs their daemon on a single port. The install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.
+Each person runs their daemon on a single port. Unless provided, the install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.
 
 The only thing your contacts need is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
 
@@ -399,6 +427,30 @@ Once confirmed, the daemon notifies all your contacts. Their daemons update your
 
 On first startup it just saves the current IP without notifying anyone.
 
+## Encryption
+
+rmail supports TLS-PSK (Pre-Shared Key) encryption for all peer connections. When enabled, every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key.
+
+To enable:
+
+1. Run `scripts/install-deps.sh` to compile LuaSec with PSK support
+2. Set `encrypt = true` in `~/.config/rmail/config`
+3. Restart rmail
+
+Both sides of a contact pair must have encryption enabled and the same token. If one side has encryption on and the other doesn't, connections will fail (messages stay in the outbox and retry on the next sync cycle).
+
+## Hooks
+
+Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
+
+- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering.
+- **`on_receive`** — runs after a message is saved to inbox. Use for notifications.
+- **`on_package`** — runs after an attachment is saved. Use for notifications or processing.
+- **`on_send`** — runs before sending a message. Your script's stdout replaces the body for that recipient. Use for per-recipient transformation.
+- **`on_delete`** — runs when a message is deleted by either side.
+
+Each hook receives a temp file path as its first argument containing the event data. See the config file comments for details on what each temp file contains.
+
 ## Troubleshooting
 
 **"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
@@ -407,7 +459,7 @@ On first startup it just saves the current IP without notifying anyone.
 
 **Messages not sending** — this is almost always a port issue. Check these in order:
 1. Is the recipient's daemon actually running?
-2. Is ... ....   your daemon actually running?
+2. Is your daemon actually running?
 3. Is the port forwarded on their router to their machine's local IP?
 4. Is the port open in their OS firewall?
 5. Is the host/port in your contacts file correct (public IP, not local IP)?
@@ -415,5 +467,7 @@ On first startup it just saves the current IP without notifying anyone.
 7. Did you wait long enough for the daemon to try sending the messages again?
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
+
+**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
 
 **Port already in use** — another instance may be running, or change the port in your contacts file under `"me"` to something not in use by another application.
