@@ -41,7 +41,7 @@ encrypt = false
 # WARNING: these protocols are insecure — any device on your LAN can open ports
 # on your router without authentication. malware commonly exploits this.
 # prefer manual port forwarding through your router's admin panel.
-# requires upnpc (miniupnpc) and/or natpmpc (libnatpmp) to be installed.
+# requires upnpc and/or natpmpc — run scripts/install-deps.sh to compile them.
 # auto_port_forward = false
 
 # set to true if you manually configured port forwarding on your router.
@@ -301,13 +301,21 @@ end
 -- NAT traversal (automatic port forwarding)
 -- ============================================================
 
-local function nat_tool_available(tool)
-    local handle = io.popen('command -v ' .. shell_quote(tool) .. ' 2>/dev/null')
-    if not handle then return false end
+-- resolve NAT tool paths: check deps/bin/ first, then system PATH
+local function nat_find_tool(name)
+    local local_path = script_dir .. "deps/bin/" .. name
+    if file_exists(local_path) then return local_path end
+    local handle = io.popen('command -v ' .. shell_quote(name) .. ' 2>/dev/null')
+    if not handle then return nil end
     local result = handle:read("*a")
     handle:close()
-    return result and result:match("%S") ~= nil
+    local path = result and result:match("^%s*(.-)%s*$")
+    if path and path ~= "" then return path end
+    return nil
 end
+
+local UPNPC   = nat_find_tool("upnpc")
+local NATPMPC = nat_find_tool("natpmpc")
 
 local function nat_get_local_ip()
     local handle = io.popen("ip route get 1.1.1.1 2>/dev/null")
@@ -330,8 +338,8 @@ local function nat_get_local_ip()
 end
 
 local function nat_try_upnp_probe()
-    if not nat_tool_available("upnpc") then return false end
-    local handle = io.popen("upnpc -s 2>/dev/null")
+    if not UPNPC then return false end
+    local handle = io.popen(shell_quote(UPNPC) .. " -s 2>/dev/null")
     if not handle then return false end
     local output = handle:read("*a")
     handle:close()
@@ -340,8 +348,8 @@ end
 
 local function nat_try_upnp_add(local_ip, port)
     local cmd = string.format(
-        "upnpc -e %s -a %s %d %d TCP 2>&1",
-        shell_quote("rmail"), local_ip, port, port)
+        "%s -e %s -a %s %d %d TCP 2>&1",
+        shell_quote(UPNPC), shell_quote("rmail"), local_ip, port, port)
     local handle = io.popen(cmd)
     if not handle then return false end
     local output = handle:read("*a")
@@ -351,12 +359,12 @@ local function nat_try_upnp_add(local_ip, port)
 end
 
 local function nat_try_upnp_delete(port)
-    os.execute(string.format("upnpc -d %d TCP 2>/dev/null", port))
+    os.execute(string.format("%s -d %d TCP 2>/dev/null", shell_quote(UPNPC), port))
 end
 
 local function nat_try_natpmp_probe()
-    if not nat_tool_available("natpmpc") then return false end
-    local handle = io.popen("natpmpc 2>/dev/null")
+    if not NATPMPC then return false end
+    local handle = io.popen(shell_quote(NATPMPC) .. " 2>/dev/null")
     if not handle then return false end
     local output = handle:read("*a")
     handle:close()
@@ -364,7 +372,7 @@ local function nat_try_natpmp_probe()
 end
 
 local function nat_try_natpmp_add(port, lifetime)
-    local cmd = string.format("natpmpc -a %d %d tcp %d 2>&1", port, port, lifetime)
+    local cmd = string.format("%s -a %d %d tcp %d 2>&1", shell_quote(NATPMPC), port, port, lifetime)
     local handle = io.popen(cmd)
     if not handle then return false end
     local output = handle:read("*a")
@@ -373,7 +381,7 @@ local function nat_try_natpmp_add(port, lifetime)
 end
 
 local function nat_try_natpmp_delete(port)
-    os.execute(string.format("natpmpc -a %d %d tcp 0 2>/dev/null", port, port))
+    os.execute(string.format("%s -a %d %d tcp 0 2>/dev/null", shell_quote(NATPMPC), port, port))
 end
 
 local function nat_delete_mapping(port, protocol)
@@ -396,7 +404,7 @@ local function nat_create_mapping(port)
     local local_ip = nat_get_local_ip()
 
     -- try UPnP first
-    if nat_tool_available("upnpc") and local_ip then
+    if UPNPC and local_ip then
         if nat_try_upnp_add(local_ip, port) then
             local mapping = {protocol = "upnp", port = port, created_at = os.time()}
             save_state("nat_mapping.json", mapping)
@@ -405,7 +413,7 @@ local function nat_create_mapping(port)
     end
 
     -- try NAT-PMP
-    if nat_tool_available("natpmpc") then
+    if NATPMPC then
         local lifetime = 3600
         if nat_try_natpmp_add(port, lifetime) then
             local mapping = {protocol = "natpmp", port = port, lifetime = lifetime, created_at = os.time()}

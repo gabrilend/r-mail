@@ -70,7 +70,7 @@ Alice and Sarah get the PDF, bob just gets the message body.
 
 Attachments are base64-encoded and sent inline with the message. The recipient gets them in `~/mail/attachments/`.
 
-Removing an `attach:` line from the outbox file deletes that attachment from the recipient's side. Deleting the whole outbox file removes everything.
+Removing an `attach:` line from the outbox file deletes that attachment from the recipient's side.
 
 ## Dependencies
 
@@ -78,14 +78,7 @@ Removing an `attach:` line from the outbox file deletes that attachment from the
 - **LuaSocket** — TCP networking for Lua
 - **LuaSec** (optional) — required for TLS-PSK encryption, must be compiled with PSK support
 
-`dkjson` is bundled in `libs/` — no need to install it separately. Running `scripts/install-deps.sh` compiles all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
-
-If a dependency is missing, the daemon will tell you exactly what's needed and where to put it. You can also check manually:
-
-```
-lua -v                                    # Lua installed?
-lua -e "require('socket'); print('ok')"   # LuaSocket installed?
-```
+Run `scripts/install-deps.sh --help` to compile all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
 
 ## Configuration
 
@@ -115,14 +108,14 @@ Each person runs their daemon on a single port. Unless provided, the install scr
 
 The only thing your contacts need is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
 
-You will need your local IP when setting up port forwarding on your router — the router needs to know which machine on the LAN to send traffic to. If multiple people are behind the same router, each person needs a unique port:
+You will need your local IP however, when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
 
 | Person | Router forward config      | What contacts put in their file |
 |--------|----------------------------|---------------------------------|
 | Alice  | port 8025 → 192.168.1.10   | 203.0.113.1, port 8025          |
 | Bob    | port 8026 → 192.168.1.20   | 203.0.113.1, port 8026          |
 
-If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like a mailbox for a specific computer.
+If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a mailbox when you first move in to a new place, but for a specific computer.
 
 To find your **local IP** (for router port forwarding):
 
@@ -182,15 +175,7 @@ This returns `{"ok":true,"name":"yourname"}` if everything is working. You can a
 
 If you cannot access your router's admin panel (shared housing, restrictive ISP, etc.), rmail can attempt automatic port forwarding.
 
-1. Install the tools:
-
-   ```
-   # Arch
-   sudo pacman -S miniupnpc libnatpmp
-
-   # Debian/Ubuntu
-   sudo apt install miniupnpc natpmpc
-   ```
+1. Run `scripts/install-deps.sh` — it offers to compile `upnpc` and `natpmpc` from source.
 
 2. Enable in `~/.config/rmail/config`:
 

@@ -429,34 +429,74 @@ fi
 # 7. NAT traversal tools (optional, for auto_port_forward)
 # ============================================================
 
+MINIUPNPC_TAG="miniupnpc_2_3_3"
+LIBNATPMP_COMMIT="134fc89e2781e154e40042641f4d8bcbe42579f1"
+
 echo ""
 echo "Checking for NAT traversal tools (optional)..."
 
 HAVE_UPNPC=false
 HAVE_NATPMPC=false
 
-if command -v upnpc >/dev/null 2>&1; then
-    ok "found: upnpc (miniupnpc)"
+BIN="$ROOT/deps/bin"
+
+# --- upnpc (miniupnpc) ---
+
+if [ -x "$BIN/upnpc" ] && ! $FORCE; then
+    ok "found locally compiled: deps/bin/upnpc"
+    HAVE_UPNPC=true
+elif command -v upnpc >/dev/null 2>&1 && ! $FORCE; then
+    ok "found: upnpc (system)"
     HAVE_UPNPC=true
 else
     info "upnpc not found (used for automatic UPnP port forwarding)"
+    if ask_yn "Compile miniupnpc locally? (small, no extra dependencies)"; then
+        mkdir -p "$BUILD" "$BIN"
+        info "Downloading miniupnpc..."
+        download "https://github.com/miniupnp/miniupnp/archive/refs/tags/$MINIUPNPC_TAG.tar.gz" "$BUILD/miniupnpc.tar.gz"
+        cd "$BUILD"
+        tar xzf miniupnpc.tar.gz
+        cd "miniupnp-$MINIUPNPC_TAG/miniupnpc"
+        info "Compiling..."
+        make -s upnpc-static CC="$CC" 2>/dev/null
+        cp build/upnpc-static "$BIN/upnpc"
+        chmod +x "$BIN/upnpc"
+        cd "$ROOT"
+        ok "done (deps/bin/upnpc)"
+        HAVE_UPNPC=true
+    fi
 fi
 
-if command -v natpmpc >/dev/null 2>&1; then
-    ok "found: natpmpc (libnatpmp)"
+# --- natpmpc (libnatpmp) ---
+
+if [ -x "$BIN/natpmpc" ] && ! $FORCE; then
+    ok "found locally compiled: deps/bin/natpmpc"
+    HAVE_NATPMPC=true
+elif command -v natpmpc >/dev/null 2>&1 && ! $FORCE; then
+    ok "found: natpmpc (system)"
     HAVE_NATPMPC=true
 else
     info "natpmpc not found (used for automatic NAT-PMP port forwarding)"
+    if ask_yn "Compile libnatpmp locally? (small, no extra dependencies)"; then
+        mkdir -p "$BUILD" "$BIN"
+        info "Downloading libnatpmp..."
+        download "https://github.com/miniupnp/libnatpmp/archive/$LIBNATPMP_COMMIT.tar.gz" "$BUILD/libnatpmp.tar.gz"
+        cd "$BUILD"
+        tar xzf libnatpmp.tar.gz
+        cd "libnatpmp-$LIBNATPMP_COMMIT"
+        info "Compiling..."
+        make -s natpmpc-static CC="$CC" 2>/dev/null
+        cp natpmpc-static "$BIN/natpmpc"
+        chmod +x "$BIN/natpmpc"
+        cd "$ROOT"
+        ok "done (deps/bin/natpmpc)"
+        HAVE_NATPMPC=true
+    fi
 fi
 
 if ! $HAVE_UPNPC || ! $HAVE_NATPMPC; then
     echo ""
     info "NAT traversal tools are optional — only needed if auto_port_forward = true"
-    info "install with your package manager if needed:"
-    info "  Arch:   pacman -S miniupnpc libnatpmp"
-    info "  Debian: apt install miniupnpc natpmpc"
-    info "  NixOS:  add miniupnpc and libnatpmp to environment.systemPackages"
-    info "  Void:   xbps-install miniupnpc libnatpmp"
 fi
 
 # ============================================================
@@ -468,8 +508,14 @@ echo "Checking router for insecure NAT protocols..."
 
 NAT_INSECURE=false
 
+# resolve to local binary if available
+UPNPC_CMD="upnpc"
+NATPMPC_CMD="natpmpc"
+[ -x "$BIN/upnpc" ] && UPNPC_CMD="$BIN/upnpc"
+[ -x "$BIN/natpmpc" ] && NATPMPC_CMD="$BIN/natpmpc"
+
 if $HAVE_UPNPC; then
-    if upnpc -s 2>/dev/null | grep -q "Found valid IGD"; then
+    if "$UPNPC_CMD" -s 2>/dev/null | grep -q "Found valid IGD"; then
         echo ""
         warn "================================================================"
         warn "WARNING: Your router has UPnP enabled!"
@@ -493,7 +539,7 @@ if $HAVE_UPNPC; then
 fi
 
 if $HAVE_NATPMPC; then
-    if natpmpc 2>/dev/null | grep -q "Public IP"; then
+    if "$NATPMPC_CMD" 2>/dev/null | grep -q "Public IP"; then
         echo ""
         warn "================================================================"
         warn "WARNING: Your router has NAT-PMP enabled!"
