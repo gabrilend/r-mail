@@ -23,6 +23,16 @@ notify_ip_change = true
 # use TLS-PSK encryption for all connections
 encrypt = false
 
+# automatic port forwarding via UPnP/NAT-PMP (default: off)
+# WARNING: these protocols are insecure. any device on your LAN can open ports
+# on your router without authentication. consider disabling UPnP/NAT-PMP on
+# your router and using manual port forwarding instead.
+# auto_port_forward = false
+
+# set to true if you manually configured port forwarding on your router.
+# this skips the startup security check for insecure NAT protocols.
+# manual_port_forward = false
+
 # script hooks (all called with a temp file path as first argument)
 
 # runs while a received message is still in RAM, before writing to disk
@@ -79,7 +89,9 @@ local ON_RECEIVE       = config.on_receive
 local ON_PACKAGE       = config.on_package
 local ON_SEND          = config.on_send
 local ON_DELETE        = config.on_delete
-local ENCRYPT          = config.encrypt == true
+local ENCRYPT            = config.encrypt == true
+local AUTO_PORT_FORWARD  = config.auto_port_forward == true
+local MANUAL_PORT_FORWARD = config.manual_port_forward == true
 
 -- ============================================================
 
@@ -246,6 +258,188 @@ end
 
 local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
+end
+
+-- ============================================================
+-- NAT traversal (automatic port forwarding)
+-- ============================================================
+
+local function nat_tool_available(tool)
+    local handle = io.popen('command -v ' .. shell_quote(tool) .. ' 2>/dev/null')
+    if not handle then return false end
+    local result = handle:read("*a")
+    handle:close()
+    return result and result:match("%S") ~= nil
+end
+
+local function nat_get_local_ip()
+    local handle = io.popen("ip route get 1.1.1.1 2>/dev/null")
+    if not handle then return nil end
+    local output = handle:read("*a")
+    handle:close()
+    if output then
+        local ip = output:match("src%s+(%d+%.%d+%.%d+%.%d+)")
+        if ip then return ip end
+    end
+    -- fallback: first non-loopback inet address
+    handle = io.popen("ip -4 addr show 2>/dev/null")
+    if not handle then return nil end
+    output = handle:read("*a")
+    handle:close()
+    if output then
+        return output:match("inet%s+(%d+%.%d+%.%d+%.%d+).*scope global")
+    end
+    return nil
+end
+
+local function nat_try_upnp_probe()
+    if not nat_tool_available("upnpc") then return false end
+    local handle = io.popen("upnpc -s 2>/dev/null")
+    if not handle then return false end
+    local output = handle:read("*a")
+    handle:close()
+    return output and output:match("Found valid IGD") ~= nil
+end
+
+local function nat_try_upnp_add(local_ip, port)
+    local cmd = string.format(
+        "upnpc -e %s -a %s %d %d TCP 2>&1",
+        shell_quote("rmail"), local_ip, port, port)
+    local handle = io.popen(cmd)
+    if not handle then return false end
+    local output = handle:read("*a")
+    handle:close()
+    return output and (output:match("is redirected to") ~= nil
+        or output:match("successfully") ~= nil)
+end
+
+local function nat_try_upnp_delete(port)
+    os.execute(string.format("upnpc -d %d TCP 2>/dev/null", port))
+end
+
+local function nat_try_natpmp_probe()
+    if not nat_tool_available("natpmpc") then return false end
+    local handle = io.popen("natpmpc 2>/dev/null")
+    if not handle then return false end
+    local output = handle:read("*a")
+    handle:close()
+    return output and output:match("Public IP") ~= nil
+end
+
+local function nat_try_natpmp_add(port, lifetime)
+    local cmd = string.format("natpmpc -a %d %d tcp %d 2>&1", port, port, lifetime)
+    local handle = io.popen(cmd)
+    if not handle then return false end
+    local output = handle:read("*a")
+    handle:close()
+    return output and output:match("Mapped public port") ~= nil
+end
+
+local function nat_try_natpmp_delete(port)
+    os.execute(string.format("natpmpc -a %d %d tcp 0 2>/dev/null", port, port))
+end
+
+local function nat_delete_mapping(port, protocol)
+    if protocol == "upnp" then
+        nat_try_upnp_delete(port)
+    elseif protocol == "natpmp" then
+        nat_try_natpmp_delete(port)
+    end
+end
+
+local function nat_cleanup_old_mapping()
+    local old = load_state("nat_mapping.json")
+    if old and old.protocol and old.port then
+        log("cleaning up previous NAT mapping (%s port %d)", old.protocol, old.port)
+        nat_delete_mapping(old.port, old.protocol)
+    end
+end
+
+local function nat_create_mapping(port)
+    local local_ip = nat_get_local_ip()
+
+    -- try UPnP first
+    if nat_tool_available("upnpc") and local_ip then
+        if nat_try_upnp_add(local_ip, port) then
+            local mapping = {protocol = "upnp", port = port, created_at = os.time()}
+            save_state("nat_mapping.json", mapping)
+            return mapping
+        end
+    end
+
+    -- try NAT-PMP
+    if nat_tool_available("natpmpc") then
+        local lifetime = 3600
+        if nat_try_natpmp_add(port, lifetime) then
+            local mapping = {protocol = "natpmp", port = port, lifetime = lifetime, created_at = os.time()}
+            save_state("nat_mapping.json", mapping)
+            return mapping
+        end
+    end
+
+    return nil
+end
+
+local function nat_security_check(my_name)
+    if MANUAL_PORT_FORWARD then return end
+
+    -- only warn once
+    local warned = read_file(STATE .. "/nat_security_warned")
+    if warned and warned ~= "" then return end
+
+    local vulnerabilities = {}
+
+    -- probe UPnP
+    if nat_try_upnp_probe() then
+        -- confirm by creating and immediately deleting a test mapping
+        local test_port = 60000 + (os.time() % 4000)
+        local local_ip = nat_get_local_ip()
+        if local_ip and nat_try_upnp_add(local_ip, test_port) then
+            nat_try_upnp_delete(test_port)
+            vulnerabilities[#vulnerabilities + 1] = "UPnP"
+        end
+    end
+
+    -- probe NAT-PMP
+    if nat_try_natpmp_probe() then
+        vulnerabilities[#vulnerabilities + 1] = "NAT-PMP"
+    end
+
+    if #vulnerabilities == 0 then return end
+
+    local proto_list = table.concat(vulnerabilities, " and ")
+    log("WARNING: router has %s enabled -- this is a security risk", proto_list)
+    log("WARNING: any device on your network can open ports without authentication")
+    log("WARNING: disable %s in your router settings, or set manual_port_forward = true", proto_list)
+
+    -- send warning to all contacts
+    local contacts = load_contacts()
+    local recipients = {}
+    for name, _ in pairs(contacts) do
+        if name ~= "me" then
+            recipients[#recipients + 1] = name
+        end
+    end
+
+    if #recipients > 0 then
+        local header = ""
+        for _, name in ipairs(recipients) do
+            header = header .. "to: " .. name .. "\n"
+        end
+        local body = "WARNING: My router has " .. proto_list .. " enabled. " ..
+            "These protocols allow any device on my network to open ports on " ..
+            "my router without authentication. This is a known security risk " ..
+            "-- malware commonly exploits this to bypass firewalls.\n\n" ..
+            "Until I disable these protocols on my router, treat my connection " ..
+            "as potentially compromised. Please do not send me sensitive or " ..
+            "private information through this system.\n\n" ..
+            "Please remind me to fix this.\n\n" ..
+            "This is an automated message from rmail's security check."
+        write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
+        log("security warning sent to %d contact(s)", #recipients)
+    end
+
+    write_file(STATE .. "/nat_security_warned", os.date("%Y-%m-%d %H:%M:%S") .. "\n")
 end
 
 -- ============================================================
@@ -1223,6 +1417,25 @@ local function main()
     log("mail dir: %s", MAIL)
     if ENCRYPT then log("TLS-PSK encryption enabled") end
 
+    -- NAT: clean up stale mapping from previous run
+    pcall(nat_cleanup_old_mapping)
+
+    -- NAT: security check (always runs unless manual_port_forward = true)
+    pcall(nat_security_check, my_name)
+
+    -- NAT: auto port forwarding (opt-in)
+    local nat_mapping = nil
+    if AUTO_PORT_FORWARD then
+        log("attempting automatic port forwarding...")
+        local ok_nat, result = pcall(nat_create_mapping, port)
+        if ok_nat and result and result.protocol then
+            nat_mapping = result
+            log("port %d mapped via %s", port, result.protocol)
+        else
+            log("warning: auto port forward failed, port %d may not be reachable", port)
+        end
+    end
+
     local server_ssl_ctx
     if ENCRYPT then
         server_ssl_ctx = ssl.newcontext({
@@ -1318,6 +1531,18 @@ local function main()
             end)
             if not ok then log("sync error: %s", tostring(err)) end
             last_sync = now
+        end
+
+        -- NAT: renew mapping periodically (every 30 minutes)
+        if nat_mapping then
+            local nat_renew_interval = 1800
+            if now - (nat_mapping.last_renewed or nat_mapping.created_at) >= nat_renew_interval then
+                local ok_r, res = pcall(nat_create_mapping, port)
+                if ok_r and res then
+                    log("renewed NAT mapping via %s", res.protocol)
+                end
+                nat_mapping.last_renewed = now
+            end
         end
     end
 end
