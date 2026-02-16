@@ -335,7 +335,7 @@ The mapping is created for the port specified in the contacts file (`me.port`). 
 
 - **Creation:** At startup, after binding the listening socket
 - **Renewal:** Every 30 minutes (for NAT-PMP, which has lifetimes; UPnP mappings are requested as permanent)
-- **Cleanup on next startup:** Lua can't reliably catch SIGTERM (the `os.signal` ecosystem is fragile and non-portable). So instead, rmail writes the current mapping details to a state file (`STATE/port_mapping.json`). On the next startup, it reads this file and deletes the old mapping before creating a new one. If the daemon crashes and is never restarted, the NAT-PMP mapping expires on its own; UPnP mappings stick around (but get overwritten on next startup since we use the same port).
+- **Cleanup on next startup:** Lua can't reliably catch SIGTERM (the `os.signal` ecosystem is fragile and non-portable). So instead, rmail writes the current mapping details to a state file (`STATE/nat_mapping.json`). On the next startup, it reads this file and deletes the old mapping before creating a new one. If the daemon crashes and is never restarted, the NAT-PMP mapping expires on its own; UPnP mappings stick around (but get overwritten on next startup since we use the same port).
 
 ```json
 {
