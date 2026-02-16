@@ -42,7 +42,7 @@ encrypt = false
 # runs immediately after a message is written to inbox on disk
 # on_receive = /path/to/on-message.sh
 
-# runs immediately after an attachment is written to packages/ on disk
+# runs immediately after an attachment is written to attachments/ on disk
 # on_package = /path/to/on-package.sh
 
 # runs before sending a message from outbox (stdout replaces body)
@@ -80,7 +80,7 @@ local INBOX    = MAIL .. "/inbox"
 local OUTBOX   = MAIL .. "/outbox"
 local STATE    = MAIL .. "/.state"
 local CONTACTS = MAIL .. "/contacts"
-local PACKAGES = MAIL .. "/packages"
+local ATTACHMENTS = MAIL .. "/attachments"
 
 local LIBS             = config.libs
 local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
@@ -213,6 +213,18 @@ local function run_hook(script, data)
     handle:close()
     os.remove(tmp)
     return output
+end
+
+local function sanitize_filename(name)
+    if not name or name == "" then return "untitled" end
+    -- extract basename (strip directory components)
+    name = name:match("([^/\\]+)$") or name
+    -- remove leading dots (prevent hidden files / .. traversal)
+    name = name:gsub("^%.+", "")
+    -- replace control characters and problematic chars with underscores
+    name = name:gsub("[%c/%\\%z]", "_")
+    if name == "" then return "untitled" end
+    return name
 end
 
 local function uuid()
@@ -462,6 +474,10 @@ local function parse_request(client)
 
     local body = ""
     local length = tonumber(headers["content-length"] or 0)
+    local max_body = 50 * 1024 * 1024  -- 50 MB
+    if length > max_body then
+        return method, path, headers, nil
+    end
     if length > 0 then
         body = client:receive(length)
     end
@@ -492,11 +508,11 @@ local function save_attachments(attachments, sender, inbox_meta)
     if not attachments or #attachments == 0 then return end
     if not inbox_meta.attachments then inbox_meta.attachments = {} end
     for _, att in ipairs(attachments) do
-        local att_filename = att.filename
-        local target = PACKAGES .. "/" .. att_filename
+        local att_filename = sanitize_filename(att.filename)
+        local target = ATTACHMENTS .. "/" .. att_filename
         if file_exists(target) and not inbox_meta.attachments[att_filename] then
-            att_filename = att.filename .. "-from-" .. sender
-            target = PACKAGES .. "/" .. att_filename
+            att_filename = sanitize_filename(att.filename .. "-from-" .. sender)
+            target = ATTACHMENTS .. "/" .. att_filename
         end
         local raw = mime.unb64(att.data)
         write_file_binary(target, raw)
@@ -532,12 +548,12 @@ local function handle_deliver(data, raw_request)
 
     -- new message
     if not body then body = "" end
-    local filename = subject
+    local filename = sanitize_filename(subject)
     local target = INBOX .. "/" .. filename
     if file_exists(target) then
         local existing = inbox_state[filename]
         if existing and existing["from"] ~= sender then
-            filename = subject .. "-from-" .. sender
+            filename = sanitize_filename(subject .. "-from-" .. sender)
             target = INBOX .. "/" .. filename
         end
     end
@@ -1404,7 +1420,7 @@ local function ensure_config()
 end
 
 local function main()
-    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. PACKAGES .. '"')
+    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. ATTACHMENTS .. '"')
     ensure_config()
     write_file(STATE .. "/new-mail", "")
 
