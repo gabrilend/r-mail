@@ -426,6 +426,95 @@ else
 fi
 
 # ============================================================
+# 7. NAT traversal tools (optional, for auto_port_forward)
+# ============================================================
+
+echo ""
+echo "Checking for NAT traversal tools (optional)..."
+
+HAVE_UPNPC=false
+HAVE_NATPMPC=false
+
+if command -v upnpc >/dev/null 2>&1; then
+    ok "found: upnpc (miniupnpc)"
+    HAVE_UPNPC=true
+else
+    info "upnpc not found (used for automatic UPnP port forwarding)"
+fi
+
+if command -v natpmpc >/dev/null 2>&1; then
+    ok "found: natpmpc (libnatpmp)"
+    HAVE_NATPMPC=true
+else
+    info "natpmpc not found (used for automatic NAT-PMP port forwarding)"
+fi
+
+if ! $HAVE_UPNPC || ! $HAVE_NATPMPC; then
+    echo ""
+    info "NAT traversal tools are optional — only needed if auto_port_forward = true"
+    info "install with your package manager if needed:"
+    info "  Arch:   pacman -S miniupnpc libnatpmp"
+    info "  Debian: apt install miniupnpc natpmpc"
+    info "  NixOS:  add miniupnpc and libnatpmp to environment.systemPackages"
+    info "  Void:   xbps-install miniupnpc libnatpmp"
+fi
+
+# ============================================================
+# 8. Security probe (check for insecure NAT protocols)
+# ============================================================
+
+echo ""
+echo "Checking router for insecure NAT protocols..."
+
+NAT_INSECURE=false
+
+if $HAVE_UPNPC; then
+    if upnpc -s 2>/dev/null | grep -q "Found valid IGD"; then
+        echo ""
+        warn "================================================================"
+        warn "WARNING: Your router has UPnP enabled!"
+        warn "================================================================"
+        warn ""
+        warn "Any device on your network can open ports on your router without"
+        warn "authentication. Malware commonly exploits this to bypass firewalls."
+        warn ""
+        warn "Strongly consider disabling UPnP in your router's admin panel."
+        warn "If you've manually configured port forwarding, add this to your"
+        warn "rmail config (~/.config/rmail/config):"
+        warn ""
+        warn "  manual_port_forward = true"
+        warn ""
+        warn "================================================================"
+        echo ""
+        NAT_INSECURE=true
+    else
+        ok "UPnP IGD not detected (good)"
+    fi
+fi
+
+if $HAVE_NATPMPC; then
+    if natpmpc 2>/dev/null | grep -q "Public IP"; then
+        echo ""
+        warn "================================================================"
+        warn "WARNING: Your router has NAT-PMP enabled!"
+        warn "================================================================"
+        warn ""
+        warn "Any device on your network can create port mappings without"
+        warn "authentication. Consider disabling NAT-PMP in your router settings."
+        warn ""
+        warn "================================================================"
+        echo ""
+        NAT_INSECURE=true
+    else
+        ok "NAT-PMP not detected (good)"
+    fi
+fi
+
+if ! $HAVE_UPNPC && ! $HAVE_NATPMPC; then
+    info "skipped (no NAT tools installed to probe with)"
+fi
+
+# ============================================================
 # Clean up
 # ============================================================
 
@@ -433,6 +522,56 @@ if [ -d "$BUILD" ]; then
     info "Cleaning up build files..."
     rm -rf "$BUILD"
 fi
+
+# ============================================================
+# 9. Initial setup (contacts file with random port)
+# ============================================================
+
+echo ""
+MAIL_DIR="${HOME}/mail"
+CONTACTS_FILE="$MAIL_DIR/contacts"
+
+if [ ! -f "$CONTACTS_FILE" ]; then
+    echo "Setting up initial contacts file..."
+
+    # generate random port in 50000-65000
+    gen_random_port() {
+        while true; do
+            RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
+            PORT=$(( (RAW % 15001) + 50000 ))
+            # blacklist: known services in this range
+            case "$PORT" in
+                50000|51413|54321|55553|60000) continue ;;  # SAP, BitTorrent, common test ports
+                *) echo "$PORT"; return ;;
+            esac
+        done
+    }
+
+    RANDOM_PORT=$(gen_random_port)
+
+    mkdir -p "$MAIL_DIR"
+    cat > "$CONTACTS_FILE" <<CONTACTS
+{
+  "me": {
+    "name": "$(whoami)",
+    "port": $RANDOM_PORT
+  }
+}
+CONTACTS
+
+    ok "created contacts file: $CONTACTS_FILE"
+    echo ""
+    echo "  your rmail port: $RANDOM_PORT"
+    echo "  share this port (and your public IP) with contacts"
+    echo "  to find your public IP: curl ifconfig.me"
+    echo ""
+else
+    info "contacts file already exists, keeping it"
+fi
+
+# ============================================================
+# Summary
+# ============================================================
 
 echo ""
 echo "All dependencies installed."
@@ -442,4 +581,8 @@ echo "  libs/socket/core.so    — luasocket"
 echo "  libs/mime/core.so      — luasocket mime"
 echo "  libs/ssl.so            — luasec (PSK enabled)"
 echo ""
-echo "To enable encryption, set ENCRYPT = true in rmail.lua"
+echo "To enable encryption, set encrypt = true in ~/.config/rmail/config"
+if $NAT_INSECURE; then
+    echo ""
+    warn "NOTE: insecure NAT protocols detected on your router (see warnings above)"
+fi
