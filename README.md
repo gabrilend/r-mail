@@ -82,7 +82,7 @@ Both sides must have the same token for a given contact pair. Pick something lon
 
 ## Ports
 
-Each person runs their daemon on a single port (default `8025`). That one port handles both sending and receiving — all your contacts deliver to the same port.
+Each person runs their daemon on a single port. The install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.
 
 The only thing your contacts need is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
 
@@ -143,6 +143,56 @@ curl http://localhost:8025/
 ```
 
 This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP to confirm port forwarding is set up correctly.
+
+### Automatic port forwarding (UPnP / NAT-PMP)
+
+> **WARNING: Automatic port forwarding uses UPnP or NAT-PMP, which are
+> fundamentally insecure protocols. Any device on your local network can open
+> any port on your router without authentication. Malware commonly exploits
+> this. Manual port forwarding is strongly recommended instead.**
+
+If you cannot access your router's admin panel (shared housing, restrictive ISP, etc.), rmail can attempt automatic port forwarding.
+
+1. Install the tools:
+
+   ```
+   # Arch
+   sudo pacman -S miniupnpc libnatpmp
+
+   # Debian/Ubuntu
+   sudo apt install miniupnpc natpmpc
+   ```
+
+2. Enable in `~/.config/rmail/config`:
+
+   ```
+   auto_port_forward = true
+   ```
+
+3. Restart rmail. It tries UPnP first, then NAT-PMP. If successful, the mapping is renewed every 30 minutes.
+
+**How it works:**
+- On startup, rmail creates a port mapping on your router via UPnP or NAT-PMP
+- The mapping is renewed periodically before it expires
+- On next startup, stale mappings from previous runs are cleaned up
+- If the mapping fails, rmail continues but logs a warning
+
+**Security check:** On every startup, rmail probes your router for UPnP and NAT-PMP regardless of whether `auto_port_forward` is enabled. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to all your contacts advising them not to send sensitive information until you fix it.
+
+To suppress this check (because you've manually configured your router and verified it's secure):
+
+```
+manual_port_forward = true
+```
+
+**Disabling UPnP/NAT-PMP on your router** (recommended):
+
+Log into your router's admin panel and disable:
+- UPnP
+- NAT-PMP
+- PCP (unless using authenticated PCP, which almost no routers support)
+
+Then set up a manual port forward for your rmail port. See [nat-traversal-report.md](nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
 
 ## Installation
 
