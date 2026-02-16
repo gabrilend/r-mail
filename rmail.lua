@@ -1298,6 +1298,7 @@ local function sync_inbox(my_name)
                     contact = contacts[sender],
                 }
             end
+            delete_inbox_attachments(meta)
             state[name] = nil
             did_work = true
         end
