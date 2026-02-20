@@ -44,11 +44,6 @@ encrypt = false
 # requires upnpc and/or natpmpc — run scripts/install-deps.sh to compile them.
 # auto_port_forward = false
 
-# set to true if you manually configured port forwarding on your router.
-# this suppresses the startup security probe that checks whether your router
-# has UPnP/NAT-PMP enabled and warns your contacts if it does.
-# manual_port_forward = false
-
 # ---- hooks ----
 # hooks let you run scripts in response to message events.
 # each hook receives a temp file as its first argument containing event data.
@@ -117,7 +112,6 @@ local ON_SEND          = config.on_send
 local ON_DELETE        = config.on_delete
 local ENCRYPT            = config.encrypt == true
 local AUTO_PORT_FORWARD  = config.auto_port_forward == true
-local MANUAL_PORT_FORWARD = config.manual_port_forward == true
 
 -- ============================================================
 
@@ -431,8 +425,6 @@ local function nat_create_mapping(port)
 end
 
 local function nat_security_check(my_name)
-    if MANUAL_PORT_FORWARD then return end
-
     -- only warn once
     local warned = read_file(STATE .. "/nat_security_warned")
     if warned and warned ~= "" then return end
@@ -460,7 +452,7 @@ local function nat_security_check(my_name)
     local proto_list = table.concat(vulnerabilities, " and ")
     log("WARNING: router has %s enabled -- this is a security risk", proto_list)
     log("WARNING: any device on your network can open ports without authentication")
-    log("WARNING: disable %s in your router settings, or set manual_port_forward = true", proto_list)
+    log("WARNING: disable %s in your router settings", proto_list)
 
     -- send warning to all contacts
     local contacts = load_contacts()
@@ -1473,7 +1465,7 @@ local function main()
     -- NAT: clean up stale mapping from previous run
     pcall(nat_cleanup_old_mapping)
 
-    -- NAT: security check (always runs unless manual_port_forward = true)
+    -- NAT: security check (always runs on startup)
     pcall(nat_security_check, my_name)
 
     -- NAT: auto port forwarding (opt-in)

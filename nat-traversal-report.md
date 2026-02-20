@@ -358,21 +358,14 @@ If either responds, it means the router has these protocols enabled. This is a s
 - Logs a warning: "UPnP is enabled on your router. Any device on your LAN can open ports. Consider disabling it."
 - Notifies contacts (via a one-time advisory message) so they know your network configuration
 
-### manual_port_forward = true
-
-```lua
-# in ~/.config/rmail/config
-manual_port_forward = true
-```
-
-This tells rmail: "I've set up port forwarding manually. Don't check for UPnP/NAT-PMP, don't warn me about it, don't warn my contacts." It suppresses the security check entirely. Use this when you've deliberately configured your router and don't want the noise.
+The security check runs on every startup and cannot be disabled. It uses a one-time warning file to avoid repeatedly notifying contacts.
 
 
 ## Part 8: Recommendations
 
 ### For most users: manual port forwarding
 
-Disable UPnP and NAT-PMP on your router. Set up a manual port forward for rmail's port. Set `manual_port_forward = true` in your config. This is the safest configuration.
+Disable UPnP and NAT-PMP on your router. Set up a manual port forward for rmail's port. This is the safest configuration.
 
 Disabling UPnP/NAT-PMP protects not just rmail but your entire network. Those protocols are a liability — they existed before IoT filled our networks with devices of questionable security. Every security guide published in the last decade recommends disabling them.
 

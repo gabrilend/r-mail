@@ -115,7 +115,7 @@ You will need your local IP however, when setting up port forwarding on your rou
 | Alice  | port 8025 → 192.168.1.10   | 203.0.113.1, port 8025          |
 | Bob    | port 8026 → 192.168.1.20   | 203.0.113.1, port 8026          |
 
-If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a mailbox when you first move in to a new place, but for a specific computer.
+If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a mailbox with your mailman when you first move in to a new place, but for a specific computer.
 
 To find your **local IP** (for router port forwarding):
 
@@ -191,13 +191,7 @@ If you cannot access your router's admin panel (shared housing, restrictive ISP,
 - On next startup, stale mappings from previous runs are cleaned up
 - If the mapping fails, rmail continues but logs a warning
 
-**Security check:** On every startup, rmail probes your router for UPnP and NAT-PMP regardless of whether `auto_port_forward` is enabled. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to all your contacts advising them not to send sensitive information until you fix it.
-
-To suppress this check (because you've manually configured your router and verified it's secure):
-
-```
-manual_port_forward = true
-```
+**Security check:** On every startup, rmail probes your router for UPnP and NAT-PMP. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to all your contacts advising them not to send sensitive information until you fix it.
 
 **Disabling UPnP/NAT-PMP on your router** (recommended):
 

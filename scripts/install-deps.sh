@@ -525,11 +525,6 @@ if $HAVE_UPNPC; then
         warn "authentication. Malware commonly exploits this to bypass firewalls."
         warn ""
         warn "Strongly consider disabling UPnP in your router's admin panel."
-        warn "If you've manually configured port forwarding, add this to your"
-        warn "rmail config (~/.config/rmail/config):"
-        warn ""
-        warn "  manual_port_forward = true"
-        warn ""
         warn "================================================================"
         echo ""
         NAT_INSECURE=true
