@@ -28,13 +28,6 @@ mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
 # and their contacts file is updated automatically.
 notify_ip_change = true
 
-# ---- encryption ----
-
-# encrypt all peer connections with TLS-PSK (pre-shared key).
-# both sides must have encrypt = true and the same token in their contacts file.
-# requires luasec compiled with PSK support — run scripts/install-deps.sh to set up.
-encrypt = false
-
 # ---- NAT / port forwarding ----
 
 # attempt automatic port forwarding via UPnP or NAT-PMP on startup.
@@ -110,7 +103,6 @@ local ON_RECEIVE       = config.on_receive
 local ON_PACKAGE       = config.on_package
 local ON_SEND          = config.on_send
 local ON_DELETE        = config.on_delete
-local ENCRYPT            = config.encrypt == true
 local AUTO_PORT_FORWARD  = config.auto_port_forward == true
 
 -- ============================================================
@@ -144,20 +136,16 @@ end
 
 local mime = require("mime")  -- base64 encoding (part of luasocket)
 
-local ssl
-if ENCRYPT then
-    local ok3, _ssl = pcall(require, "ssl")
-    if not ok3 then
-        io.stderr:write("error: luasec not found (required when encrypt = true in config)\n")
-        io.stderr:write("       run: scripts/install-deps.sh\n")
-        os.exit(1)
-    end
-    ssl = _ssl
-    if not ssl.config or not ssl.config.capabilities or not ssl.config.capabilities.psk then
-        io.stderr:write("error: luasec was not compiled with PSK support\n")
-        io.stderr:write("       run: scripts/install-deps.sh\n")
-        os.exit(1)
-    end
+local ok3, ssl = pcall(require, "ssl")
+if not ok3 then
+    io.stderr:write("error: luasec not found\n")
+    io.stderr:write("       run: scripts/install-deps.sh\n")
+    os.exit(1)
+end
+if not ssl.config or not ssl.config.capabilities or not ssl.config.capabilities.psk then
+    io.stderr:write("error: luasec was not compiled with PSK support\n")
+    io.stderr:write("       run: scripts/install-deps.sh\n")
+    os.exit(1)
 end
 
 -- ============================================================
@@ -877,7 +865,7 @@ local function http_post_batch(requests)
             for _, conn in ipairs(writable) do
                 local e = lookup[conn]
                 if e and e.phase == "connecting" then
-                    if ENCRYPT and e.req.psk_identity then
+                    if e.req.psk_identity then
                         http_start_tls(e, lookup)
                     else
                         http_send_request(e)
@@ -1460,7 +1448,7 @@ local function main()
 
     log("rmail starting: name=%s port=%d", my_name, port)
     log("mail dir: %s", MAIL)
-    if ENCRYPT then log("TLS-PSK encryption enabled") end
+    log("TLS-PSK encryption enabled")
 
     -- NAT: clean up stale mapping from previous run
     pcall(nat_cleanup_old_mapping)
@@ -1481,24 +1469,21 @@ local function main()
         end
     end
 
-    local server_ssl_ctx
-    if ENCRYPT then
-        server_ssl_ctx = ssl.newcontext({
-            mode = "server",
-            protocol = "tlsv1_2",
-            ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
-            psk = function(identity, max_psk_len)
-                local c = load_contacts()
-                if c[identity] and c[identity].token then
-                    return c[identity].token
-                end
-                return nil
-            end,
-        })
-        if not server_ssl_ctx then
-            log("error: failed to create TLS context")
-            os.exit(1)
-        end
+    local server_ssl_ctx = ssl.newcontext({
+        mode = "server",
+        protocol = "tlsv1_2",
+        ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
+        psk = function(identity, max_psk_len)
+            local c = load_contacts()
+            if c[identity] and c[identity].token then
+                return c[identity].token
+            end
+            return nil
+        end,
+    })
+    if not server_ssl_ctx then
+        log("error: failed to create TLS context")
+        os.exit(1)
     end
 
     local server = assert(socket.bind("0.0.0.0", port))
@@ -1514,7 +1499,7 @@ local function main()
 
     while true do
         local client = server:accept()
-        if client and ENCRYPT then
+        if client then
             local ssl_client = ssl.wrap(client, server_ssl_ctx)
             if ssl_client then
                 ssl_client:settimeout(5)

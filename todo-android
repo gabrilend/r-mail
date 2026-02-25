@@ -69,22 +69,27 @@ LINUX DAEMON CHANGES
 
 ANDROID APP
 
-  Language: C + HTML5 + WASM
-    Core logic (networking, polling, state) written in C,
-    compiled to WASM. UI in plain HTML5 (no CSS, no JavaScript).
-    Wrapped in a minimal Android WebView shell (~50 lines Kotlin).
-    The same WASM build also runs in a desktop browser.
+  Language: Kotlin (native Android)
+    A web-based client (HTML5/WASM) was considered but rejected:
+    any device on the network could connect to the web UI, which
+    requires username/password authentication and secure credential
+    storage — unnecessary complexity. A native app is wired to a
+    specific device and avoids this entirely.
 
   Core
     - Local inbox/outbox stored in app private storage
     - Contacts/secrets management
     - Background polling via Android WorkManager (survives doze)
-    - Adaptive poll timer per contact:
-      starts at 5 min, shrinks on new messages, grows on idle
+    - Adaptive poll timer per contact (same as daemon):
+      starts at 5 min, shrinks by 4 min on activity (floor 1 min),
+      grows by 6 min on idle (no ceiling, resets on app restart)
     - All timers reset on app/phone restart
 
   Sending
-    - User writes message in app, picks contact(s)
+    - User writes message in app, picks one or more contacts
+    - Multiple recipients supported (same as daemon's multi-to:)
+    - Each recipient gets an independent copy (they don't see
+      who else received it)
     - App sends POST /deliver to each recipient's daemon
     - Outgoing connections — no NAT issues
     - Retry queue for failed sends
@@ -95,18 +100,20 @@ ANDROID APP
     - Deletions applied to local inbox
     - Android notification for new messages
 
+  Attachments
+    - Send: user picks files via system file picker, included as
+      base64-encoded attach: fields in /deliver request
+    - Receive: attachments arrive via /poll, saved to app storage
+    - View: open files via Android intent (system picker for the
+      user's preferred app) — no built-in viewers needed
+    - Removing an attach: line from the sender side deletes the
+      attachment on the recipient side (same as daemon behavior)
+
   Deletion
     - User deletes from inbox -> app sends POST /delete to
       sender's daemon (outgoing, no NAT issue)
     - Sender deletes -> next poll returns deletion ID -> app
       removes locally
-
-  Self-hosting web UI
-    - The app hosts the HTML5 interface on a local port
-    - Accessible at localhost:8025 on the phone
-    - If the phone's port is forwarded on wifi router, friends
-      can visit the interface from their devices on the LAN
-    - Same interface the daemon could serve on linux
 
   UI
     - Inbox list (sender, subject, preview)
@@ -115,26 +122,17 @@ ANDROID APP
     - Contacts screen (add/edit/remove, host/port/token)
     - Settings (poll intervals, notification preferences)
 
+  Encryption
+    - All connections use TLS-PSK, same as the daemon. The phone
+      may be on a different network (e.g. coffee shop wifi to
+      home server), so transport encryption is essential.
+    - The shared token from each contact pair doubles as the PSK.
+    - Android's standard SSLContext has limited PSK support —
+      will need Bouncy Castle or Conscrypt for PSK cipher suites.
+
   Storage
     - SQLite for messages and state
     - Encrypted storage for contacts/tokens
-
-
-BROWSER UI (shared between android and linux)
-
-  The linux daemon already serves HTTP. It could serve an HTML5
-  interface on the same port, replacing the JSON health check on
-  GET / with a full web UI (move health check to GET /status).
-
-  This gives linux users a browser-based option:
-    - Visit localhost:8025 to read/write/delete messages
-    - Same HTML5+WASM code used by the android app
-    - No new dependencies — the daemon is already an HTTP server
-    - Could be toggled with a config option (WEB_UI = true)
-
-  The web UI talks to the daemon via the existing JSON endpoints
-  (/deliver, /delete, /poll). The only new thing is serving
-  static files (the HTML and WASM).
 
 
 PROTOCOL SUMMARY
@@ -142,7 +140,7 @@ PROTOCOL SUMMARY
   Existing (no changes):
     POST /deliver  — send a message
     POST /delete   — notify of deletion
-    GET /          — health check (or web UI)
+    GET /          — health check
 
   New:
     POST /poll     — pull pending messages and deletions
@@ -162,14 +160,6 @@ OPEN QUESTIONS
     polls you, mark them as poll-capable) or just always queue
     deletions for everyone? Queuing for everyone is simpler and
     avoids the distinction entirely.
-
-  - How much of the C/WASM core can be shared between the android
-    app and the linux browser UI? Ideally all of it — the same
-    .wasm file runs in both contexts.
-
-  - For the web UI: authentication? Currently the daemon trusts
-    localhost. If serving a web UI, it should probably only bind
-    to 127.0.0.1 for the UI, or require a local auth token.
 
 
 NAT RESEARCH NOTES

@@ -622,7 +622,7 @@ echo "  libs/socket/core.so    — luasocket"
 echo "  libs/mime/core.so      — luasocket mime"
 echo "  libs/ssl.so            — luasec (PSK enabled)"
 echo ""
-echo "To enable encryption, set encrypt = true in ~/.config/rmail/config"
+echo "TLS-PSK encryption is active — no configuration needed."
 if $NAT_INSECURE; then
     echo ""
     warn "NOTE: insecure NAT protocols detected on your router (see warnings above)"

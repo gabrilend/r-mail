@@ -76,7 +76,7 @@ Removing an `attach:` line from the outbox file deletes that attachment from the
 
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
-- **LuaSec** (optional) — required for TLS-PSK encryption, must be compiled with PSK support
+- **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
 
 Run `scripts/install-deps.sh --help` to compile all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
 
@@ -236,7 +236,7 @@ in {
 
 be sure to fill in the correct value where it says YOURUSER.
 
-If you need encryption, run `scripts/install-deps.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
+Run `scripts/install-deps.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
 
 Then rebuild:
 
@@ -413,15 +413,9 @@ On first startup it just saves the current IP without notifying anyone.
 
 ## Encryption
 
-rmail supports TLS-PSK (Pre-Shared Key) encryption for all peer connections. When enabled, every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key.
+All connections are encrypted with TLS-PSK (Pre-Shared Key). Every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key. Both sides must have the same token.
 
-To enable:
-
-1. Run `scripts/install-deps.sh` to compile LuaSec with PSK support
-2. Set `encrypt = true` in `~/.config/rmail/config`
-3. Restart rmail
-
-Both sides of a contact pair must have encryption enabled and the same token. If one side has encryption on and the other doesn't, connections will fail (messages stay in the outbox and retry on the next sync cycle).
+LuaSec with PSK support is required — run `scripts/install-deps.sh` to compile it.
 
 ## Hooks
 
@@ -448,11 +442,10 @@ Each hook receives a temp file path as its first argument containing the event d
 4. Is the port open in their OS firewall?
 5. Is the host/port in your contacts file correct (public IP, not local IP)?
 6. Do both sides have the same token?
-7. Do both sides have the same encryption setting? TLS-PSK must be enabled manually if you want to have Transport Level Security with a Pre Shared Key.
-8. Did you wait long enough for the daemon to try sending the messages again?
+7. Did you wait long enough for the daemon to try sending the messages again?
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. (highly recommended) - System packages often don't include PSK.
+**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
 
 **Port already in use** — another instance may be running, or change the port in your contacts file under `"me"` to something not in use by another application.
