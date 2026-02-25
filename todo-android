@@ -48,16 +48,13 @@ LINUX DAEMON CHANGES
     returns any pending deletions.
 
   Pending deletion queue
-    Currently delete notifications are fire-and-forget. For
-    contacts that poll, deletions need to be queued in state
-    until the next poll picks them up.
+    Delete notifications are now reliable — the daemon retries
+    until the recipient ACKs. Pending deletions are tracked in
+    outbox.json state (recipients persist until notified).
 
-    Stored in .state/pending-deletions.json:
-      {"alice": ["msg-id-1", "msg-id-2"], "bob": ["msg-id-3"]}
-
-    When the sender deletes an outbox file (or removes a to: line),
-    if the push notification to the recipient fails, queue the
-    message_id here. The /poll endpoint returns and clears these.
+    The /poll endpoint returns pending deletions by checking
+    outbox.json for entries where the file is deleted but the
+    polling contact's recipient entry still exists.
 
   No "poll" field needed in contacts
     The daemon just tries to push. If push fails, the message

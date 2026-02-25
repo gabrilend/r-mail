@@ -1042,6 +1042,33 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
+    -- detect contact renames via stored token
+    local contact_by_token = {}
+    for cname, contact in pairs(contacts) do
+        if cname ~= "me" and contact.token then
+            contact_by_token[contact.token] = cname
+        end
+    end
+    for fname, fmeta in pairs(state) do
+        if fmeta.recipients then
+            local renames = {}
+            for rname, rmeta in pairs(fmeta.recipients) do
+                if rmeta.token and not contacts[rname] then
+                    local new_name = contact_by_token[rmeta.token]
+                    if new_name and not fmeta.recipients[new_name] then
+                        renames[rname] = new_name
+                    end
+                end
+            end
+            for old_name, new_name in pairs(renames) do
+                fmeta.recipients[new_name] = fmeta.recipients[old_name]
+                fmeta.recipients[old_name] = nil
+                log("contact renamed: %s -> %s (state migrated for %s)", old_name, new_name, fname)
+                did_work = true
+            end
+        end
+    end
+
     -- Phase 1: collect all pending operations
     local ops = {}
 
@@ -1197,11 +1224,15 @@ local function sync_outbox(my_name)
         -- Phase 3: process results
         for i, op in ipairs(ops) do
             if op.type == "notify_removal" then
-                if state[op.filename] then
-                    state[op.filename].recipients[op.recipient] = nil
-                    remove_recipient_from_file(OUTBOX .. "/" .. op.filename, op.recipient)
-                    log("notified %s of removal: %s", op.recipient, op.filename)
-                    did_work = true
+                if results[i].ok then
+                    if state[op.filename] then
+                        state[op.filename].recipients[op.recipient] = nil
+                        remove_recipient_from_file(OUTBOX .. "/" .. op.filename, op.recipient)
+                        log("notified %s of removal: %s", op.recipient, op.filename)
+                        did_work = true
+                    end
+                else
+                    log("failed to notify %s of removal: %s (will retry)", op.recipient, op.filename)
                 end
             elseif op.type == "deliver" then
                 if results[i].ok then
@@ -1213,6 +1244,7 @@ local function sync_outbox(my_name)
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
                             attachments = next(att_state) and att_state or nil,
+                            token = op.contact.token,
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
@@ -1233,26 +1265,39 @@ local function sync_outbox(my_name)
                     did_work = true
                 end
             elseif op.type == "delete_attachment" then
-                if state[op.filename] and state[op.filename].recipients[op.recipient] then
-                    local rmeta = state[op.filename].recipients[op.recipient]
-                    if rmeta.attachments then
-                        rmeta.attachments[op.attachment_name] = nil
-                        if not next(rmeta.attachments) then rmeta.attachments = nil end
+                if results[i].ok then
+                    if state[op.filename] and state[op.filename].recipients[op.recipient] then
+                        local rmeta = state[op.filename].recipients[op.recipient]
+                        if rmeta.attachments then
+                            rmeta.attachments[op.attachment_name] = nil
+                            if not next(rmeta.attachments) then rmeta.attachments = nil end
+                        end
                     end
+                    log("notified %s of attachment removal: %s", op.recipient, op.attachment_name)
+                    did_work = true
+                else
+                    log("failed to notify %s of attachment removal: %s (will retry)", op.recipient, op.attachment_name)
                 end
-                log("notified %s of attachment removal: %s", op.recipient, op.attachment_name)
-                did_work = true
             elseif op.type == "notify_deletion" then
-                log("notified %s of deletion: %s", op.recipient, op.filename)
-                did_work = true
+                if results[i].ok then
+                    if state[op.filename] and state[op.filename].recipients then
+                        state[op.filename].recipients[op.recipient] = nil
+                    end
+                    log("notified %s of deletion: %s", op.recipient, op.filename)
+                    did_work = true
+                else
+                    log("failed to notify %s of deletion: %s (will retry)", op.recipient, op.filename)
+                end
             end
         end
     end
 
-    -- clean up deleted files from state
+    -- clean up deleted files from state (only when all recipients notified)
     for name in pairs(state) do
         if not current[name] then
-            state[name] = nil
+            if not state[name].recipients or not next(state[name].recipients) then
+                state[name] = nil
+            end
         end
     end
 
@@ -1278,10 +1323,16 @@ local function sync_inbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(INBOX)) do current[name] = true end
 
-    -- collect deletion notifications
+    -- collect deletion notifications (newly missing files + pending retries)
     local ops = {}
     for name, meta in pairs(state) do
         if not current[name] then
+            if not meta.pending_delete then
+                -- first time: clean up local attachments, mark pending
+                delete_inbox_attachments(meta)
+                meta.pending_delete = true
+                did_work = true
+            end
             local sender = meta["from"] or ""
             if contacts[sender] then
                 ops[#ops + 1] = {
@@ -1289,10 +1340,11 @@ local function sync_inbox(my_name)
                     message_id = meta.message_id,
                     contact = contacts[sender],
                 }
+            else
+                -- sender not in contacts, can't notify, just drop
+                state[name] = nil
+                did_work = true
             end
-            delete_inbox_attachments(meta)
-            state[name] = nil
-            did_work = true
         end
     end
 
@@ -1310,9 +1362,15 @@ local function sync_inbox(my_name)
                 psk_identity = my_name, psk_key = op.contact.token,
             }
         end
-        http_post_batch(requests)
-        for _, op in ipairs(ops) do
-            log("notified %s of inbox deletion: %s", op.sender, op.filename)
+        local results = http_post_batch(requests)
+        for i, op in ipairs(ops) do
+            if results[i].ok then
+                state[op.filename] = nil
+                log("notified %s of inbox deletion: %s", op.sender, op.filename)
+                did_work = true
+            else
+                log("failed to notify %s of inbox deletion: %s (will retry)", op.sender, op.filename)
+            end
         end
     end
 
@@ -1367,7 +1425,7 @@ local function verify_ip_change(new_ip, used_service)
     return false
 end
 
-local function sync_address(my_name, port)
+local function detect_ip_change(my_name, port)
     local new_ip, service = check_public_ip()
     if not new_ip then return end
 
@@ -1392,29 +1450,68 @@ local function sync_address(my_name, port)
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
     write_file(STATE .. "/public_ip", new_ip)
 
+    -- write pending notifications for all contacts
     local contacts = load_contacts()
-    local requests = {}
-    local names = {}
+    local pending = load_state("pending-address.json")
     for name, contact in pairs(contacts) do
         if name ~= "me" and contact.host then
-            requests[#requests + 1] = {
-                host = contact.host, port = contact.port,
-                path = "/update-address",
-                payload = json.encode({
-                    ["from"] = my_name, token = contact.token,
-                    host = new_ip, port = port, notify = NOTIFY_IP_CHANGE,
-                }),
-                psk_identity = my_name, psk_key = contact.token,
+            pending[name] = {host = new_ip, port = port}
+        end
+    end
+    save_state("pending-address.json", pending)
+end
+
+local function sync_address_notifications(my_name)
+    local pending = load_state("pending-address.json")
+    if not next(pending) then return false end
+
+    local contacts = load_contacts()
+    local ops = {}
+
+    for name, info in pairs(pending) do
+        if contacts[name] and contacts[name].host then
+            ops[#ops + 1] = {
+                name = name, contact = contacts[name],
+                host = info.host, port = info.port,
             }
-            names[#names + 1] = name
+        else
+            -- contact removed, drop the pending notification
+            pending[name] = nil
         end
     end
-    if #requests > 0 then
-        http_post_batch(requests)
-        for _, name in ipairs(names) do
-            log("notified %s of address change", name)
+
+    if #ops == 0 then
+        save_state("pending-address.json", pending)
+        return false
+    end
+
+    local requests = {}
+    for i, op in ipairs(ops) do
+        requests[i] = {
+            host = op.contact.host, port = op.contact.port,
+            path = "/update-address",
+            payload = json.encode({
+                ["from"] = my_name, token = op.contact.token,
+                host = op.host, port = op.port, notify = NOTIFY_IP_CHANGE,
+            }),
+            psk_identity = my_name, psk_key = op.contact.token,
+        }
+    end
+
+    local results = http_post_batch(requests)
+    local did_work = false
+    for i, op in ipairs(ops) do
+        if results[i].ok then
+            pending[op.name] = nil
+            log("notified %s of address change", op.name)
+            did_work = true
+        else
+            log("failed to notify %s of address change (will retry)", op.name)
         end
     end
+
+    save_state("pending-address.json", pending)
+    return did_work
 end
 
 -- ============================================================
@@ -1491,7 +1588,7 @@ local function main()
     log("listening on :%d", port)
 
     -- check for IP change on startup
-    pcall(sync_address, my_name, port)
+    pcall(detect_ip_change, my_name, port)
 
     local interval = 300
     local MIN_INTERVAL = 60
@@ -1551,7 +1648,8 @@ local function main()
             local ok, err = pcall(function()
                 local w1 = sync_outbox(my_name)
                 local w2 = sync_inbox(my_name)
-                if w1 or w2 then
+                local w3 = sync_address_notifications(my_name)
+                if w1 or w2 or w3 then
                     interval = math.max(MIN_INTERVAL, interval - 240)
                     log("had work, interval -> %ds", interval)
                 else
