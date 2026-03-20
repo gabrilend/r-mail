@@ -78,20 +78,28 @@ Removing an `attach:` line from the outbox file deletes that attachment from the
 - **LuaSocket** — TCP networking for Lua
 - **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
 
-Run `scripts/install-deps.sh --help` to compile all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
+Run `scripts/install.sh --help` to compile all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
 
 ## Configuration
 
-The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on startup if they don't exist.
+The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on startup if they don't exist. The install script creates both the config file and a contacts file with your identity pre-filled.
 
-Create `~/mail/contacts`. The first entry is always `"me"` — your name and port. The rest are your contacts:
+### Config file
+
+`~/.config/rmail/config` controls your identity and settings. The most important field is `name`, which must match your key in the contacts file:
+
+```
+name = yourname
+port = 8025
+mail = ~/mail
+```
+
+### Contacts file
+
+`~/mail/contacts` is a JSON file listing the people you communicate with. Lines starting with `//` are treated as comments. Your own identity (name and port) lives entirely in the config file — the contacts file is just an address book.
 
 ```json
 {
-  "me": {
-    "name": "yourname",
-    "port": 8025
-  },
   "alice": {
     "host": "203.0.113.1",
     "port": 8025,
@@ -175,7 +183,7 @@ This returns `{"ok":true,"name":"yourname"}` if everything is working. You can a
 
 If you cannot access your router's admin panel (shared housing, restrictive ISP, etc.), rmail can attempt automatic port forwarding.
 
-1. Run `scripts/install-deps.sh` — it offers to compile `upnpc` and `natpmpc` from source.
+1. Run `scripts/install.sh` — it offers to compile `upnpc` and `natpmpc` from source.
 
 2. Enable in `~/.config/rmail/config`:
 
@@ -236,7 +244,7 @@ in {
 
 be sure to fill in the correct value where it says YOURUSER.
 
-Run `scripts/install-deps.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
+Run `scripts/install.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
 
 Then rebuild:
 
@@ -415,19 +423,17 @@ On first startup it just saves the current IP without notifying anyone.
 
 All connections are encrypted with TLS-PSK (Pre-Shared Key). Every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key. Both sides must have the same token.
 
-LuaSec with PSK support is required — run `scripts/install-deps.sh` to compile it.
+LuaSec with PSK support is required — run `scripts/install.sh` to compile it.
 
 ## Hooks
 
 Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
 
-- **`on_receive_raw`** — runs before a received message is written to disk. Your script's stdout replaces the message body. Use for content filtering or non-urgent remote code execution.
-- **`on_receive`** — runs after a message is saved to inbox. Use for notifications or backups.
-- **`on_package`** — runs after an attachment is saved. Use for notifications or processing.
-- **`on_send`** — runs once per recipient before sending. Called as `script <tmpfile> <recipient_name>`. Your script's stdout replaces the body for that recipient.
-- **`on_delete`** — runs when a message is deleted by either side.
-
-Each hook receives a temp file path as its first argument containing the event data. See the config file comments for details on what each temp file contains.
+- **`on_receive_raw`** — runs before a received message is written to inbox. `$1` is the raw message body. stdout replaces the body that gets saved. Use for content filtering or transformation.
+- **`on_receive`** — runs after a message is written to inbox. `$1` is the path to the saved inbox file. Use for notifications or backups.
+- **`on_package`** — runs after an attachment is saved. `$1` is the path to the saved attachment. Use for notifications or processing.
+- **`on_send`** — runs once per recipient before a message is sent. `$1` is the message body, `$2` is the recipient name. stdout replaces the body sent to that recipient. Use for per-recipient transformation.
+- **`on_delete`** — runs when a message is deleted. `$1` is the name of the other party (sender if inbox, recipient if outbox).
 
 ## Troubleshooting
 
@@ -446,6 +452,6 @@ Each hook receives a temp file path as its first argument containing the event d
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**"luasec not found" or "not compiled with PSK support"** — run `scripts/install-deps.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
+**"luasec not found" or "not compiled with PSK support"** — run `scripts/install.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
 
-**Port already in use** — another instance may be running, or change the port in your contacts file under `"me"` to something not in use by another application.
+**Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.

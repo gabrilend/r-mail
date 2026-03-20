@@ -1496,8 +1496,7 @@ local function main()
     end
     local contacts = load_contacts()
     local my_name = config.name
-    local me = contacts[my_name] or {}
-    local port = tonumber(me.port or 8025)
+    local port = tonumber(config.port or 8025)
 
     log("rmail starting: name=%s port=%d", my_name, port)
     log("mail dir: %s", MAIL)
