@@ -5,66 +5,8 @@
 -- Configuration (loaded from ~/.config/rmail/config)
 -- ============================================================
 
-local CONFIG_DIR  = (os.getenv("HOME") or "/tmp") .. "/.config/rmail"
-local CONFIG_PATH = CONFIG_DIR .. "/config"
+local CONFIG_PATH = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config"
 
-local DEFAULT_CONFIG = [[
-# rmail configuration
-# see README.md for full documentation
-
-# ---- directories ----
-
-# path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
-mail = ]] .. (os.getenv("HOME") or "/tmp") .. [[/mail
-
-# extra lua module path — searched before the bundled libs/ directory.
-# use this if you installed luasocket/luasec/dkjson somewhere non-standard.
-# libs = /path/to/lua-libs
-
-# ---- networking ----
-
-# on startup, rmail checks your public IP using multiple services.
-# if a change is detected and confirmed, all contacts are notified
-# and their contacts file is updated automatically.
-notify_ip_change = true
-
-# ---- NAT / port forwarding ----
-
-# attempt automatic port forwarding via UPnP or NAT-PMP on startup.
-# WARNING: these protocols are insecure — any device on your LAN can open ports
-# on your router without authentication. malware commonly exploits this.
-# prefer manual port forwarding through your router's admin panel.
-# requires upnpc and/or natpmpc — run scripts/install-deps.sh to compile them.
-# auto_port_forward = false
-
-# ---- hooks ----
-# hooks let you run scripts in response to message events.
-# each hook receives a temp file as its first argument containing event data.
-# hooks run asynchronously (in the background) unless noted otherwise.
-
-# on_receive_raw: runs while a received message is still in RAM, before
-# writing to disk. the script's stdout REPLACES the message body that gets
-# saved. runs synchronously. use for content filtering or transformation.
-# on_receive_raw = /path/to/script.sh
-
-# on_receive: runs immediately after a message is written to inbox/.
-# the temp file contains the path to the saved message.
-# on_receive = /path/to/script.sh
-
-# on_package: runs immediately after an attachment is saved to attachments/.
-# the temp file contains the path to the saved attachment.
-# on_package = /path/to/script.sh
-
-# on_send: runs once per recipient before sending a message from outbox/.
-# called as: script <tmpfile> <recipient_name>
-# the temp file contains the message body. stdout REPLACES the body sent
-# to that recipient. runs synchronously. use for per-recipient transformation.
-# on_send = /path/to/script.sh
-
-# on_delete: runs when a message is deleted (either by sender or recipient).
-# the temp file contains "from: <sender>\n<body>" or "to: <recipient>\n<body>".
-# on_delete = /path/to/script.sh
-]]
 
 local function load_config()
     local f = io.open(CONFIG_PATH, "r")
@@ -106,6 +48,23 @@ local ON_DELETE        = config.on_delete
 local AUTO_PORT_FORWARD  = config.auto_port_forward == true
 
 -- ============================================================
+
+local DEPS_REGISTRY = {
+    lua       = {min = "5.1",   max = "5.4.7", default = "5.4.7", required = true,
+                 description = "Lua interpreter and headers"},
+    luasocket = {min = "3.0.0", max = "3.1.0", default = "3.1.0", required = true,
+                 description = "TCP networking for Lua"},
+    luasec    = {min = "1.3.2", max = "1.3.2", default = "1.3.2", required = true,
+                 description = "TLS-PSK encryption (must compile with -DLSEC_ENABLE_PSK)"},
+    openssl   = {min = "1.1.1", max = "3.2.1", default = "3.2.1", required = true,
+                 description = "SSL/TLS library (must support PSK ciphers)"},
+    dkjson    = {min = "2.5",   max = "2.8",   default = "2.8",   required = true,
+                 description = "JSON encoding/decoding"},
+    miniupnpc = {min = "2.0",   max = "2.3.3", default = "2.3.3", required = false,
+                 description = "UPnP port forwarding (optional)"},
+    libnatpmp = {min = "0.0.1", max = "latest", default = "latest", required = false,
+                 description = "NAT-PMP port forwarding (optional)"},
+}
 
 -- find our own directory for libs/ imports
 local script_dir = arg[0]:match("(.*/)") or "./"
@@ -210,20 +169,14 @@ local function shell_quote(s)
 end
 
 local function run_hook(script, data, ...)
-    local tmp = os.tmpname()
-    write_file(tmp, data)
-    local args = shell_quote(tmp)
+    local args = shell_quote(data)
     for _, extra in ipairs({...}) do
         args = args .. " " .. shell_quote(extra)
     end
     local handle = io.popen(script .. " " .. args)
-    if not handle then
-        os.remove(tmp)
-        return nil
-    end
+    if not handle then return nil end
     local output = handle:read("*a")
     handle:close()
-    os.remove(tmp)
     return output
 end
 
@@ -271,7 +224,13 @@ end
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
-    return json.decode(text) or {}
+    local lines = {}
+    for line in text:gmatch("[^\n]*\n?") do
+        if not line:match("^%s*//") then
+            lines[#lines + 1] = line
+        end
+    end
+    return json.decode(table.concat(lines)) or {}
 end
 
 local function load_state(name)
@@ -446,7 +405,7 @@ local function nat_security_check(my_name)
     local contacts = load_contacts()
     local recipients = {}
     for name, _ in pairs(contacts) do
-        if name ~= "me" then
+        if name ~= my_name then
             recipients[#recipients + 1] = name
         end
     end
@@ -512,6 +471,20 @@ local function send_response(client, status, data)
         "Content-Length: " .. #body .. "\r\n" ..
         "Connection: close\r\n\r\n" ..
         body)
+end
+
+local function send_raw_response(client, status, content_type, body, extra_headers)
+    local text = ({[200]="OK", [403]="Forbidden", [404]="Not Found"})[status] or "Error"
+    local header = "HTTP/1.1 " .. status .. " " .. text .. "\r\n" ..
+        "Content-Type: " .. content_type .. "\r\n" ..
+        "Content-Length: " .. #body .. "\r\n"
+    if extra_headers then
+        for k, v in pairs(extra_headers) do
+            header = header .. k .. ": " .. v .. "\r\n"
+        end
+    end
+    header = header .. "Connection: close\r\n\r\n"
+    client:send(header .. body)
 end
 
 local function auth_check(data)
@@ -640,10 +613,7 @@ local function handle_delete(data)
     local inbox_state = load_state("inbox.json")
     for filename, meta in pairs(inbox_state) do
         if meta.message_id == message_id and meta["from"] == sender then
-            if ON_DELETE then
-                local content = read_file(INBOX .. "/" .. filename) or ""
-                run_hook(ON_DELETE, "from: " .. sender .. "\n" .. content)
-            end
+            if ON_DELETE then run_hook(ON_DELETE, sender) end
             if file_exists(INBOX .. "/" .. filename) then
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
@@ -661,10 +631,7 @@ local function handle_delete(data)
         if meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.message_id == message_id and recipient == sender then
-                    if ON_DELETE then
-                        local _, file_body = parse_outbox_file(OUTBOX .. "/" .. filename)
-                        run_hook(ON_DELETE, "to: " .. recipient .. "\n" .. (file_body or ""))
-                    end
+                    if ON_DELETE then run_hook(ON_DELETE, recipient) end
                     meta.recipients[recipient] = nil
                     local remaining = remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     log("removed recipient %s from %s (they deleted)", recipient, filename)
@@ -1045,7 +1012,7 @@ local function sync_outbox(my_name)
     -- detect contact renames via stored token
     local contact_by_token = {}
     for cname, contact in pairs(contacts) do
-        if cname ~= "me" and contact.token then
+        if cname ~= my_name and contact.token then
             contact_by_token[contact.token] = cname
         end
     end
@@ -1330,6 +1297,7 @@ local function sync_inbox(my_name)
             if not meta.pending_delete then
                 -- first time: clean up local attachments, mark pending
                 delete_inbox_attachments(meta)
+                if ON_DELETE then run_hook(ON_DELETE, meta["from"] or "") end
                 meta.pending_delete = true
                 did_work = true
             end
@@ -1454,7 +1422,7 @@ local function detect_ip_change(my_name, port)
     local contacts = load_contacts()
     local pending = load_state("pending-address.json")
     for name, contact in pairs(contacts) do
-        if name ~= "me" and contact.host then
+        if name ~= my_name and contact.host then
             pending[name] = {host = new_ip, port = port}
         end
     end
@@ -1518,29 +1486,17 @@ end
 -- Main
 -- ============================================================
 
-local function ensure_config()
-    os.execute('mkdir -p "' .. CONFIG_DIR .. '"')
-    local f = io.open(CONFIG_PATH, "r")
-    if f then
-        f:close()
-    else
-        write_file(CONFIG_PATH, DEFAULT_CONFIG)
-        log("created default config: %s", CONFIG_PATH)
-    end
-    -- symlink in project directory
-    os.execute('ln -sf "' .. CONFIG_PATH .. '" "' .. script_dir .. 'config"')
-    -- symlink in mail directory (next to contacts)
-    os.execute('ln -sf "' .. CONFIG_PATH .. '" "' .. MAIL .. '/config"')
-end
-
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. ATTACHMENTS .. '"')
-    ensure_config()
     write_file(STATE .. "/new-mail", "")
 
+    if not config.name then
+        io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n")
+        os.exit(1)
+    end
     local contacts = load_contacts()
-    local me = contacts["me"] or {}
-    local my_name = me.name or "user"
+    local my_name = config.name
+    local me = contacts[my_name] or {}
     local port = tonumber(me.port or 8025)
 
     log("rmail starting: name=%s port=%d", my_name, port)
@@ -1619,6 +1575,31 @@ local function main()
                 local method, path, headers, body = parse_request(client)
                 if method == "GET" and path == "/" then
                     send_response(client, 200, {ok = true, name = my_name})
+                elseif method == "GET" and path == "/deps" then
+                    send_response(client, 200, {deps = DEPS_REGISTRY})
+                elseif method == "GET" and path:match("^/deps/(.+)$") then
+                    local dep_name = path:match("^/deps/(.+)$")
+                    if DEPS_REGISTRY[dep_name] then
+                        send_response(client, 200, DEPS_REGISTRY[dep_name])
+                    else
+                        send_response(client, 404, {error = "unknown dependency: " .. dep_name})
+                    end
+                elseif method == "GET" and path == "/install-script" then
+                    local script_path = script_dir .. "scripts/install-deps.sh"
+                    local f = io.open(script_path, "r")
+                    if f then
+                        local content = f:read("*a")
+                        f:close()
+                        local hash_handle = io.popen("sha256sum '" .. script_path:gsub("'", "'\\''") .. "'")
+                        local sha256 = ""
+                        if hash_handle then
+                            sha256 = (hash_handle:read("*a") or ""):match("^(%x+)") or ""
+                            hash_handle:close()
+                        end
+                        send_raw_response(client, 200, "application/x-shellscript", content, {["X-SHA256"] = sha256})
+                    else
+                        send_response(client, 404, {error = "install script not found"})
+                    end
                 elseif method == "POST" and body and body ~= "" then
                     local data = json.decode(body)
                     if not auth_check(data) then

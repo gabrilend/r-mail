@@ -1,7 +1,12 @@
 #!/bin/sh
 # install-deps.sh — compile rmail dependencies from source
 #
-# Usage: ./scripts/install-deps.sh [--force]
+# Usage: ./scripts/install-deps.sh [--force] [--version dep=x.y.z ...]
+#
+# Examples:
+#   ./scripts/install-deps.sh --version lua=5.3.6
+#   ./scripts/install-deps.sh --version luasocket=3.0.0 --version openssl=3.0.0
+#   ./scripts/install-deps.sh --force --version lua=5.3.6
 #
 # Installs into:
 #   libs/    — Lua modules (.lua + .so)
@@ -10,9 +15,6 @@
 set -e
 
 FORCE=false
-if [ "$1" = "--force" ]; then
-    FORCE=true
-fi
 
 # resolve project root (parent of scripts/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,12 +23,98 @@ LIBS="$ROOT/libs"
 DEPS="$ROOT/deps"
 BUILD="$ROOT/.build-tmp"
 
-# versions
+# default versions
 LUA_VERSION="5.4.7"
 LUASOCKET_VERSION="3.1.0"
 LUASEC_VERSION="1.3.2"
 OPENSSL_VERSION="3.2.1"
 DKJSON_VERSION="2.8"
+
+# version ranges (min max) for validation
+LUA_MIN="5.1"; LUA_MAX="5.4.7"
+LUASOCKET_MIN="3.0.0"; LUASOCKET_MAX="3.1.0"
+LUASEC_MIN="1.3.2"; LUASEC_MAX="1.3.2"
+OPENSSL_MIN="1.1.1"; OPENSSL_MAX="3.2.1"
+DKJSON_MIN="2.5"; DKJSON_MAX="2.8"
+
+# ============================================================
+# Helpers (defined early for argument parsing)
+# ============================================================
+
+err()   { printf "  \033[31merror: %s\033[0m\n" "$*"; }
+
+# version_to_num "5.4.7" -> numeric value for comparison
+# pads to 3 components: major * 1000000 + minor * 1000 + patch
+version_to_num() {
+    echo "$1" | awk -F. '{printf "%d\n", ($1+0)*1000000 + ($2+0)*1000 + ($3+0)}'
+}
+
+# validate_version dep_name version min max
+# exits with error if version is outside [min, max]
+validate_version() {
+    _dep="$1"; _ver="$2"; _min="$3"; _max="$4"
+    _ver_n=$(version_to_num "$_ver")
+    _min_n=$(version_to_num "$_min")
+    _max_n=$(version_to_num "$_max")
+    if [ "$_ver_n" -lt "$_min_n" ] || [ "$_ver_n" -gt "$_max_n" ]; then
+        err "$_dep version $_ver is out of range [$_min, $_max]"
+        exit 1
+    fi
+}
+
+# parse arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force)
+            FORCE=true
+            shift
+            ;;
+        --version)
+            if [ -z "$2" ]; then
+                err "--version requires an argument (e.g., --version lua=5.3.6)"
+                exit 1
+            fi
+            _key="${2%%=*}"
+            _val="${2#*=}"
+            if [ "$_key" = "$2" ] || [ -z "$_val" ]; then
+                err "invalid --version format: $2 (expected dep=x.y.z)"
+                exit 1
+            fi
+            case "$_key" in
+                lua)
+                    validate_version lua "$_val" "$LUA_MIN" "$LUA_MAX"
+                    LUA_VERSION="$_val"
+                    ;;
+                luasocket)
+                    validate_version luasocket "$_val" "$LUASOCKET_MIN" "$LUASOCKET_MAX"
+                    LUASOCKET_VERSION="$_val"
+                    ;;
+                luasec)
+                    validate_version luasec "$_val" "$LUASEC_MIN" "$LUASEC_MAX"
+                    LUASEC_VERSION="$_val"
+                    ;;
+                openssl)
+                    validate_version openssl "$_val" "$OPENSSL_MIN" "$OPENSSL_MAX"
+                    OPENSSL_VERSION="$_val"
+                    ;;
+                dkjson)
+                    validate_version dkjson "$_val" "$DKJSON_MIN" "$DKJSON_MAX"
+                    DKJSON_VERSION="$_val"
+                    ;;
+                *)
+                    err "unknown dependency: $_key"
+                    err "valid dependencies: lua, luasocket, luasec, openssl, dkjson"
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
+        *)
+            err "unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
 
 LUA_INC=""
 LUA_LIB=""
@@ -40,12 +128,10 @@ CC=""
 
 info()  { printf "  %s\n" "$*"; }
 warn()  { printf "  \033[33m%s\033[0m\n" "$*"; }
-err()   { printf "  \033[31merror: %s\033[0m\n" "$*"; }
 ok()    { printf "  \033[32m%s\033[0m\n" "$*"; }
 
 ask_yn() {
     # ask_yn "prompt" — returns 0 for yes, 1 for no
-    if $FORCE; then return 0; fi
     printf "  %s [y/N] " "$1"
     read -r ans
     case "$ans" in
@@ -156,25 +242,30 @@ if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
 elif find_lua_system; then
     ok "found: $LUA_VER_STR"
 else
-    warn "Lua not found in PATH."
-    if ask_yn "Compile Lua 5.4 locally for this project? (~5MB disk)"; then
-        echo "  Downloading lua-$LUA_VERSION..."
-        mkdir -p "$BUILD"
-        download "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$BUILD/lua.tar.gz"
-        cd "$BUILD"
-        tar xzf lua.tar.gz
-        cd "lua-$LUA_VERSION"
-        info "Compiling..."
-        make -s linux-readline CC="$CC" 2>/dev/null || make -s linux CC="$CC" 2>/dev/null
-        make -s install INSTALL_TOP="$DEPS/lua" 2>/dev/null
-        cd "$ROOT"
-        LUA_INC="-I$DEPS/lua/include"
-        LUA_LIB="-L$DEPS/lua/lib"
-        ok "done (deps/lua/)"
-    else
-        err "Lua headers required to compile C extensions (luasocket, luasec)"
-        exit 1
-    fi
+    info "Lua not found in PATH, compiling locally..."
+    echo "  Downloading lua-$LUA_VERSION..."
+    mkdir -p "$BUILD"
+    download "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$BUILD/lua.tar.gz"
+    cd "$BUILD"
+    tar xzf lua.tar.gz
+    cd "lua-$LUA_VERSION"
+    info "Compiling..."
+    LUA_MAJOR_MINOR=$(echo "$LUA_VERSION" | awk -F. '{print $1 "." $2}')
+    case "$LUA_MAJOR_MINOR" in
+        5.1|5.2)
+            # Lua 5.1/5.2: linux-readline not always available
+            make -s linux CC="$CC" 2>/dev/null
+            ;;
+        *)
+            # Lua 5.3+: prefer linux-readline, fall back to linux
+            make -s linux-readline CC="$CC" 2>/dev/null || make -s linux CC="$CC" 2>/dev/null
+            ;;
+    esac
+    make -s install INSTALL_TOP="$DEPS/lua" 2>/dev/null
+    cd "$ROOT"
+    LUA_INC="-I$DEPS/lua/include"
+    LUA_LIB="-L$DEPS/lua/lib"
+    ok "done (deps/lua/)"
 fi
 
 # ============================================================
@@ -249,32 +340,36 @@ openssl_libdir() {
 
 if [ -d "$DEPS/openssl" ] && [ -f "$DEPS/openssl/include/openssl/ssl.h" ] && ! $FORCE; then
     OPENSSL_INC="-I$DEPS/openssl/include"
-    OPENSSL_LIB="-L$DEPS/openssl/lib"
+    OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
     ok "found locally compiled: deps/openssl/"
 elif find_openssl_system; then
     ok "found system-wide (headers: ${OPENSSL_INC:-default paths})"
 else
-    warn "OpenSSL not found system-wide."
-    if ask_yn "Compile OpenSSL locally for this project? (~80MB disk, takes a few minutes)"; then
-        echo "  Downloading openssl-$OPENSSL_VERSION..."
-        mkdir -p "$BUILD"
+    info "OpenSSL not found system-wide, compiling locally (this takes a few minutes)..."
+    echo "  Downloading openssl-$OPENSSL_VERSION..."
+    mkdir -p "$BUILD"
+    OPENSSL_MAJOR=$(echo "$OPENSSL_VERSION" | awk -F. '{print $1}')
+    if [ "$OPENSSL_MAJOR" -ge 3 ]; then
         download "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz" "$BUILD/openssl.tar.gz"
-        cd "$BUILD"
-        tar xzf openssl.tar.gz
-        cd "openssl-$OPENSSL_VERSION"
-        info "Configuring..."
-        ./Configure --prefix="$DEPS/openssl" no-shared no-tests -fPIC >/dev/null 2>&1
-        info "Compiling (this takes a few minutes)..."
-        make -s -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
-        make -s install_sw >/dev/null 2>&1
-        cd "$ROOT"
-        OPENSSL_INC="-I$DEPS/openssl/include"
-        OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
-        ok "done (deps/openssl/)"
     else
-        err "OpenSSL headers required to compile luasec"
-        exit 1
+        download "https://github.com/openssl/openssl/releases/download/OpenSSL_$(echo "$OPENSSL_VERSION" | tr '.' '_')/openssl-$OPENSSL_VERSION.tar.gz" "$BUILD/openssl.tar.gz"
     fi
+    cd "$BUILD"
+    tar xzf openssl.tar.gz
+    cd "openssl-$OPENSSL_VERSION"
+    info "Configuring..."
+    if [ "$OPENSSL_MAJOR" -ge 3 ]; then
+        ./Configure --prefix="$DEPS/openssl" no-shared no-tests -fPIC >/dev/null 2>&1
+    else
+        ./config --prefix="$DEPS/openssl" no-shared -fPIC >/dev/null 2>&1
+    fi
+    info "Compiling..."
+    make -s -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
+    make -s install_sw >/dev/null 2>&1
+    cd "$ROOT"
+    OPENSSL_INC="-I$DEPS/openssl/include"
+    OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
+    ok "done (deps/openssl/)"
 fi
 
 # ============================================================
@@ -333,12 +428,12 @@ install_luasocket() {
     cp socket.lua "$LIBS/socket.lua"
     cp mime.lua "$LIBS/mime.lua"
     cp ltn12.lua "$LIBS/ltn12.lua"
-    cp socket/http.lua "$LIBS/socket/http.lua"
-    cp socket/url.lua "$LIBS/socket/url.lua"
-    cp socket/tp.lua "$LIBS/socket/tp.lua"
-    cp socket/ftp.lua "$LIBS/socket/ftp.lua"
-    cp socket/smtp.lua "$LIBS/socket/smtp.lua"
-    cp socket/headers.lua "$LIBS/socket/headers.lua"
+    cp http.lua "$LIBS/socket/http.lua"
+    cp url.lua "$LIBS/socket/url.lua"
+    cp tp.lua "$LIBS/socket/tp.lua"
+    cp ftp.lua "$LIBS/socket/ftp.lua"
+    cp smtp.lua "$LIBS/socket/smtp.lua"
+    cp headers.lua "$LIBS/socket/headers.lua"
 
     cd "$ROOT"
     ok "done (libs/socket/core.so, libs/mime/core.so)"
@@ -346,11 +441,6 @@ install_luasocket() {
 
 if [ -f "$LIBS/socket/core.so" ] && ! $FORCE; then
     ok "found in libs/socket/core.so"
-    if ask_yn "luasocket already installed. Reinstall?"; then
-        install_luasocket
-    else
-        info "Skipped."
-    fi
 else
     install_luasocket
 fi
@@ -384,15 +474,15 @@ install_luasec() {
     for src in io.c buffer.c timeout.c usocket.c; do
         $CC $LUA_INC -Wall -O2 -fPIC -c -o "${src%.c}.o" "$src"
     done
-    ar rcu libluasocket.a io.o buffer.o timeout.o usocket.o
+    ar rcs libluasocket.a io.o buffer.o timeout.o usocket.o
     ranlib libluasocket.a
     cd ..
 
     info "Compiling ssl.so (with PSK support)..."
-    LUASEC_DEFS="-DWITH_LUASOCKET -DLSEC_ENABLE_PSK"
+    LUASEC_DEFS="-DWITH_LUASOCKET"
     LUASEC_SRCS="options.c x509.c context.c ssl.c config.c ec.c"
     for src in $LUASEC_SRCS; do
-        $CC -O2 -fPIC -Wall \
+        $CC -O2 -fPIC -Wall -Wno-deprecated-declarations \
             -I. $LUA_INC $OPENSSL_INC \
             $LUASEC_DEFS \
             -c -o "${src%.c}.o" "$src"
@@ -408,7 +498,7 @@ install_luasec() {
     mkdir -p "$LIBS/ssl"
     cp ssl.so "$LIBS/ssl.so"
     cp ssl.lua "$LIBS/ssl.lua"
-    cp ssl/https.lua "$LIBS/ssl/https.lua"
+    cp https.lua "$LIBS/ssl/https.lua"
 
     cd "$ROOT"
     ok "done (libs/ssl.so with PSK support)"
@@ -416,11 +506,6 @@ install_luasec() {
 
 if [ -f "$LIBS/ssl.so" ] && ! $FORCE; then
     ok "found in libs/ssl.so"
-    if ask_yn "luasec already installed. Reinstall?"; then
-        install_luasec
-    else
-        info "Skipped."
-    fi
 else
     install_luasec
 fi
@@ -434,6 +519,13 @@ LIBNATPMP_COMMIT="134fc89e2781e154e40042641f4d8bcbe42579f1"
 
 echo ""
 echo "Checking for NAT traversal tools (optional)..."
+echo ""
+warn "NOTE: UPnP and NAT-PMP are insecure protocols — any device on your LAN"
+warn "can open ports on your router without authentication. Installing these"
+warn "tools does NOT make your system vulnerable. You would only be at risk if"
+warn "you enable auto_port_forward in ~/.config/rmail/config, which is disabled"
+warn "by default. Manual port forwarding through your router is recommended."
+echo ""
 
 HAVE_UPNPC=false
 HAVE_NATPMPC=false
@@ -458,7 +550,7 @@ else
         tar xzf miniupnpc.tar.gz
         cd "miniupnp-$MINIUPNPC_TAG/miniupnpc"
         info "Compiling..."
-        make -s upnpc-static CC="$CC" 2>/dev/null
+        make -s build/upnpc-static CC="$CC"
         cp build/upnpc-static "$BIN/upnpc"
         chmod +x "$BIN/upnpc"
         cd "$ROOT"
@@ -485,7 +577,7 @@ else
         tar xzf libnatpmp.tar.gz
         cd "libnatpmp-$LIBNATPMP_COMMIT"
         info "Compiling..."
-        make -s natpmpc-static CC="$CC" 2>/dev/null
+        make -s natpmpc-static CC="$CC" CFLAGS="-Wno-parentheses"
         cp natpmpc-static "$BIN/natpmpc"
         chmod +x "$BIN/natpmpc"
         cd "$ROOT"
@@ -565,11 +657,88 @@ if [ -d "$BUILD" ]; then
 fi
 
 # ============================================================
-# 9. Initial setup (contacts file with random port)
+# 9. Initial setup (config file)
 # ============================================================
 
 echo ""
+CONFIG_DIR="${HOME}/.config/rmail"
+CONFIG_FILE="$CONFIG_DIR/config"
 MAIL_DIR="${HOME}/mail"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Setting up config file..."
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<CONFIG
+# rmail configuration
+# see README.md for full documentation
+
+# ---- identity ----
+
+# your name as it appears to contacts (must match your key in the contacts file)
+name = $(whoami)
+
+# ---- directories ----
+
+# path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
+mail = ${HOME}/mail
+
+# extra lua module path — searched before the bundled libs/ directory.
+# use this if you installed luasocket/luasec/dkjson somewhere non-standard.
+# libs = /path/to/lua-libs
+
+# ---- networking ----
+
+# on startup, rmail checks your public IP using multiple services.
+# if a change is detected and confirmed, all contacts are notified
+# and their contacts file is updated automatically.
+notify_ip_change = true
+
+# ---- NAT / port forwarding ----
+
+# attempt automatic port forwarding via UPnP or NAT-PMP on startup.
+# WARNING: these protocols are insecure — any device on your LAN can open ports
+# on your router without authentication. malware commonly exploits this.
+# prefer manual port forwarding through your router's admin panel.
+# requires upnpc and/or natpmpc — run scripts/install-deps.sh to compile them.
+# auto_port_forward = false
+
+# ---- hooks ----
+# hooks let you run scripts in response to message events.
+
+# on_receive_raw: runs before a received message is written to inbox/.
+# \$1 is the raw message body. stdout REPLACES the body that gets saved.
+# use for content filtering or transformation.
+# on_receive_raw = /path/to/script.sh
+
+# on_receive: runs after a message is written to inbox/.
+# \$1 is the path to the saved inbox file.
+# on_receive = /path/to/script.sh
+
+# on_package: runs after an attachment is saved.
+# \$1 is the path to the saved attachment.
+# on_package = /path/to/script.sh
+
+# on_send: runs once per recipient before a message is sent.
+# \$1 is the message body, \$2 is the recipient name.
+# stdout REPLACES the body sent to that recipient.
+# use for per-recipient transformation.
+# on_send = /path/to/script.sh
+
+# on_delete: runs when a message is deleted. \$1 is the name of the other
+# party (sender if inbox, recipient if outbox).
+# on_delete = /path/to/script.sh
+CONFIG
+    ok "created config: $CONFIG_FILE"
+fi
+
+ln -sf "$CONFIG_FILE" "$ROOT/config"
+ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
+
+# ============================================================
+# 10. Initial setup (contacts file with random port)
+# ============================================================
+
+echo ""
 CONTACTS_FILE="$MAIL_DIR/contacts"
 
 if [ ! -f "$CONTACTS_FILE" ]; then
@@ -590,12 +759,64 @@ if [ ! -f "$CONTACTS_FILE" ]; then
 
     RANDOM_PORT=$(gen_random_port)
 
+    # detect public IP using the same services as rmail, verified by a second source
+    fetch_ip() {
+        if command -v curl >/dev/null 2>&1; then
+            curl -s --max-time 5 "http://$1/" 2>/dev/null
+        else
+            wget -q -T 5 -O - "http://$1/" 2>/dev/null
+        fi
+    }
+    IP_SERVICES="ifconfig.me icanhazip.com api.ipify.org checkip.amazonaws.com"
+    MY_HOST=""
+    for svc in $IP_SERVICES; do
+        ip=$(fetch_ip "$svc" | tr -d '[:space:]')
+        if echo "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            for svc2 in $IP_SERVICES; do
+                [ "$svc2" = "$svc" ] && continue
+                ip2=$(fetch_ip "$svc2" | tr -d '[:space:]')
+                if [ "$ip2" = "$ip" ]; then
+                    MY_HOST="$ip"
+                    break 2
+                fi
+            done
+        fi
+    done
+    if [ -z "$MY_HOST" ]; then
+        warn "Could not detect public IP — set host in $CONTACTS_FILE manually"
+    fi
+
     mkdir -p "$MAIL_DIR"
     cat > "$CONTACTS_FILE" <<CONTACTS
+// rmail contacts file
+//
+// rmail contacts file
+// Lines starting with // are comments and are ignored by rmail.
+//
+// Each entry is keyed by name — the name is how you and your contacts
+// refer to each other when sending messages.
+//
+// YOUR IDENTITY
+// =============
+// Your own entry is identified by the "name" setting in your config file.
+// Share your public IP and port with anyone you want to communicate with.
+//
+// ADDING CONTACTS
+// ===============
+// Ask your contact to run rmail and share their IP, port, and token.
+// Add an entry like this:
+//
+//   "alice": {
+//     "host": "1.2.3.4",
+//     "port": 54321,
+//     "token": "their-shared-secret"
+//   }
+
 {
-  "me": {
-    "name": "$(whoami)",
-    "port": $RANDOM_PORT
+  "$(whoami)": {
+    "host": "$MY_HOST",
+    "port": $RANDOM_PORT,
+    "token": ""
   }
 }
 CONTACTS
@@ -603,8 +824,10 @@ CONTACTS
     ok "created contacts file: $CONTACTS_FILE"
     echo ""
     echo "  your rmail port: $RANDOM_PORT"
-    echo "  share this port (and your public IP) with contacts"
-    echo "  to find your public IP: curl ifconfig.me"
+    if [ -n "$MY_HOST" ]; then
+        echo "  your public IP:   $MY_HOST"
+    fi
+    echo "  share your IP and port with contacts so they can reach you"
     echo ""
 else
     info "contacts file already exists, keeping it"
