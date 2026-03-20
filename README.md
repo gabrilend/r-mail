@@ -78,7 +78,7 @@ Removing an `attach:` line from the outbox file deletes that attachment from the
 - **LuaSocket** — TCP networking for Lua
 - **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
 
-Run `scripts/install.sh --help` to compile all dependencies (including LuaSec with PSK) from source into the local `libs/` directory.
+Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
 
 ## Configuration
 
@@ -212,67 +212,58 @@ Then set up a manual port forward for your rmail port. See [nat-traversal-report
 
 ## Installation
 
-### NixOS
-
-Add to your `configuration.nix` (change the user, path, and port to match your setup):
-
-```nix
-{ config, pkgs, ... }:
-
-let
-  rmailPort = 8025;  # must match your contacts file
-  luaEnv = pkgs.lua5_4.withPackages (ps: [ ps.luasocket ]);
-in {
-  networking.firewall.allowedTCPPorts = [ rmailPort ];
-
-  systemd.services.rmail = {
-    description = "rmail messaging daemon";
-    after = [ "network.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "YOURUSER";
-      Group = "users";
-      ExecStart = "${luaEnv}/bin/lua /path/to/r-mail/rmail.lua";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-  };
-}
-```
-
-be sure to fill in the correct value where it says YOURUSER.
-
-Run `scripts/install.sh` to compile LuaSec with PSK support — the NixOS `luasec` package may not include it.
-
-Then rebuild:
-
-```
-sudo nixos-rebuild switch
-systemctl status rmail
-journalctl -u rmail -f
-```
-
-### Arch Linux
-
-Install Lua and LuaSocket:
-
-```
-sudo pacman -S lua lua-socket
-```
-
-Clone the repo and run:
-
-```
+```sh
 git clone https://github.com/gabrilend/r-mail.git
 cd r-mail
-lua rmail.lua
+scripts/install.sh
 ```
 
-To run as a systemd service, create `/etc/systemd/system/rmail.service`:
+`install.sh` compiles all dependencies from source into `libs/`, and generates your config and contacts files. It will ask whether to compile Lua locally or use your system version.
+
+To run manually:
+
+```sh
+lua rmail.lua
+# or, if you compiled Lua locally:
+deps/lua/bin/lua rmail.lua
+```
+
+## Running as a service
+
+`install.sh` detects your init system and offers to set up the service automatically. If you need to do it manually, the formats are below. Replace `/path/to/lua` with either `deps/lua/bin/lua` (local) or your system lua (`which lua`), and `/path/to/rmail` with the directory you cloned into.
+
+### systemd
+
+**User service** — no root required, starts on login:
 
 ```ini
+# ~/.config/systemd/user/rmail.service
+[Unit]
+Description=rmail messaging daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/lua /path/to/rmail/rmail.lua
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now rmail
+journalctl --user -u rmail -f
+# to keep running after logout:
+loginctl enable-linger
+```
+
+**System service** — starts at boot, requires root:
+
+```ini
+# /etc/systemd/system/rmail.service
 [Unit]
 Description=rmail messaging daemon
 After=network.target
@@ -280,7 +271,7 @@ After=network.target
 [Service]
 Type=simple
 User=YOURUSER
-ExecStart=/usr/bin/lua /path/to/r-mail/rmail.lua
+ExecStart=/path/to/lua /path/to/rmail/rmail.lua
 Restart=on-failure
 RestartSec=5
 
@@ -288,75 +279,36 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-be sure to insert the correct value for YOURUSER. Then, enable and start:
-
-```
+```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now rmail
 journalctl -u rmail -f
 ```
 
-### Void Linux
-
-Install Lua and LuaSocket:
-
-```
-sudo xbps-install -S lua54 lua54-luasocket
-```
-
-Clone the repo and run:
-
-```
-git clone https://github.com/gabrilend/r-mail.git
-cd r-mail
-lua rmail.lua
-```
-
-To run as a runit service, create the service directory:
-
-```
-sudo mkdir -p /etc/sv/rmail
-```
-
-Create `/etc/sv/rmail/run`:
+### runit
 
 ```sh
+# /etc/sv/rmail/run
 #!/bin/sh
-exec chpst -u YOURUSER lua /path/to/r-mail/rmail.lua 2>&1
+exec /path/to/lua /path/to/rmail/rmail.lua 2>&1
 ```
 
-be sure to put your username where it says YOURUSER above, then make it executable and enable:
-
-```
+```sh
+sudo mkdir -p /etc/sv/rmail
+sudo mv rmail-run /etc/sv/rmail/run
 sudo chmod +x /etc/sv/rmail/run
 sudo ln -s /etc/sv/rmail /var/service/
-sv status rmail
 ```
 
-### Gentoo
-
-Install Lua and LuaSocket:
-
-```
-sudo emerge dev-lang/lua dev-lua/luasocket
-```
-
-Clone the repo and run:
-
-```
-git clone https://github.com/gabrilend/r-mail.git
-cd r-mail
-lua rmail.lua
-```
-
-To run as an OpenRC service, create `/etc/init.d/rmail`:
+### OpenRC
 
 ```sh
+# /etc/init.d/rmail
 #!/sbin/openrc-run
 
 description="rmail messaging daemon"
-command="/usr/bin/lua"
-command_args="/path/to/r-mail/rmail.lua"
+command="/path/to/lua"
+command_args="/path/to/rmail/rmail.lua"
 command_user="YOURUSER"
 command_background=true
 pidfile="/run/rmail.pid"
@@ -364,13 +316,33 @@ output_log="/var/log/rmail.log"
 error_log="/var/log/rmail.log"
 ```
 
-be sure to fill in your username where it says YOURUSER. Then, make it executable and enable:
-
-```
+```sh
+sudo mv rmail-init /etc/init.d/rmail
 sudo chmod +x /etc/init.d/rmail
 sudo rc-update add rmail default
 sudo rc-service rmail start
 tail -f /var/log/rmail.log
+```
+
+### NixOS
+
+NixOS uses systemd internally but service files placed in `/etc/systemd/system/` are overwritten on every `nixos-rebuild`. Instead, `install.sh` generates a `rmail.nix` file — move it into place and import it:
+
+```sh
+sudo cp rmail.nix /etc/nixos/rmail.nix
+```
+
+Add to `/etc/nixos/configuration.nix`:
+
+```nix
+imports = [ ./rmail.nix ];
+```
+
+Then rebuild:
+
+```sh
+sudo nixos-rebuild switch
+journalctl -u rmail -f
 ```
 
 ## Protocol
@@ -439,7 +411,7 @@ Hooks let you run scripts in response to message events. Configure them in `~/.c
 
 **"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
 
-**"luasocket not found"** — install it with your package manager or `luarocks install luasocket`.
+**"luasocket not found"** — run `scripts/install.sh` to compile it locally.
 
 **Messages not sending** — this is almost always a port issue. Check these in order:
 1. Is the recipient's daemon actually running?

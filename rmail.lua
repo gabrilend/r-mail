@@ -87,9 +87,8 @@ end
 local ok2, socket = pcall(require, "socket")
 if not ok2 then
     io.stderr:write("error: luasocket not found.\n")
-    io.stderr:write("       install it with your package manager or luarocks:\n")
-    io.stderr:write("         luarocks install luasocket\n")
-    io.stderr:write("       or set libs in ~/.config/rmail/config to a directory containing it\n")
+    io.stderr:write("       " .. tostring(socket) .. "\n")
+    io.stderr:write("       run: scripts/install.sh\n")
     os.exit(1)
 end
 
@@ -98,12 +97,13 @@ local mime = require("mime")  -- base64 encoding (part of luasocket)
 local ok3, ssl = pcall(require, "ssl")
 if not ok3 then
     io.stderr:write("error: luasec not found\n")
-    io.stderr:write("       run: scripts/install-deps.sh\n")
+    io.stderr:write("       " .. tostring(ssl) .. "\n")
+    io.stderr:write("       run: scripts/install.sh\n")
     os.exit(1)
 end
 if not ssl.config or not ssl.config.capabilities or not ssl.config.capabilities.psk then
     io.stderr:write("error: luasec was not compiled with PSK support\n")
-    io.stderr:write("       run: scripts/install-deps.sh\n")
+    io.stderr:write("       run: scripts/install.sh\n")
     os.exit(1)
 end
 
@@ -1584,7 +1584,7 @@ local function main()
                         send_response(client, 404, {error = "unknown dependency: " .. dep_name})
                     end
                 elseif method == "GET" and path == "/install-script" then
-                    local script_path = script_dir .. "scripts/install-deps.sh"
+                    local script_path = script_dir .. "scripts/install.sh"
                     local f = io.open(script_path, "r")
                     if f then
                         local content = f:read("*a")

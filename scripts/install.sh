@@ -1,12 +1,12 @@
 #!/bin/sh
-# install-deps.sh — compile rmail dependencies from source
+# install.sh — compile rmail dependencies from source
 #
-# Usage: ./scripts/install-deps.sh [--force] [--version dep=x.y.z ...]
+# Usage: ./scripts/install.sh [--force] [--version dep=x.y.z ...]
 #
 # Examples:
-#   ./scripts/install-deps.sh --version lua=5.3.6
-#   ./scripts/install-deps.sh --version luasocket=3.0.0 --version openssl=3.0.0
-#   ./scripts/install-deps.sh --force --version lua=5.3.6
+#   ./scripts/install.sh --version lua=5.3.6
+#   ./scripts/install.sh --version luasocket=3.0.0 --version openssl=3.0.0
+#   ./scripts/install.sh --force --version lua=5.3.6
 #
 # Installs into:
 #   libs/    — Lua modules (.lua + .so)
@@ -235,14 +235,7 @@ find_lua_system() {
 
 LUA_VER_STR=""
 
-if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
-    LUA_INC="-I$DEPS/lua/include"
-    LUA_LIB="-L$DEPS/lua/lib"
-    ok "found locally compiled: deps/lua/"
-elif find_lua_system; then
-    ok "found: $LUA_VER_STR"
-else
-    info "Lua not found in PATH, compiling locally..."
+compile_lua() {
     echo "  Downloading lua-$LUA_VERSION..."
     mkdir -p "$BUILD"
     download "https://www.lua.org/ftp/lua-$LUA_VERSION.tar.gz" "$BUILD/lua.tar.gz"
@@ -253,11 +246,9 @@ else
     LUA_MAJOR_MINOR=$(echo "$LUA_VERSION" | awk -F. '{print $1 "." $2}')
     case "$LUA_MAJOR_MINOR" in
         5.1|5.2)
-            # Lua 5.1/5.2: linux-readline not always available
             make -s linux CC="$CC" 2>/dev/null
             ;;
         *)
-            # Lua 5.3+: prefer linux-readline, fall back to linux
             make -s linux-readline CC="$CC" 2>/dev/null || make -s linux CC="$CC" 2>/dev/null
             ;;
     esac
@@ -266,6 +257,24 @@ else
     LUA_INC="-I$DEPS/lua/include"
     LUA_LIB="-L$DEPS/lua/lib"
     ok "done (deps/lua/)"
+}
+
+if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
+    LUA_INC="-I$DEPS/lua/include"
+    LUA_LIB="-L$DEPS/lua/lib"
+    ok "found locally compiled: deps/lua/"
+elif find_lua_system; then
+    ok "found system: $LUA_VER_STR"
+    if ask_yn "Compile a local version instead? (recommended for reproducibility)"; then
+        compile_lua
+    fi
+else
+    if ask_yn "Lua not found in PATH. Compile locally?"; then
+        compile_lua
+    else
+        err "Lua is required — cannot continue without it"
+        exit 1
+    fi
 fi
 
 # ============================================================
@@ -665,6 +674,19 @@ CONFIG_DIR="${HOME}/.config/rmail"
 CONFIG_FILE="$CONFIG_DIR/config"
 MAIL_DIR="${HOME}/mail"
 
+# generate random port in 50000-65000 (used in config and contacts)
+gen_random_port() {
+    while true; do
+        RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
+        PORT=$(( (RAW % 15001) + 50000 ))
+        case "$PORT" in
+            50000|51413|54321|55553|60000) continue ;;
+            *) echo "$PORT"; return ;;
+        esac
+    done
+}
+RANDOM_PORT=$(gen_random_port)
+
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Setting up config file..."
     mkdir -p "$CONFIG_DIR"
@@ -676,6 +698,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
 # your name as it appears to contacts (must match your key in the contacts file)
 name = $(whoami)
+
+# port rmail listens on for incoming messages
+port = $RANDOM_PORT
 
 # ---- directories ----
 
@@ -699,7 +724,7 @@ notify_ip_change = true
 # WARNING: these protocols are insecure — any device on your LAN can open ports
 # on your router without authentication. malware commonly exploits this.
 # prefer manual port forwarding through your router's admin panel.
-# requires upnpc and/or natpmpc — run scripts/install-deps.sh to compile them.
+# requires upnpc and/or natpmpc — run scripts/install.sh to compile them.
 # auto_port_forward = false
 
 # ---- hooks ----
@@ -729,13 +754,16 @@ notify_ip_change = true
 # on_delete = /path/to/script.sh
 CONFIG
     ok "created config: $CONFIG_FILE"
+    echo ""
+    echo "  your rmail port: $RANDOM_PORT"
+    echo "  forward this port on your router to this machine"
 fi
 
 ln -sf "$CONFIG_FILE" "$ROOT/config"
 ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
 
 # ============================================================
-# 10. Initial setup (contacts file with random port)
+# 10. Initial setup (contacts file)
 # ============================================================
 
 echo ""
@@ -743,63 +771,13 @@ CONTACTS_FILE="$MAIL_DIR/contacts"
 
 if [ ! -f "$CONTACTS_FILE" ]; then
     echo "Setting up initial contacts file..."
-
-    # generate random port in 50000-65000
-    gen_random_port() {
-        while true; do
-            RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
-            PORT=$(( (RAW % 15001) + 50000 ))
-            # blacklist: known services in this range
-            case "$PORT" in
-                50000|51413|54321|55553|60000) continue ;;  # SAP, BitTorrent, common test ports
-                *) echo "$PORT"; return ;;
-            esac
-        done
-    }
-
-    RANDOM_PORT=$(gen_random_port)
-
-    # detect public IP using the same services as rmail, verified by a second source
-    fetch_ip() {
-        if command -v curl >/dev/null 2>&1; then
-            curl -s --max-time 5 "http://$1/" 2>/dev/null
-        else
-            wget -q -T 5 -O - "http://$1/" 2>/dev/null
-        fi
-    }
-    IP_SERVICES="ifconfig.me icanhazip.com api.ipify.org checkip.amazonaws.com"
-    MY_HOST=""
-    for svc in $IP_SERVICES; do
-        ip=$(fetch_ip "$svc" | tr -d '[:space:]')
-        if echo "$ip" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-            for svc2 in $IP_SERVICES; do
-                [ "$svc2" = "$svc" ] && continue
-                ip2=$(fetch_ip "$svc2" | tr -d '[:space:]')
-                if [ "$ip2" = "$ip" ]; then
-                    MY_HOST="$ip"
-                    break 2
-                fi
-            done
-        fi
-    done
-    if [ -z "$MY_HOST" ]; then
-        warn "Could not detect public IP — set host in $CONTACTS_FILE manually"
-    fi
-
     mkdir -p "$MAIL_DIR"
     cat > "$CONTACTS_FILE" <<CONTACTS
-// rmail contacts file
-//
 // rmail contacts file
 // Lines starting with // are comments and are ignored by rmail.
 //
 // Each entry is keyed by name — the name is how you and your contacts
 // refer to each other when sending messages.
-//
-// YOUR IDENTITY
-// =============
-// Your own entry is identified by the "name" setting in your config file.
-// Share your public IP and port with anyone you want to communicate with.
 //
 // ADDING CONTACTS
 // ===============
@@ -813,24 +791,223 @@ if [ ! -f "$CONTACTS_FILE" ]; then
 //   }
 
 {
-  "$(whoami)": {
-    "host": "$MY_HOST",
-    "port": $RANDOM_PORT,
-    "token": ""
-  }
 }
 CONTACTS
 
     ok "created contacts file: $CONTACTS_FILE"
     echo ""
-    echo "  your rmail port: $RANDOM_PORT"
-    if [ -n "$MY_HOST" ]; then
-        echo "  your public IP:   $MY_HOST"
-    fi
-    echo "  share your IP and port with contacts so they can reach you"
-    echo ""
 else
     info "contacts file already exists, keeping it"
+fi
+
+# ============================================================
+# 11. Service setup
+# ============================================================
+
+echo ""
+
+# find the lua binary that was selected/compiled
+LUA_BIN=""
+if [ -f "$DEPS/lua/bin/lua" ]; then
+    LUA_BIN="$DEPS/lua/bin/lua"
+else
+    for cmd in lua5.4 lua5.3 lua5.2 lua5.1 lua; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            LUA_BIN=$(command -v "$cmd")
+            break
+        fi
+    done
+fi
+
+# detect NixOS first — it uses systemd internally but service files
+# are overwritten on rebuild, so it needs its own handling
+NIXOS=false
+[ -f /etc/NIXOS ] && NIXOS=true
+
+# detect init system via PID 1, fall back to tool detection
+INIT_SYSTEM="unknown"
+if $NIXOS; then
+    INIT_SYSTEM="nixos"
+elif [ -f /proc/1/comm ]; then
+    case "$(cat /proc/1/comm 2>/dev/null)" in
+        systemd)     INIT_SYSTEM="systemd" ;;
+        runit)       INIT_SYSTEM="runit"   ;;
+        openrc-init) INIT_SYSTEM="openrc"  ;;
+    esac
+fi
+if [ "$INIT_SYSTEM" = "unknown" ]; then
+    if   command -v systemctl  >/dev/null 2>&1; then INIT_SYSTEM="systemd"
+    elif command -v sv         >/dev/null 2>&1; then INIT_SYSTEM="runit"
+    elif command -v rc-service >/dev/null 2>&1; then INIT_SYSTEM="openrc"
+    fi
+fi
+
+if [ "$INIT_SYSTEM" = "unknown" ]; then
+    info "Could not detect init system — skipping service setup"
+    info "See README.md for service file examples"
+elif ask_yn "Set up rmail to run as a service?"; then
+    case "$INIT_SYSTEM" in
+        nixos)
+            NIX_PORT=$(grep '^port' "$CONFIG_FILE" | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]')
+
+            NIX_FILE="$ROOT/rmail.nix"
+
+            # nix store paths change on every update, so if the user chose the
+            # system lua (LUA_BIN is under /nix/store/), use the stable
+            # pkgs.lua5_4 reference instead of the raw store path.
+            # if they compiled local lua, use that literal path directly.
+            if echo "$LUA_BIN" | grep -q '^/nix/store/'; then
+                cat > "$NIX_FILE" <<NIX
+{ config, pkgs, ... }:
+
+let
+  rmailPort = $NIX_PORT;
+in {
+  networking.firewall.allowedTCPPorts = [ rmailPort ];
+
+  systemd.services.rmail = {
+    description = "rmail messaging daemon";
+    after = [ "network.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "$(whoami)";
+      Group = "users";
+      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+}
+NIX
+            else
+                cat > "$NIX_FILE" <<NIX
+{ config, ... }:
+
+let
+  rmailPort = $NIX_PORT;
+in {
+  networking.firewall.allowedTCPPorts = [ rmailPort ];
+
+  systemd.services.rmail = {
+    description = "rmail messaging daemon";
+    after = [ "network.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "$(whoami)";
+      Group = "users";
+      ExecStart = "$LUA_BIN $ROOT/rmail.lua";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+}
+NIX
+            fi
+            ok "generated $NIX_FILE"
+            echo ""
+            echo "  Run these commands to install:"
+            echo "    sudo cp $NIX_FILE /etc/nixos/rmail.nix"
+            echo "    # add this line to /etc/nixos/configuration.nix:"
+            echo "    #   imports = [ ./rmail.nix ];"
+            echo "    sudo nixos-rebuild switch"
+            echo "  Logs: journalctl -u rmail -f"
+            ;;
+        systemd)
+            if ask_yn "Set up as a user service? (no root required, starts on login)"; then
+                SERVICE_DIR="$HOME/.config/systemd/user"
+                SERVICE_FILE="$SERVICE_DIR/rmail.service"
+                mkdir -p "$SERVICE_DIR"
+                cat > "$SERVICE_FILE" <<SERVICE
+[Unit]
+Description=rmail messaging daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$LUA_BIN $ROOT/rmail.lua
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+SERVICE
+                ok "created $SERVICE_FILE"
+                systemctl --user daemon-reload
+                systemctl --user enable rmail
+                systemctl --user start rmail
+                ok "service enabled and started"
+                echo ""
+                info "Logs: journalctl --user -u rmail -f"
+                info "To keep running after logout: loginctl enable-linger"
+            else
+                SERVICE_FILE="$ROOT/rmail.service"
+                cat > "$SERVICE_FILE" <<SERVICE
+[Unit]
+Description=rmail messaging daemon
+After=network.target
+
+[Service]
+Type=simple
+User=$(whoami)
+ExecStart=$LUA_BIN $ROOT/rmail.lua
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+                ok "generated $SERVICE_FILE"
+                echo ""
+                echo "  Run these commands to install the system service:"
+                echo "    sudo mv $SERVICE_FILE /etc/systemd/system/rmail.service"
+                echo "    sudo systemctl daemon-reload"
+                echo "    sudo systemctl enable --now rmail"
+                echo "  Logs: journalctl -u rmail -f"
+            fi
+            ;;
+        runit)
+            SERVICE_FILE="$ROOT/rmail-run"
+            cat > "$SERVICE_FILE" <<SERVICE
+#!/bin/sh
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua 2>&1
+SERVICE
+            chmod +x "$SERVICE_FILE"
+            ok "generated $SERVICE_FILE"
+            echo ""
+            echo "  Run these commands to install the service:"
+            echo "    sudo mkdir -p /etc/sv/rmail"
+            echo "    sudo mv $SERVICE_FILE /etc/sv/rmail/run"
+            echo "    sudo ln -s /etc/sv/rmail /var/service/"
+            echo "  Logs: sv status rmail"
+            ;;
+        openrc)
+            SERVICE_FILE="$ROOT/rmail-init"
+            cat > "$SERVICE_FILE" <<SERVICE
+#!/sbin/openrc-run
+
+description="rmail messaging daemon"
+command="$LUA_BIN"
+command_args="$ROOT/rmail.lua"
+command_user="$(whoami)"
+command_background=true
+pidfile="/run/rmail.pid"
+output_log="/var/log/rmail.log"
+error_log="/var/log/rmail.log"
+SERVICE
+            ok "generated $SERVICE_FILE"
+            echo ""
+            echo "  Run these commands to install the service:"
+            echo "    sudo mv $SERVICE_FILE /etc/init.d/rmail"
+            echo "    sudo chmod +x /etc/init.d/rmail"
+            echo "    sudo rc-update add rmail default"
+            echo "    sudo rc-service rmail start"
+            echo "  Logs: tail -f /var/log/rmail.log"
+            ;;
+    esac
 fi
 
 # ============================================================
