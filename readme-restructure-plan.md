@@ -2,164 +2,146 @@
 
 ## Goal
 
-README.md has grown large. Split it into focused documents under a `docs/`
-directory. README.md keeps the quickstart and overview; deep-dive topics move
-to their own files. The plan documents (`contacts-format-plan.md`,
-`attachment-consent-plan.md`) are consumed in the process — their content
-either made it into the code already or belongs in the user-facing docs. Once
-consumed, delete them.
+README.md has grown large. Move deep-dive topics to a `docs/` directory.
+README.md is treated as the only file a casual user will read — it should
+contain everything needed to get up and running. Power-user topics (attachment
+details, scripting, protocol internals, service setup) live in `docs/` with
+short pointers from the README.
+
+The plan documents (`contacts-format-plan.md`, `attachment-consent-plan.md`)
+are consumed in the process. Once their content is in the right place, delete
+them.
 
 ---
 
 ## Target document layout
 
 ```
-README.md                        # overview, quickstart, links to docs/
+README.md                     # overview, all core user docs, links to docs/
 docs/
-  configuration.md               # full config file reference
-  contacts.md                    # contacts file format, arbitrary fields
-  attachments.md                 # attachment workflow, consent, chunking
-  hooks.md                       # replaces scripting-tutorial.md
-  ports-and-networking.md        # port forwarding, UPnP, firewall, dynamic IP
-  protocol.md                    # wire protocol reference (for developers)
-  nat-traversal-report.md        # move existing nat-traversal-report.md here
+  attachments.md              # full attachment workflow
+  scripting-tutorial.md       # hooks reference + examples in bash, Lua, C
+  service.md                  # running as a service (systemd/runit/OpenRC/NixOS)
+  protocol.md                 # wire protocol reference (for developers)
+  nat-traversal-report.md     # move existing nat-traversal-report.md here
 ```
-
-`scripting-tutorial.md` is renamed and moved to `docs/hooks.md` — its content
-is already complete and just needs to live in the right place.
 
 ---
 
-## README.md after restructure
+## What stays in README.md (unchanged or lightly edited)
 
-Keep in README.md:
-- Project description (one paragraph)
+- Project description
 - Directory layout (`~/mail/` tree)
-- How to send a message (short example)
-- How attachments work (short summary, link to docs/attachments.md for details)
+- How to send a message
+- How attachments work — short summary only; link to `docs/attachments.md`
+  for the full workflow: "To learn more about sending files, including
+  the consent flow and how to configure attachment storage, see
+  [docs/attachments.md](docs/attachments.md)."
 - How deleting works
 - Dependencies list
 - Installation (`scripts/install.sh`, manual run)
-- Running as a service (systemd/runit/OpenRC/NixOS — these are long but
-  frequently needed; keep here or move to a service.md, decide during rewrite)
-- Link section at the bottom pointing to all docs/
-
-Remove from README.md (move to docs/):
-- Full config key reference → docs/configuration.md
-- Contacts file format details → docs/contacts.md
-- Full attachment workflow → docs/attachments.md
-- Hooks table and descriptions → docs/hooks.md (+ link: "For full docs and
-  examples in bash, Lua, and C, see docs/hooks.md — hooks are a powerful
-  feature worth exploring.")
-- Port forwarding, firewall, UPnP/NAT-PMP, dynamic IP → docs/ports-and-networking.md
-- Protocol section → docs/protocol.md
-- Troubleshooting → keep a short section in README.md with the most common
-  issues; move the full list to docs/troubleshooting.md or inline in each doc
+- Config file — keep the example block; config key documentation moves
+  into the config file itself (see below)
+- Contacts file format — keep in full; it's short and essential
+- Ports and networking — keep in full; critical for getting the system working
+- Encryption section
+- Hooks — keep the interface table and per-hook descriptions; shorten to a
+  paragraph that links out: "For examples in bash, Lua, and C, see
+  [docs/scripting-tutorial.md](docs/scripting-tutorial.md) — scripting hooks
+  are a powerful feature worth exploring."
+- Sync timing
+- Dynamic IP
+- Troubleshooting — keep in full; the list isn't long
 
 ---
 
-## docs/configuration.md
+## What moves to docs/
 
-All config keys in one place:
+### docs/service.md
 
-| Key                     | Default                    | Description                        |
-|-------------------------|----------------------------|------------------------------------|
-| `name`                  | (required)                 | your identity, must match contacts |
-| `port`                  | (required)                 | port the daemon listens on         |
-| `mail`                  | `~/mail`                   | root mail directory                |
-| `attachments`           | `~/mail/attachments`       | where received files are saved     |
-| `attachment_pending_dir`| `/tmp`                     | in-progress chunk storage          |
-| `attachment_chunk_size` | `5242880` (5 MB)           | bytes per chunk                    |
-| `auto_port_forward`     | `false`                    | enable UPnP/NAT-PMP                |
-| `notify_ip_change`      | `true`                     | notify contacts on IP change       |
-| `on_receive_raw`        | —                          | hook: path to executable           |
-| `on_receive`            | —                          | hook: path to executable           |
-| `on_send`               | —                          | hook: path to executable           |
-| `on_delete`             | —                          | hook: path to executable           |
-| `on_package`            | —                          | hook: path to executable           |
+Move the "Running as a service" section verbatim. README.md gets a one-liner:
+> To run rmail automatically on boot, see
+> [docs/service.md](docs/service.md).
 
----
+### docs/attachments.md
 
-## docs/contacts.md
-
-Content from README.md contacts section plus notes from contacts-format-plan.md:
-- File format (`name.field = value`, comments, bare-name lines)
-- The three standard fields (`ip`, `port`, `token`)
-- Arbitrary fields — stored, ignored by rmail, readable by hooks via grep
-- Example showing a multi-contact file with comments and alignment
-- JSON migration note (auto-detected on first startup)
-
-**Consume and delete**: `contacts-format-plan.md`
-
----
-
-## docs/attachments.md
-
-Full attachment workflow documentation. Content from README.md attachments
-section (expanded) plus relevant design rationale from attachment-consent-plan.md:
-- The `attach:` line syntax and per-recipient scoping (already in README)
-- The consent flow in detail: what the consent file looks like, how to respond,
-  what happens on accept vs. decline
+Expand the README's short attachment summary into the full workflow:
+- `attach:` line syntax and per-recipient scoping (already in README)
+- Consent flow in detail: what the consent file looks like, how to respond,
+  accept vs. decline behaviour
 - Transfer mechanics: compression, chunking, checksum verification, resumption
-- Cancellation: delete the outbox file
 - In-progress visibility: the STATUS file in `attachments/.pending/`
-- Config keys that affect attachments (link to docs/configuration.md)
-- Note that `expected_size` is reported by the sender and unverified
+- Cancellation: delete the outbox file
+- Config keys: `attachments`, `attachment_pending_dir`, `attachment_chunk_size`
+- Note that `expected_size` is the sender's reported value (unverified)
 
 **Consume and delete**: `attachment-consent-plan.md`
 
----
+### docs/scripting-tutorial.md
 
-## docs/hooks.md
+Move `scripting-tutorial.md` here verbatim — content is already complete.
 
-Move and lightly edit `scripting-tutorial.md`:
-- Hook interface table (already complete)
-- Per-hook descriptions (already complete)
-- Bash, Lua, and C examples (already complete)
-- Tips section (already complete)
+**Move and delete root copy**: `scripting-tutorial.md` → `docs/scripting-tutorial.md`
 
-README.md hooks section becomes a short paragraph:
-> Hooks let you run scripts in response to message events — new messages,
-> sends, deletions, received attachments. See [docs/hooks.md](docs/hooks.md)
-> for the full interface reference and examples in bash, Lua, and C.
+### docs/protocol.md
 
-**Consume and rename**: `scripting-tutorial.md` → `docs/hooks.md`
-
----
-
-## docs/ports-and-networking.md
-
-Move from README.md:
-- Port forwarding explanation and table
-- How to find local/public IP
-- Opening the firewall (ufw/iptables/nftables)
-- UPnP/NAT-PMP warning and how-to
-- Dynamic IP detection and notification
-
----
-
-## docs/protocol.md
-
-Move from README.md:
-- `/deliver` and `/delete` endpoint descriptions
-- Payload fields
+Move the Protocol section from README.md:
+- `/deliver` and `/delete` endpoint descriptions with payload fields
 - curl test example
 - Sync timing (adaptive timer)
+
+### docs/nat-traversal-report.md
+
+Move the existing `nat-traversal-report.md` into `docs/` without changes.
+Update the link in README.md's UPnP section.
+
+---
+
+## Config file documentation
+
+Remove the config reference from docs entirely. Instead, the config file
+generated by `install.sh` gets thorough inline comments — a summary table
+at the top, then an explanation comment above each key:
+
+```
+# rmail configuration
+#
+# Key                     Default                  Description
+# -----------------------------------------------------------------------
+# name                    (required)               your identity
+# port                    (required)               port the daemon listens on
+# mail                    ~/mail                   root mail directory
+# attachments             ~/mail/attachments       where received files are saved
+# attachment_pending_dir  /tmp                     in-progress chunk storage
+# attachment_chunk_size   5242880 (5 MB)           bytes per chunk
+# auto_port_forward       false                    enable UPnP/NAT-PMP
+# notify_ip_change        true                     notify contacts on IP change
+# on_receive_raw          —                        hook: path to executable
+# on_receive              —                        hook: path to executable
+# on_send                 —                        hook: path to executable
+# on_delete               —                        hook: path to executable
+# on_package              —                        hook: path to executable
+
+# ---- identity ----
+name = yourname
+
+# ---- network ----
+# port = 8025
+# ...
+```
 
 ---
 
 ## Link section in README.md
 
-Add a `## Docs` or `## More` section near the bottom of README.md:
+Add a `## Docs` section at the bottom:
 
 ```markdown
 ## Docs
 
-- [docs/configuration.md](docs/configuration.md) — all config keys
-- [docs/contacts.md](docs/contacts.md) — contacts file format
-- [docs/attachments.md](docs/attachments.md) — attachment workflow
-- [docs/hooks.md](docs/hooks.md) — scripting hooks (bash, Lua, C examples)
-- [docs/ports-and-networking.md](docs/ports-and-networking.md) — port forwarding, firewall, UPnP, dynamic IP
+- [docs/attachments.md](docs/attachments.md) — full attachment workflow, consent, configuration
+- [docs/scripting-tutorial.md](docs/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C
+- [docs/service.md](docs/service.md) — running rmail automatically on boot
 - [docs/protocol.md](docs/protocol.md) — wire protocol reference
 ```
 
@@ -167,9 +149,7 @@ Add a `## Docs` or `## More` section near the bottom of README.md:
 
 ## Files to delete after restructure
 
-- `contacts-format-plan.md` — content consumed into docs/contacts.md
-- `attachment-consent-plan.md` — content consumed into docs/attachments.md
-- `scripting-tutorial.md` — moved to docs/hooks.md
-
-`nat-traversal-report.md` is already a standalone reference doc; move it into
-`docs/` without changes (update the link in README.md / ports-and-networking.md).
+- `attachment-consent-plan.md` — content consumed into `docs/attachments.md`
+- `contacts-format-plan.md` — content already in README.md; nothing more to add
+- `scripting-tutorial.md` — moved to `docs/scripting-tutorial.md`
+- `readme-restructure-plan.md` — consumed when done
