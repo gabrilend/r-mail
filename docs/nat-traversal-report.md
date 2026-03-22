@@ -329,7 +329,7 @@ When enabled, rmail will attempt automatic port forwarding at startup:
 2. If UPnP fails, try NAT-PMP (via `natpmpc`)
 3. If both fail, log a warning and continue without a mapping
 
-The mapping is created for the port specified in the contacts file (`me.port`). It maps external port -> internal port (same number).
+The mapping is created for the port specified in `~/.config/rmail/config` (`port`). It maps external port -> internal port (same number).
 
 ### Mapping lifecycle
 

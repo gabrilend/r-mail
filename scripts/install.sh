@@ -754,7 +754,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" <<CONFIG
 # rmail configuration
-# see README.md for full documentation
+#
+# Key                      Default                Description
+# -----------------------------------------------------------------------
+# name                     (required)             your identity
+# port                     (required)             port the daemon listens on
+# mail                     ~/mail                 root mail directory
+# attachments              ~/mail/attachments     where received files are saved
+# attachment_pending_dir   /tmp                   in-progress chunk storage
+# attachment_chunk_size    5242880 (5 MB)         bytes per chunk
+# auto_port_forward        false                  enable UPnP/NAT-PMP
+# notify_ip_change         true                   notify contacts on IP change
+# on_receive_raw           —                      hook: path to executable
+# on_receive               —                      hook: path to executable
+# on_send                  —                      hook: path to executable
+# on_delete                —                      hook: path to executable
+# on_package               —                      hook: path to executable
 
 # ---- identity ----
 
@@ -802,7 +817,7 @@ notify_ip_change = true
 
 # ---- hooks ----
 # hooks let you run scripts in response to message events.
-# see scripting-tutorial.md for full documentation and examples.
+# see docs/scripting-tutorial.md for full documentation and examples.
 
 # on_receive_raw: runs before a received message is written to inbox/.
 # \$1=sender \$2=subject \$3=body. stdout REPLACES the body that gets saved.

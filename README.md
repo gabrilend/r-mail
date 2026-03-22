@@ -11,7 +11,7 @@ Each person runs an `rmail` daemon. It watches two directories:
   inbox/         # received messages appear here
   outbox/        # write files here to send
   attachments/   # received attachments
-  contacts       # your identity, address book, shared secrets
+  contacts       # address book and shared secrets
   .state/        # sync tracking (managed by daemon)
 ```
 
@@ -57,18 +57,7 @@ attach: /path/to/photo.jpg
 Here's the photo from yesterday.
 ```
 
-Both alice and bob get `photo.jpg`. To send an attachment to only some recipients, put it between their `to:` line and the next:
-
-```
-to: alice
-to: sarah
-attach: /path/to/notes.pdf
-to: bob
-
-Alice and Sarah get the PDF, bob just gets the message body.
-```
-
-Before any file is transferred, the recipient sees a consent request appear in their inbox:
+Before any data is transferred, the recipient sees a consent request in their inbox:
 
 ```
 alice wants to send you an attachment.
@@ -84,11 +73,11 @@ yes
 no
 ```
 
-Delete `no` to accept, or `yes` to decline. Once accepted, the file is transferred in chunks over the same encrypted channel as messages. When complete, the consent file is replaced with a confirmation and the attachment appears in `~/mail/attachments/`.
+Delete `no` to accept, or `yes` to decline. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-Interrupted transfers resume automatically — the receiver keeps whatever chunks have already arrived and the sender picks up where it left off on the next sync cycle.
+To cancel a transfer in progress, delete the outbox file.
 
-To cancel a transfer in progress, delete the outbox file. This notifies all recipients and stops any ongoing chunk transfer.
+For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
 
 ## Dependencies
 
@@ -105,24 +94,19 @@ The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on start
 
 ### Config file
 
-`~/.config/rmail/config` controls your identity and settings. The most important field is `name`, which must match your key in the contacts file:
+`~/.config/rmail/config` controls your identity and settings:
 
 ```
 name = yourname
 port = 8025
 mail = ~/mail
-
-# optional — shown with their defaults:
-# attachments          = ~/mail/attachments
-# attachment_pending_dir = /tmp
-# attachment_chunk_size  = 5242880
 ```
 
-`attachment_pending_dir` is where partially-received chunks are stored while a transfer is in progress. The default is `/tmp`, so the OS clears them automatically on reboot. Set it to a persistent path (e.g. `~/mail/attachments`) if you want interrupted transfers to survive a restart.
+The generated config file contains a comment above every available key explaining what it does.
 
 ### Contacts file
 
-`~/mail/contacts` is a line-oriented file listing the people you communicate with. Lines starting with `//` or `#` are comments. Your own identity lives in the config file — the contacts file is just an address book.
+`~/mail/contacts` is a line-oriented file listing the people you communicate with. Lines starting with `//` or `#` are comments.
 
 ```
 alice.ip    = 203.0.113.1
@@ -138,7 +122,7 @@ alice.token = "some-shared-secret"
 
 Both sides must have the same token for a given contact pair. Pick something long and random.
 
-You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly with grep. See `scripting-tutorial.md`.
+You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly with grep. See [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
 
 ## Ports
 
@@ -191,10 +175,10 @@ tcp dport 8025 accept
 ```
 
 To verify that the port is open, run this from a computer on the network:
-```
--ss -tlnp | grep 8025
-```
 
+```
+ss -tlnp | grep 8025
+```
 
 To verify the daemon is reachable:
 
@@ -223,12 +207,6 @@ If you cannot access your router's admin panel (shared housing, restrictive ISP,
 
 3. Restart rmail. It tries UPnP first, then NAT-PMP. If successful, the mapping is renewed every 30 minutes.
 
-**How it works:**
-- On startup, rmail creates a port mapping on your router via UPnP or NAT-PMP
-- The mapping is renewed periodically before it expires
-- On next startup, stale mappings from previous runs are cleaned up
-- If the mapping fails, rmail continues but logs a warning
-
 **Security check:** On every startup, rmail probes your router for UPnP and NAT-PMP. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to all your contacts advising them not to send sensitive information until you fix it.
 
 **Disabling UPnP/NAT-PMP on your router** (recommended):
@@ -238,7 +216,7 @@ Log into your router's admin panel and disable:
 - NAT-PMP
 - PCP (unless using authenticated PCP, which almost no routers support)
 
-Then set up a manual port forward for your rmail port. See [nat-traversal-report.md](nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
+Then set up a manual port forward for your rmail port. See [docs/nat-traversal-report.md](docs/nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
 
 ## Installation
 
@@ -258,160 +236,13 @@ lua rmail.lua
 deps/lua/bin/lua rmail.lua
 ```
 
-## Running as a service
+To run rmail automatically on boot, see [docs/service.md](docs/service.md).
 
-`install.sh` detects your init system and offers to set up the service automatically. If you need to do it manually, the formats are below. Replace `/path/to/lua` with either `deps/lua/bin/lua` (local) or your system lua (`which lua`), and `/path/to/rmail` with the directory you cloned into.
+## Encryption
 
-### systemd
+All connections are encrypted with TLS-PSK (Pre-Shared Key). Every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key. Both sides must have the same token.
 
-**User service** — no root required, starts on login:
-
-```ini
-# ~/.config/systemd/user/rmail.service
-[Unit]
-Description=rmail messaging daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now rmail
-journalctl --user -u rmail -f
-# to keep running after logout:
-loginctl enable-linger
-```
-
-**System service** — starts at boot, requires root:
-
-```ini
-# /etc/systemd/system/rmail.service
-[Unit]
-Description=rmail messaging daemon
-After=network.target
-
-[Service]
-Type=simple
-User=YOURUSER
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now rmail
-journalctl -u rmail -f
-```
-
-### runit
-
-```sh
-# /etc/sv/rmail/run
-#!/bin/sh
-exec /path/to/lua /path/to/rmail/rmail.lua 2>&1
-```
-
-```sh
-sudo mkdir -p /etc/sv/rmail
-sudo mv rmail-run /etc/sv/rmail/run
-sudo chmod +x /etc/sv/rmail/run
-sudo ln -s /etc/sv/rmail /var/service/
-```
-
-### OpenRC
-
-```sh
-# /etc/init.d/rmail
-#!/sbin/openrc-run
-
-description="rmail messaging daemon"
-command="/path/to/lua"
-command_args="/path/to/rmail/rmail.lua"
-command_user="YOURUSER"
-command_background=true
-pidfile="/run/rmail.pid"
-output_log="/var/log/rmail.log"
-error_log="/var/log/rmail.log"
-```
-
-```sh
-sudo mv rmail-init /etc/init.d/rmail
-sudo chmod +x /etc/init.d/rmail
-sudo rc-update add rmail default
-sudo rc-service rmail start
-tail -f /var/log/rmail.log
-```
-
-### NixOS
-
-NixOS uses systemd internally but service files placed in `/etc/systemd/system/` are overwritten on every `nixos-rebuild`. Instead, `install.sh` generates a `rmail.nix` file — move it into place and import it:
-
-```sh
-sudo cp rmail.nix /etc/nixos/rmail.nix
-```
-
-Add to `/etc/nixos/configuration.nix`:
-
-```nix
-imports = [ ./rmail.nix ];
-```
-
-Then rebuild:
-
-```sh
-sudo nixos-rebuild switch
-journalctl -u rmail -f
-```
-
-## Protocol
-
-JSON over HTTP, two endpoints:
-
-**`POST /deliver`** — deliver a message:
-
-```json
-{"from": "alice", "token": "secret", "type": "message", "subject": "hello", "message_id": "uuid", "body": "text"}
-```
-
-**`POST /delete`** — notify of a deletion:
-
-```json
-{"from": "alice", "token": "secret", "message_id": "uuid"}
-```
-
-Auth is a shared secret per contact pair, checked against the contacts file.
-
-You can test delivery with curl:
-
-```
-curl -X POST http://localhost:8025/deliver \
-  -H 'Content-Type: application/json' \
-  -d '{"from":"alice","token":"your-shared-secret","type":"message","subject":"test","message_id":"test-1","body":"hello from curl"}'
-```
-
-Be sure to fill in the correct IP and port number where it says `localhost:8025`.
-
-## Sync timing
-
-The daemon checks for outbox/inbox changes on an adaptive timer:
-
-- Starts at **5 minutes**
-- Had work: interval **shrinks by 4 min** (floor: 1 min)
-- No work: interval **grows by 6 min** (no ceiling, resets on restart)
-
-This means the daemon is responsive when you're actively messaging and backs off when idle.
+LuaSec with PSK support is required — run `scripts/install.sh` to compile it.
 
 ## Dynamic IP
 
@@ -420,12 +251,6 @@ If your ISP changes your public IP, the daemon detects it automatically. On each
 Once confirmed, the daemon notifies all your contacts. If a contact is offline, the notification is retried on each sync cycle until they acknowledge it. Their daemons update your entry in their contacts file and drop a notification in their inbox so they know what happened.
 
 On first startup it just saves the current IP without notifying anyone.
-
-## Encryption
-
-All connections are encrypted with TLS-PSK (Pre-Shared Key). Every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key. Both sides must have the same token.
-
-LuaSec with PSK support is required — run `scripts/install.sh` to compile it.
 
 ## Hooks
 
@@ -439,19 +264,23 @@ Hooks let you run scripts in response to message events. Configure them in `~/.c
 | `on_delete`     | other party| —          | —                  | ignored       |
 | `on_package`    | sender     | filename   | path to saved file | ignored       |
 
-- **`on_receive_raw`** — synchronous, runs before the message is written. stdout replaces the saved body. Use for filtering or transformation.
-- **`on_receive`** — runs in background after the message is on disk. Use for notifications, backups.
-- **`on_send`** — synchronous, runs once per recipient. stdout replaces the body for that recipient only. Use for per-recipient transformation.
+- **`on_receive_raw`** — synchronous, runs before the message is written. stdout replaces the saved body.
+- **`on_receive`** — runs in background after the message is on disk.
+- **`on_send`** — synchronous, runs once per recipient. stdout replaces the body for that recipient only.
 - **`on_delete`** — runs when a message is deleted from inbox or outbox.
 - **`on_package`** — runs in background after an attachment is fully received and saved.
 
-See `scripting-tutorial.md` for full documentation and examples in bash, Lua, and C.
+Hooks are a powerful feature — any executable works, in any language. For full documentation and examples in bash, Lua, and C, see [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
 
 ## Troubleshooting
 
 **"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
 
 **"luasocket not found"** — run `scripts/install.sh` to compile it locally.
+
+**"luasec not found" or "not compiled with PSK support"** — run `scripts/install.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
+
+**"zip not found" or "unzip not found"** — run `scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
 
 **Messages not sending** — this is almost always a port issue. Check these in order:
 1. Is the recipient's daemon actually running?
@@ -464,10 +293,14 @@ See `scripting-tutorial.md` for full documentation and examples in bash, Lua, an
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**"luasec not found" or "not compiled with PSK support"** — run `scripts/install.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
-
-**"zip not found" or "unzip not found"** — run `scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
-
-**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `no` line to accept. If the consent file is missing, the daemon may not have run a sync cycle yet.
+**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `no` line to accept.
 
 **Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.
+
+## Docs
+
+- [docs/attachments.md](docs/attachments.md) — full attachment workflow, consent, configuration
+- [docs/scripting-tutorial.md](docs/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C
+- [docs/service.md](docs/service.md) — running rmail automatically on boot, multiple instances
+- [docs/protocol.md](docs/protocol.md) — wire protocol reference, sync timing
+- [docs/nat-traversal-report.md](docs/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security
