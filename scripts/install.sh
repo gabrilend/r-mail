@@ -601,7 +601,69 @@ if ! $HAVE_UPNPC || ! $HAVE_NATPMPC; then
 fi
 
 # ============================================================
-# 8. Security probe (check for insecure NAT protocols)
+# 8. zip / unzip (Info-ZIP, required for attachment transfer)
+# ============================================================
+
+echo ""
+BIN="$DEPS/bin"
+mkdir -p "$BIN"
+
+_compile_zip() {
+    echo "Compiling zip ${ZIP_VERSION}..."
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+    ZIP_SRC="zip${ZIP_VERSION//./}"  # "30" for "3.0"
+    if [ ! -f "${ZIP_SRC}.tar.gz" ]; then
+        curl -fsSL "https://sourceforge.net/projects/infozip/files/Zip%203.x%20(latest)/3.0/${ZIP_SRC}.tar.gz/download" \
+            -o "${ZIP_SRC}.tar.gz" || { err "failed to download zip source"; return 1; }
+    fi
+    tar xf "${ZIP_SRC}.tar.gz"
+    cd "${ZIP_SRC}"
+    make -f unix/Makefile generic >/dev/null 2>&1 || { err "zip compile failed"; return 1; }
+    cp zip "$BIN/zip"
+    ok "compiled: deps/bin/zip"
+    cd "$ROOT"
+}
+
+_compile_unzip() {
+    echo "Compiling unzip ${UNZIP_VERSION}..."
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+    UNZIP_SRC="unzip${UNZIP_VERSION//./}"  # "60" for "6.0"
+    if [ ! -f "${UNZIP_SRC}.tar.gz" ]; then
+        curl -fsSL "https://sourceforge.net/projects/infozip/files/UnZip%206.x%20(latest)/UnZip%206.0/${UNZIP_SRC}.tar.gz/download" \
+            -o "${UNZIP_SRC}.tar.gz" || { err "failed to download unzip source"; return 1; }
+    fi
+    tar xf "${UNZIP_SRC}.tar.gz"
+    cd "${UNZIP_SRC}"
+    make -f unix/Makefile generic >/dev/null 2>&1 || { err "unzip compile failed"; return 1; }
+    cp unzip "$BIN/unzip"
+    ok "compiled: deps/bin/unzip"
+    cd "$ROOT"
+}
+
+ZIP_VERSION="3.0"
+UNZIP_VERSION="6.0"
+
+if [ -x "$BIN/zip" ] && [ -x "$BIN/unzip" ] && ! $FORCE; then
+    ok "found locally compiled: deps/bin/zip, deps/bin/unzip"
+elif command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    ok "found system: zip/unzip"
+    if ask_yn "Compile local versions instead? (recommended for reproducibility)"; then
+        _compile_zip && _compile_unzip
+    fi
+else
+    warn "zip/unzip not found — required for attachment transfer"
+    if ask_yn "Compile Info-ZIP locally? (zip ${ZIP_VERSION} / unzip ${UNZIP_VERSION})"; then
+        _compile_zip && _compile_unzip
+    else
+        err "zip and unzip are required — cannot continue without them"
+        exit 1
+    fi
+fi
+
+# ============================================================
+# 9. Security probe (check for insecure NAT protocols)
 # ============================================================
 
 echo ""
@@ -666,7 +728,7 @@ if [ -d "$BUILD" ]; then
 fi
 
 # ============================================================
-# 9. Initial setup (config file)
+# 10. Initial setup (config file)
 # ============================================================
 
 echo ""
@@ -707,6 +769,17 @@ port = $RANDOM_PORT
 # path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
 mail = ${HOME}/mail
 
+# where received attachments are saved (default: ~/mail/attachments)
+# attachments = ${HOME}/mail/attachments
+
+# where in-progress attachment chunks are stored during transfer.
+# set to /tmp to keep partials in RAM (cleared on reboot).
+# default: same as attachments directory
+# attachment_pending_dir = /tmp
+
+# chunk size for attachment transfers in bytes (default: 5 MB)
+# attachment_chunk_size = 5242880
+
 # extra lua module path — searched before the bundled libs/ directory.
 # use this if you installed luasocket/luasec/dkjson somewhere non-standard.
 # libs = /path/to/lua-libs
@@ -729,28 +802,27 @@ notify_ip_change = true
 
 # ---- hooks ----
 # hooks let you run scripts in response to message events.
+# see scripting-tutorial.md for full documentation and examples.
 
 # on_receive_raw: runs before a received message is written to inbox/.
-# \$1 is the raw message body. stdout REPLACES the body that gets saved.
-# use for content filtering or transformation.
+# \$1=sender \$2=subject \$3=body. stdout REPLACES the body that gets saved.
+# use for content filtering or transformation. synchronous.
 # on_receive_raw = /path/to/script.sh
 
 # on_receive: runs after a message is written to inbox/.
-# \$1 is the path to the saved inbox file.
+# \$1=sender \$2=subject \$3=path to inbox file. runs in background.
 # on_receive = /path/to/script.sh
 
-# on_package: runs after an attachment is saved.
-# \$1 is the path to the saved attachment.
+# on_package: runs after an attachment is fully received and saved.
+# \$1=sender \$2=filename \$3=path to saved file. runs in background.
 # on_package = /path/to/script.sh
 
 # on_send: runs once per recipient before a message is sent.
-# \$1 is the message body, \$2 is the recipient name.
-# stdout REPLACES the body sent to that recipient.
-# use for per-recipient transformation.
+# \$1=recipient \$2=subject \$3=body. stdout REPLACES the body for that recipient.
+# use for per-recipient transformation. synchronous.
 # on_send = /path/to/script.sh
 
-# on_delete: runs when a message is deleted. \$1 is the name of the other
-# party (sender if inbox, recipient if outbox).
+# on_delete: runs when a message is deleted. \$1=other party name.
 # on_delete = /path/to/script.sh
 CONFIG
     ok "created config: $CONFIG_FILE"
@@ -763,7 +835,7 @@ ln -sf "$CONFIG_FILE" "$ROOT/config"
 ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
 
 # ============================================================
-# 10. Initial setup (contacts file)
+# 11. Initial setup (contacts file)
 # ============================================================
 
 echo ""
@@ -773,25 +845,16 @@ if [ ! -f "$CONTACTS_FILE" ]; then
     echo "Setting up initial contacts file..."
     mkdir -p "$MAIL_DIR"
     cat > "$CONTACTS_FILE" <<CONTACTS
-// rmail contacts file
-// Lines starting with // are comments and are ignored by rmail.
+// rmail contacts
+// Lines starting with // or # are comments.
 //
-// Each entry is keyed by name — the name is how you and your contacts
-// refer to each other when sending messages.
+// Add a contact like this:
 //
-// ADDING CONTACTS
-// ===============
-// Ask your contact to run rmail and share their IP, port, and token.
-// Add an entry like this:
+//   alice.ip    = 203.0.113.1
+//   alice.port  = 54321
+//   alice.token = "your-shared-secret"
 //
-//   "alice": {
-//     "host": "1.2.3.4",
-//     "port": 54321,
-//     "token": "their-shared-secret"
-//   }
-
-{
-}
+// Both sides must use the same token.
 CONTACTS
 
     ok "created contacts file: $CONTACTS_FILE"
@@ -801,7 +864,7 @@ else
 fi
 
 # ============================================================
-# 11. Service setup
+# 12. Service setup
 # ============================================================
 
 echo ""

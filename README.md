@@ -68,15 +68,34 @@ to: bob
 Alice and Sarah get the PDF, bob just gets the message body.
 ```
 
-Attachments are base64-encoded and sent inline with the message. The recipient gets them in `~/mail/attachments/`.
+Before any file is transferred, the recipient sees a consent request appear in their inbox:
 
-Removing an `attach:` line from the outbox file deletes that attachment from the recipient's side.
+```
+alice wants to send you an attachment.
+
+  File:          photo.jpg
+  Expected size: 3.2 MB
+  Available:     47.3 GB on this drive
+  After:         47.3 GB remaining (71% of capacity)
+
+Delete one of these lines to make your choice:
+
+yes
+no
+```
+
+Delete `no` to accept, or `yes` to decline. Once accepted, the file is transferred in chunks over the same encrypted channel as messages. When complete, the consent file is replaced with a confirmation and the attachment appears in `~/mail/attachments/`.
+
+Interrupted transfers resume automatically — the receiver keeps whatever chunks have already arrived and the sender picks up where it left off on the next sync cycle.
+
+To cancel a transfer in progress, delete the outbox file. This notifies all recipients and stops any ongoing chunk transfer.
 
 ## Dependencies
 
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
 - **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
+- **zip / unzip** — file compression for attachment transfer (Info-ZIP)
 
 Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
 
@@ -92,23 +111,34 @@ The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on start
 name = yourname
 port = 8025
 mail = ~/mail
+
+# optional — shown with their defaults:
+# attachments          = ~/mail/attachments
+# attachment_pending_dir = /tmp
+# attachment_chunk_size  = 5242880
 ```
+
+`attachment_pending_dir` is where partially-received chunks are stored while a transfer is in progress. The default is `/tmp`, so the OS clears them automatically on reboot. Set it to a persistent path (e.g. `~/mail/attachments`) if you want interrupted transfers to survive a restart.
 
 ### Contacts file
 
-`~/mail/contacts` is a JSON file listing the people you communicate with. Lines starting with `//` are treated as comments. Your own identity (name and port) lives entirely in the config file — the contacts file is just an address book.
+`~/mail/contacts` is a line-oriented file listing the people you communicate with. Lines starting with `//` or `#` are comments. Your own identity lives in the config file — the contacts file is just an address book.
 
-```json
-{
-  "alice": {
-    "host": "203.0.113.1",
-    "port": 8025,
-    "token": "some-shared-secret"
-  }
-}
+```
+alice.ip    = 203.0.113.1
+alice.port  = 8025
+alice.token = "some-shared-secret"
 ```
 
+| Field   | Meaning                              |
+|---------|--------------------------------------|
+| `ip`    | their router's public IP address     |
+| `port`  | port their daemon listens on         |
+| `token` | shared secret (same on both sides)   |
+
 Both sides must have the same token for a given contact pair. Pick something long and random.
+
+You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly with grep. See `scripting-tutorial.md`.
 
 ## Ports
 
@@ -352,7 +382,7 @@ JSON over HTTP, two endpoints:
 **`POST /deliver`** — deliver a message:
 
 ```json
-{"from": "alice", "token": "secret", "subject": "hello", "message_id": "uuid", "body": "text"}
+{"from": "alice", "token": "secret", "type": "message", "subject": "hello", "message_id": "uuid", "body": "text"}
 ```
 
 **`POST /delete`** — notify of a deletion:
@@ -368,10 +398,10 @@ You can test delivery with curl:
 ```
 curl -X POST http://localhost:8025/deliver \
   -H 'Content-Type: application/json' \
-  -d '{"from":"alice","token":"your-shared-secret","subject":"test","message_id":"test-1","body":"hello from curl"}'
+  -d '{"from":"alice","token":"your-shared-secret","type":"message","subject":"test","message_id":"test-1","body":"hello from curl"}'
 ```
 
-be sure to fill in the correct ip and port number where it says `localhost:8025`
+Be sure to fill in the correct IP and port number where it says `localhost:8025`.
 
 ## Sync timing
 
@@ -401,11 +431,21 @@ LuaSec with PSK support is required — run `scripts/install.sh` to compile it.
 
 Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
 
-- **`on_receive_raw`** — runs before a received message is written to inbox. `$1` is the raw message body. stdout replaces the body that gets saved. Use for content filtering or transformation.
-- **`on_receive`** — runs after a message is written to inbox. `$1` is the path to the saved inbox file. Use for notifications or backups.
-- **`on_package`** — runs after an attachment is saved. `$1` is the path to the saved attachment. Use for notifications or processing.
-- **`on_send`** — runs once per recipient before a message is sent. `$1` is the message body, `$2` is the recipient name. stdout replaces the body sent to that recipient. Use for per-recipient transformation.
-- **`on_delete`** — runs when a message is deleted. `$1` is the name of the other party (sender if inbox, recipient if outbox).
+| Hook            | `$1`       | `$2`       | `$3`               | stdout        |
+|-----------------|------------|------------|--------------------|---------------|
+| `on_receive_raw`| sender     | subject    | message body       | replaces body |
+| `on_receive`    | sender     | subject    | path to inbox file | ignored       |
+| `on_send`       | recipient  | subject    | message body       | replaces body |
+| `on_delete`     | other party| —          | —                  | ignored       |
+| `on_package`    | sender     | filename   | path to saved file | ignored       |
+
+- **`on_receive_raw`** — synchronous, runs before the message is written. stdout replaces the saved body. Use for filtering or transformation.
+- **`on_receive`** — runs in background after the message is on disk. Use for notifications, backups.
+- **`on_send`** — synchronous, runs once per recipient. stdout replaces the body for that recipient only. Use for per-recipient transformation.
+- **`on_delete`** — runs when a message is deleted from inbox or outbox.
+- **`on_package`** — runs in background after an attachment is fully received and saved.
+
+See `scripting-tutorial.md` for full documentation and examples in bash, Lua, and C.
 
 ## Troubleshooting
 
@@ -418,12 +458,16 @@ Hooks let you run scripts in response to message events. Configure them in `~/.c
 2. Is your daemon actually running?
 3. Is the port forwarded on their router to their machine's local IP?
 4. Is the port open in their OS firewall?
-5. Is the host/port in your contacts file correct (public IP, not local IP)?
+5. Is the `ip`/`port` in your contacts file correct (public IP, not local IP)?
 6. Do both sides have the same token?
 7. Did you wait long enough for the daemon to try sending the messages again?
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
 **"luasec not found" or "not compiled with PSK support"** — run `scripts/install.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
+
+**"zip not found" or "unzip not found"** — run `scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
+
+**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `no` line to accept. If the consent file is missing, the daemon may not have run a sync cycle yet.
 
 **Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.

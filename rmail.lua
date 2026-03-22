@@ -31,12 +31,14 @@ end
 
 local config = load_config()
 
-local MAIL     = config.mail or (os.getenv("HOME") .. "/mail")
-local INBOX    = MAIL .. "/inbox"
-local OUTBOX   = MAIL .. "/outbox"
-local STATE    = MAIL .. "/.state"
-local CONTACTS = MAIL .. "/contacts"
-local ATTACHMENTS = MAIL .. "/attachments"
+local MAIL        = config.mail or (os.getenv("HOME") .. "/mail")
+local INBOX       = MAIL .. "/inbox"
+local OUTBOX      = MAIL .. "/outbox"
+local STATE       = MAIL .. "/.state"
+local CONTACTS    = MAIL .. "/contacts"
+local ATTACHMENTS            = config.attachments or (MAIL .. "/attachments")
+local ATTACHMENT_PENDING_DIR = config.attachment_pending_dir or "/tmp"
+local ATTACHMENT_CHUNK_SIZE  = tonumber(config.attachment_chunk_size) or 5242880
 
 local LIBS             = config.libs
 local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
@@ -224,13 +226,138 @@ end
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
-    local lines = {}
-    for line in text:gmatch("[^\n]*\n?") do
-        if not line:match("^%s*//") then
-            lines[#lines + 1] = line
+
+    -- migrate legacy JSON format transparently
+    if text:match("^%s*{") then
+        local old = json.decode(text)
+        if old then
+            log("migrating contacts file from JSON to new format")
+            local new_lines = {"// rmail contacts", ""}
+            for name, c in pairs(old) do
+                local ip_val = c.ip or c.host
+                if ip_val then
+                    new_lines[#new_lines+1] = name .. ".ip    = " .. ip_val
+                end
+                if c.port then
+                    new_lines[#new_lines+1] = name .. ".port  = " .. tostring(c.port)
+                end
+                if c.token then
+                    new_lines[#new_lines+1] = name .. '.token = "' .. c.token .. '"'
+                end
+                new_lines[#new_lines+1] = ""
+            end
+            text = table.concat(new_lines, "\n") .. "\n"
+            write_file(CONTACTS, text)
         end
     end
-    return json.decode(table.concat(lines)) or {}
+
+    local contacts = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        line = line:match("^%s*(.-)%s*$")
+        if line ~= "" and not line:match("^[/#]") then
+            local name, field, value = line:match("^([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+            if name and field and value then
+                value = value:match("^%s*(.-)%s*$")
+                local unquoted = value:match('^"(.*)"$')
+                if unquoted then value = unquoted end
+                if not contacts[name] then contacts[name] = {} end
+                contacts[name][field] = value
+            else
+                -- bare name line: create empty entry as a placeholder
+                local bare = line:match("^([%w_%-]+)$")
+                if bare and not contacts[bare] then contacts[bare] = {} end
+            end
+        end
+    end
+    return contacts
+end
+
+-- write or update specific fields for one contact in the contacts file,
+-- preserving all comments, blank lines, and other contacts untouched
+local function write_contact_fields(name, fields)
+    local text = read_file(CONTACTS) or ""
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local last_idx = 0
+    local replaced = {}
+    for i, line in ipairs(lines) do
+        local lname, lfield = line:match("^([%w_%-]+)%.([%w_%-]+)%s*=")
+        if lname == name then
+            last_idx = i
+            if fields[lfield] ~= nil then
+                local v = tostring(fields[lfield])
+                if v:match("[^%d%.]") then v = '"' .. v .. '"' end
+                lines[i] = name .. "." .. lfield .. " = " .. v
+                replaced[lfield] = true
+            end
+        end
+    end
+
+    -- append any fields that had no existing line
+    local insert_pos = last_idx > 0 and last_idx or #lines
+    local additions = {}
+    for field, value in pairs(fields) do
+        if not replaced[field] and value ~= nil then
+            local v = tostring(value)
+            if v:match("[^%d%.]") then v = '"' .. v .. '"' end
+            additions[#additions + 1] = name .. "." .. field .. " = " .. v
+        end
+    end
+    for j = #additions, 1, -1 do
+        table.insert(lines, insert_pos + 1, additions[j])
+    end
+
+    write_file(CONTACTS, table.concat(lines, "\n") .. "\n")
+end
+
+-- align the = signs within each contact's block; run once at startup
+local function align_contacts()
+    local text = read_file(CONTACTS)
+    if not text then return end
+
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local result = {}
+    local i = 1
+    while i <= #lines do
+        local name = lines[i]:match("^([%w_%-]+)%.")
+        if name then
+            -- collect all consecutive lines for this contact
+            local block, j = {}, i
+            while j <= #lines and lines[j]:match("^([%w_%-]+)%.") == name do
+                block[#block + 1] = lines[j]
+                j = j + 1
+            end
+            -- find max key length (everything before the =)
+            local max_pre = 0
+            for _, bline in ipairs(block) do
+                local pre = bline:match("^(.-)%s*=")
+                if pre then max_pre = math.max(max_pre, #pre) end
+            end
+            -- reformat with aligned =
+            for _, bline in ipairs(block) do
+                local pre, val = bline:match("^(.-)%s*=%s*(.+)$")
+                if pre and val then
+                    result[#result + 1] = pre .. string.rep(" ", max_pre - #pre) .. " = " .. val
+                else
+                    result[#result + 1] = bline
+                end
+            end
+            i = j
+        else
+            result[#result + 1] = lines[i]
+            i = i + 1
+        end
+    end
+
+    local new_text = table.concat(result, "\n")
+    if new_text ~= text then write_file(CONTACTS, new_text) end
 end
 
 local function load_state(name)
@@ -262,6 +389,8 @@ end
 
 local UPNPC   = nat_find_tool("upnpc")
 local NATPMPC = nat_find_tool("natpmpc")
+local ZIP     = nat_find_tool("zip")
+local UNZIP   = nat_find_tool("unzip")
 
 local function nat_get_local_ip()
     local handle = io.popen("ip route get 1.1.1.1 2>/dev/null")
@@ -513,12 +642,14 @@ local function save_attachments(attachments, sender, inbox_meta)
         }
         log("attachment saved: %s from %s", att_filename, sender)
         if ON_PACKAGE then
-            os.execute(ON_PACKAGE .. " " .. shell_quote(target) .. " &")
+            os.execute(ON_PACKAGE .. " " ..
+                shell_quote(sender) .. " " .. shell_quote(att_filename) .. " " ..
+                shell_quote(target) .. " &")
         end
     end
 end
 
-local function handle_deliver(data, raw_request)
+local function handle_deliver_message(data)
     local sender = data["from"]
     local subject = data.subject or "untitled"
     local message_id = data.message_id or uuid()
@@ -549,7 +680,7 @@ local function handle_deliver(data, raw_request)
     end
 
     if ON_RECEIVE_RAW then
-        local transformed = run_hook(ON_RECEIVE_RAW, raw_request)
+        local transformed = run_hook(ON_RECEIVE_RAW, sender, subject, body or "")
         if transformed and transformed ~= "" then body = transformed end
     end
 
@@ -557,7 +688,9 @@ local function handle_deliver(data, raw_request)
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
     if ON_RECEIVE then
-        os.execute(ON_RECEIVE .. " " .. shell_quote(target) .. " &")
+        os.execute(ON_RECEIVE .. " " ..
+            shell_quote(sender) .. " " .. shell_quote(subject) .. " " ..
+            shell_quote(target) .. " &")
     end
 
     inbox_state[filename] = {
@@ -577,6 +710,17 @@ local function delete_inbox_attachments(meta)
             os.remove(ameta.path)
             log("deleted attachment: %s", aname)
         end
+    end
+end
+
+-- delete a zip if no other active transfer still references it
+local function release_zip(chunks, zip_id, compressed_path)
+    for _, t in pairs(chunks) do
+        if t.zip_id == zip_id then return end  -- still in use
+    end
+    if compressed_path and file_exists(compressed_path) then
+        os.remove(compressed_path)
+        log("deleted shared zip %s (no more recipients)", zip_id)
     end
 end
 
@@ -621,6 +765,21 @@ local function handle_delete(data)
             delete_inbox_attachments(meta)
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
+            -- cancel any pending consent or in-progress chunks from this sender for this message
+            local cpending = load_state("consent-pending.json")
+            local cp_changed = false
+            for att_id, entry in pairs(cpending) do
+                if entry["from"] == sender and entry.message_id == message_id then
+                    local consent_path = INBOX .. "/" .. entry.inbox_file
+                    if file_exists(consent_path) then os.remove(consent_path) end
+                    os.execute('rm -rf ' .. shell_quote(
+                        ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+                    cpending[att_id] = nil
+                    cp_changed = true
+                    log("cancelled consent for %s from %s (sender deleted)", att_id, sender)
+                end
+            end
+            if cp_changed then save_state("consent-pending.json", cpending) end
             return 200, {ok = true}
         end
     end
@@ -639,6 +798,18 @@ local function handle_delete(data)
                         outbox_state[filename] = nil
                     end
                     save_state("outbox.json", outbox_state)
+                    -- cancel any outgoing chunk transfers to this recipient for this message
+                    local att_state = load_state("chunks-outgoing.json")
+                    local att_changed = false
+                    for att_id, transfer in pairs(att_state) do
+                        if transfer.to == sender and transfer.message_id == message_id then
+                            att_state[att_id] = nil
+                            release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                            att_changed = true
+                            log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
+                        end
+                    end
+                    if att_changed then save_state("chunks-outgoing.json", att_state) end
                     return 200, {ok = true}
                 end
             end
@@ -650,28 +821,24 @@ end
 
 local function handle_update_address(data)
     local sender = data["from"]
-    local new_host = data.host or ""
+    local new_ip = data.ip or ""
     local new_port = data.port
 
-    local text = read_file(CONTACTS)
-    if not text or text == "" then
-        return 404, {error = "sender not in contacts"}
-    end
-    local contacts = json.decode(text) or {}
+    local contacts = load_contacts()
     if not contacts[sender] then
         return 404, {error = "sender not in contacts"}
     end
 
-    contacts[sender].host = new_host
-    if new_port then contacts[sender].port = new_port end
-    write_file(CONTACTS, json.encode(contacts, {indent = true}) .. "\n")
+    local fields = {ip = new_ip}
+    if new_port then fields.port = new_port end
+    write_contact_fields(sender, fields)
 
-    log("updated address for %s: %s:%s", sender, new_host, tostring(new_port))
+    log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
 
     -- drop a notification in inbox if the sender requested it
     if data.notify ~= false then
         local filename = "address-update-" .. sender
-        local body = sender .. "'s address has changed to " .. new_host .. ":" .. tostring(new_port) ..
+        local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
             ".\nYour contacts file has been updated automatically."
         write_file(INBOX .. "/" .. filename, body)
     end
@@ -1001,10 +1168,464 @@ local function encode_attachments(filepaths)
     return result
 end
 
+-- ============================================================
+-- Attachment consent & chunked transfer
+-- ============================================================
+
+local function fmt_bytes(n)
+    if     n >= 1073741824 then return string.format("%.1f GB", n / 1073741824)
+    elseif n >= 1048576    then return string.format("%.1f MB", n / 1048576)
+    elseif n >= 1024       then return string.format("%.1f KB", n / 1024)
+    else return tostring(n) .. " B"
+    end
+end
+
+local function check_disk_space(path)
+    local h = io.popen('df -B1 --output=avail,size ' .. shell_quote(path) .. ' 2>/dev/null | tail -1')
+    if not h then return nil, nil end
+    local out = h:read("*a"); h:close()
+    local avail, total = out:match("(%d+)%s+(%d+)")
+    return tonumber(avail), tonumber(total)
+end
+
+local function measure_size(path)
+    local h = io.popen('du -sb ' .. shell_quote(path) .. ' 2>/dev/null')
+    if not h then return nil end
+    local out = h:read("*a"); h:close()
+    return tonumber(out:match("^%d+"))
+end
+
+local function sha256_file(path)
+    local h = io.popen('sha256sum ' .. shell_quote(path) .. ' 2>/dev/null')
+    if not h then return nil end
+    local out = h:read("*a"); h:close()
+    return out:match("^(%x+)")
+end
+
+local function sha256_of_bytes(data)
+    local tmp = "/tmp/rmail-sha-" .. tostring(math.floor(socket.gettime() * 1000000) % 1000000)
+    write_file_binary(tmp, data)
+    local result = sha256_file(tmp)
+    os.remove(tmp)
+    return result
+end
+
+local function compress_attachment(filepath, zip_id)
+    os.execute('mkdir -p ' .. shell_quote(ATTACHMENT_PENDING_DIR))
+    local zip_path = ATTACHMENT_PENDING_DIR .. "/rmail-" .. zip_id .. ".zip"
+    local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
+    local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
+    if is_dir_h then is_dir_h:close() end
+    local flag = is_dir and "-rj" or "-j"
+    local ret = os.execute(ZIP .. ' ' .. flag .. ' ' .. shell_quote(zip_path) ..
+                           ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
+    if ret ~= 0 then return nil, nil, nil end
+    local checksum = sha256_file(zip_path)
+    local size_h = io.popen('wc -c < ' .. shell_quote(zip_path) .. ' 2>/dev/null')
+    local comp_size = size_h and tonumber(size_h:read("*a"))
+    if size_h then size_h:close() end
+    if not checksum or not comp_size or comp_size == 0 then return nil, nil, nil end
+    return zip_path, checksum, comp_size
+end
+
+-- remove a specific attach: line from an outbox file
+local function remove_attach_from_file(filepath, attach_path)
+    local text = read_file(filepath)
+    if not text then return end
+    local header_lines = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:") then
+            header_lines[#header_lines + 1] = line
+            pos = line_end + 1
+        else
+            break
+        end
+    end
+    local body = text:sub(pos)
+    local kept = {}
+    for _, line in ipairs(header_lines) do
+        if line:lower():match("^attach:") then
+            local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+            if fp ~= attach_path then kept[#kept + 1] = line end
+        else
+            kept[#kept + 1] = line
+        end
+    end
+    local header = ""
+    for _, line in ipairs(kept) do header = header .. line .. "\n" end
+    write_file(filepath, header .. body)
+end
+
+-- ---- Receiver side ----
+
+local function handle_attachment_request(data)
+    local sender = data["from"]
+    local att_id = data.attachment_id
+    local filename = (data.filename or "unknown"):gsub("[\n\r]", "")
+    local expected_size = tonumber(data.expected_size) or 0
+    local message_id = data.message_id or uuid()
+    if not att_id then return 400, {error = "missing attachment_id"} end
+
+    os.execute('mkdir -p ' .. shell_quote(ATTACHMENTS))
+    local avail, total = check_disk_space(ATTACHMENTS)
+    avail = avail or 0
+    local after = math.max(0, avail - expected_size)
+    local pct_str = ""
+    if total and total > 0 then
+        pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
+    end
+    local consent_file = sanitize_filename(att_id .. "-attachment")
+    write_file(INBOX .. "/" .. consent_file, string.format(
+        "%s wants to send you an attachment.\n\n" ..
+        "  File:          %s\n" ..
+        "  Expected size: %s\n" ..
+        "  Available:     %s on this drive\n" ..
+        "  After:         %s remaining%s\n\n" ..
+        "Delete one of these lines to make your choice:\n\nyes\nno",
+        sender, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
+
+    local pending = load_state("consent-pending.json")
+    pending[att_id] = {
+        inbox_file  = consent_file,
+        ["from"]    = sender,
+        filename    = filename,
+        expected_size = expected_size,
+        message_id  = message_id,
+        status      = "pending",
+    }
+    save_state("consent-pending.json", pending)
+    log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
+    return 200, {ok = true}
+end
+
+local function check_consent_pending()
+    local pending = load_state("consent-pending.json")
+    if not next(pending) then return false end
+    local responses = load_state("consent-responses.json")
+    if type(responses) ~= "table" then responses = {} end
+    -- ensure array form (dkjson may decode [] as {})
+    local changed = false
+    for att_id, entry in pairs(pending) do
+        if entry.status == "pending" then
+            local content = read_file(INBOX .. "/" .. entry.inbox_file)
+            local decision
+            if not content then
+                decision = false  -- file deleted: treat as declined
+            else
+                local has_yes, has_no = false, false
+                for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+                    line = line:match("^%s*(.-)%s*$")
+                    if line == "yes" then has_yes = true end
+                    if line == "no"  then has_no  = true end
+                end
+                if     has_yes and not has_no then decision = true
+                elseif has_no  and not has_yes then decision = false
+                end
+            end
+            if decision ~= nil then
+                entry.status = decision and "accepted" or "declined"
+                responses[#responses + 1] = {
+                    attachment_id = att_id, to = entry["from"],
+                    consent = decision, message_id = entry.message_id,
+                }
+                changed = true
+            end
+        end
+    end
+    if changed then
+        save_state("consent-pending.json", pending)
+        save_state("consent-responses.json", responses)
+    end
+    return changed
+end
+
+local function send_consent_responses(my_name)
+    local responses = load_state("consent-responses.json")
+    if type(responses) ~= "table" or not responses[1] then return false end
+    local contacts = load_contacts()
+    local requests, valid = {}, {}
+    for _, resp in ipairs(responses) do
+        local c = contacts[resp.to]
+        if c and c.ip then
+            valid[#valid + 1] = resp
+            requests[#requests + 1] = {
+                host = c.ip, port = c.port, path = "/deliver",
+                payload = json.encode({
+                    ["from"] = my_name, token = c.token,
+                    type = "attachment_response",
+                    attachment_id = resp.attachment_id,
+                    consent = resp.consent,
+                    message_id = resp.message_id,
+                }),
+                psk_identity = my_name, psk_key = c.token,
+            }
+        end
+    end
+    if #requests == 0 then return false end
+    local results = http_post_batch(requests)
+    local remaining = {}
+    local pending = load_state("consent-pending.json")
+    for i, resp in ipairs(valid) do
+        if results[i].ok then
+            log("sent consent %s to %s", resp.consent and "accepted" or "declined", resp.to)
+            local entry = pending[resp.attachment_id]
+            if entry then
+                if resp.consent then
+                    write_file(INBOX .. "/" .. entry.inbox_file,
+                        "Sending: " .. entry["from"] .. "'s attachment " .. entry.filename ..
+                        " is being transferred.")
+                else
+                    write_file(INBOX .. "/" .. entry.inbox_file,
+                        "You declined " .. entry["from"] .. "'s attachment " .. entry.filename .. ".")
+                    pending[resp.attachment_id] = nil
+                end
+            end
+        else
+            remaining[#remaining + 1] = resp
+            log("failed to send consent response to %s (will retry)", resp.to)
+        end
+    end
+    save_state("consent-pending.json", pending)
+    save_state("consent-responses.json", remaining)
+    return #remaining < #valid
+end
+
+local function handle_attachment_chunk(data)
+    local sender = data["from"]
+    local att_id = data.attachment_id
+    local chunk_index = tonumber(data.chunk_index)
+    local total_chunks = tonumber(data.total_chunks)
+    local filename = data.filename or "unknown"
+    local chunk_checksum = data.chunk_checksum
+    local total_checksum = data.total_checksum
+    if not att_id or chunk_index == nil or not total_chunks or not data.data then
+        return 400, {error = "missing required fields"}
+    end
+    local raw = mime.unb64(data.data)
+    if not raw then return 400, {error = "invalid base64"} end
+
+    local pending_dir = ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id
+    os.execute('mkdir -p ' .. shell_quote(pending_dir))
+    local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
+
+    if chunk_checksum and sha256_of_bytes(raw) ~= chunk_checksum then
+        -- discard bad chunk; it stays missing in the response
+        log("chunk %d checksum mismatch from %s for %s", chunk_index, sender, filename)
+    else
+        write_file_binary(chunk_path, raw)
+    end
+
+    -- compute missing list
+    local missing = {}
+    for i = 0, total_chunks - 1 do
+        if not file_exists(pending_dir .. "/chunk-" .. tostring(i)) then
+            missing[#missing + 1] = i
+        end
+    end
+
+    local received = total_chunks - #missing
+    write_file(pending_dir .. "/STATUS", string.format(
+        "%s: %d / %d chunks (%d%%) — last received: %s",
+        filename, received, total_chunks,
+        math.floor(received / total_chunks * 100),
+        os.date("%Y-%m-%d %H:%M")))
+
+    if #missing > 0 then
+        return 200, {ok = true, missing = missing}
+    end
+
+    -- all chunks present: reassemble
+    local zip_path = pending_dir .. "/assembled.zip"
+    local f = io.open(zip_path, "wb")
+    if not f then return 500, {error = "cannot create assembled zip"} end
+    for i = 0, total_chunks - 1 do
+        local chunk_raw = read_file_binary(pending_dir .. "/chunk-" .. tostring(i))
+        if chunk_raw then f:write(chunk_raw) end
+    end
+    f:close()
+
+    if total_checksum and sha256_file(zip_path) ~= total_checksum then
+        os.remove(zip_path)
+        log("total checksum mismatch for %s from %s", filename, sender)
+        return 500, {error = "total checksum mismatch"}
+    end
+
+    os.execute('mkdir -p ' .. shell_quote(ATTACHMENTS))
+    local ret = os.execute(UNZIP .. ' -o ' .. shell_quote(zip_path) ..
+                           ' -d ' .. shell_quote(ATTACHMENTS) .. ' >/dev/null 2>&1')
+    if ret ~= 0 then
+        log("failed to extract %s from %s", filename, sender)
+        return 500, {error = "extraction failed"}
+    end
+
+    local target = ATTACHMENTS .. "/" .. filename
+    if ON_PACKAGE then
+        os.execute(ON_PACKAGE .. " " .. shell_quote(sender) .. " " ..
+                   shell_quote(filename) .. " " .. shell_quote(target) .. " &")
+    end
+
+    local cpending = load_state("consent-pending.json")
+    if cpending[att_id] then
+        write_file(INBOX .. "/" .. cpending[att_id].inbox_file, string.format(
+            "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
+            sender, filename, target))
+        cpending[att_id] = nil
+        save_state("consent-pending.json", cpending)
+    end
+
+    os.execute('rm -rf ' .. shell_quote(pending_dir))
+    log("attachment received: %s from %s -> %s", filename, sender, target)
+    return 200, {ok = true, missing = {}}
+end
+
+-- ---- Sender side ----
+
+local function handle_attachment_response(data)
+    local sender = data["from"]
+    local att_id = data.attachment_id
+    local consent = data.consent
+    if not att_id then return 400, {error = "missing attachment_id"} end
+    local chunks = load_state("chunks-outgoing.json")
+    local transfer = chunks[att_id]
+    if not transfer then return 200, {ok = true} end
+    if consent then
+        transfer.status = "sending"
+        local m = {}
+        for i = 0, transfer.total_chunks - 1 do m[#m + 1] = i end
+        transfer.missing = m
+        log("consent granted by %s for %s", sender, transfer.filename)
+    else
+        if transfer.compressed_path and file_exists(transfer.compressed_path) then
+            os.remove(transfer.compressed_path)
+        end
+        write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
+            sender .. " declined your attachment " .. transfer.filename .. ".")
+        chunks[att_id] = nil
+        log("consent declined by %s for %s", sender, transfer.filename)
+    end
+    save_state("chunks-outgoing.json", chunks)
+    return 200, {ok = true}
+end
+
+
+local function send_next_chunks(my_name)
+    local chunks = load_state("chunks-outgoing.json")
+    if not next(chunks) then return false end
+    local contacts = load_contacts()
+    local did_work = false
+    local changed = false
+    for att_id, transfer in pairs(chunks) do
+        if transfer.status ~= "sending" then goto continue end
+        local contact = contacts[transfer.to]
+        if not contact or not contact.ip then
+            log("chunk transfer: unknown contact %s, skipping", transfer.to)
+            goto continue
+        end
+        if not file_exists(transfer.compressed_path) then
+            log("chunk transfer: zip missing for %s, cancelling", att_id)
+            chunks[att_id] = nil
+            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            changed = true; goto continue
+        end
+        local f = io.open(transfer.compressed_path, "rb")
+        if not f then goto continue end
+        local missing = transfer.missing or {}
+        local aborted = false
+        for _, chunk_index in ipairs(missing) do
+            f:seek("set", chunk_index * ATTACHMENT_CHUNK_SIZE)
+            local raw = f:read(ATTACHMENT_CHUNK_SIZE)
+            if not raw then
+                log("chunk read error at %d for %s", chunk_index, att_id)
+                aborted = true; break
+            end
+            local results = http_post_batch({{
+                host = contact.ip, port = contact.port, path = "/deliver",
+                payload = json.encode({
+                    ["from"] = my_name, token = contact.token,
+                    type = "attachment_chunk",
+                    attachment_id = att_id,
+                    message_id = transfer.message_id,
+                    filename = transfer.filename,
+                    chunk_index = chunk_index,
+                    total_chunks = transfer.total_chunks,
+                    data = mime.b64(raw),
+                    chunk_checksum = sha256_of_bytes(raw),
+                    total_checksum = transfer.total_checksum,
+                }),
+                psk_identity = my_name, psk_key = contact.token,
+            }})
+            if results[1].ok then
+                -- receiver tells us what's still missing
+                local new_missing = results[1].missing
+                if type(new_missing) == "table" then
+                    transfer.missing = new_missing
+                end
+                changed = true; did_work = true
+                if #transfer.missing == 0 then break end
+            else
+                log("chunk %d/%d failed for %s -> %s, will retry",
+                    chunk_index + 1, transfer.total_chunks, transfer.filename, transfer.to)
+                aborted = true; break
+            end
+        end
+        f:close()
+        if not aborted and #transfer.missing == 0 then
+            transfer.status = "complete"
+            log("all chunks sent for %s to %s", transfer.filename, transfer.to)
+            changed = true
+        end
+        ::continue::
+    end
+    -- clean up completed transfers and release shared zips
+    for att_id, transfer in pairs(chunks) do
+        if transfer.status == "complete" then
+            chunks[att_id] = nil
+            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            changed = true
+        end
+    end
+    if changed then save_state("chunks-outgoing.json", chunks) end
+    return did_work
+end
+
+local function handle_deliver(data)
+    local msg_type = data and data.type
+    if not msg_type then
+        return 400, {error = "missing type field"}
+    end
+    if     msg_type == "message"             then return handle_deliver_message(data)
+    elseif msg_type == "attachment_request"  then return handle_attachment_request(data)
+    elseif msg_type == "attachment_response" then return handle_attachment_response(data)
+    elseif msg_type == "attachment_chunk"    then return handle_attachment_chunk(data)
+    elseif msg_type == "chunk_failed"        then return 200, {ok = true}  -- handled via missing list in chunk response
+    else return 400, {error = "unknown type: " .. tostring(msg_type)}
+    end
+end
+
 local function sync_outbox(my_name)
     local contacts = load_contacts()
     local state = load_state("outbox.json")
+    local att_state = load_state("chunks-outgoing.json")
+    local att_state_changed = false
     local did_work = false
+
+    -- clean up completed transfers: remove attach: lines from outbox files
+    for att_id, transfer in pairs(att_state) do
+        if transfer.status == "complete" then
+            local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
+            if file_exists(outbox_path) then
+                remove_attach_from_file(outbox_path, transfer.original_path)
+            end
+            att_state[att_id] = nil
+            att_state_changed = true
+            did_work = true
+            log("attachment transfer complete, removed attach: %s", transfer.filename)
+        end
+    end
 
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
@@ -1079,51 +1700,84 @@ local function sync_outbox(my_name)
                 for _, entry in ipairs(entries) do
                     local rname = entry.name
                     if not state[name].recipients[rname] then
-                        -- new recipient: deliver message + attachments
+                        -- new recipient: deliver message body only
                         if contacts[rname] then
                             ops[#ops + 1] = {
                                 type = "deliver", filename = name,
                                 recipient = rname, message_id = uuid(),
                                 subject = name, body = body,
                                 contact = contacts[rname],
-                                attach_paths = entry.attachments,
                             }
                         else
                             log("skipping %s: unknown contact '%s'", name, rname)
                         end
                     elseif contacts[rname] then
-                        -- existing recipient: check attachment changes
+                        -- existing recipient: check for new attach: lines not yet in progress
                         local rmeta = state[name].recipients[rname]
-                        local state_att = rmeta.attachments or {}
-                        local cur_att = current_attach[rname] or {}
-
-                        -- new attachments
-                        local new_att = {}
-                        for fname, fpath in pairs(cur_att) do
-                            if not state_att[fname] then
-                                new_att[#new_att + 1] = fpath
-                            end
-                        end
-                        if #new_att > 0 then
-                            ops[#ops + 1] = {
-                                type = "deliver_attachment", filename = name,
-                                recipient = rname,
-                                message_id = rmeta.message_id,
-                                contact = contacts[rname],
-                                attach_paths = new_att,
-                            }
-                        end
-
-                        -- removed attachments
-                        for fname, ameta in pairs(state_att) do
-                            if not cur_att[fname] then
-                                ops[#ops + 1] = {
-                                    type = "delete_attachment", filename = name,
-                                    recipient = rname,
-                                    attachment_name = fname,
-                                    attachment_id = ameta.attachment_id,
-                                    contact = contacts[rname],
-                                }
+                        if not rmeta.error then
+                            for _, filepath in ipairs(entry.attachments) do
+                                local in_progress = false
+                                for _, transfer in pairs(att_state) do
+                                    if transfer.to == rname and
+                                       transfer.outbox_file == name and
+                                       transfer.original_path == filepath then
+                                        in_progress = true; break
+                                    end
+                                end
+                                if not in_progress then
+                                    local att_id = uuid()
+                                    local basename = filepath:match("([^/]+)$") or filepath
+                                    local expected_size = measure_size(filepath) or 0
+                                    -- find existing zip for this file (shared across recipients)
+                                    local zip_id, zip_path, checksum, total_chunks
+                                    for _, t in pairs(att_state) do
+                                        if t.outbox_file == name and
+                                           t.original_path == filepath and
+                                           t.zip_id and
+                                           file_exists(t.compressed_path) then
+                                            zip_id       = t.zip_id
+                                            zip_path     = t.compressed_path
+                                            checksum     = t.total_checksum
+                                            total_chunks = t.total_chunks
+                                            break
+                                        end
+                                    end
+                                    if not zip_id then
+                                        zip_id = uuid()
+                                        local comp_size
+                                        zip_path, checksum, comp_size =
+                                            compress_attachment(filepath, zip_id)
+                                        if zip_path then
+                                            total_chunks = math.max(1,
+                                                math.ceil(comp_size / ATTACHMENT_CHUNK_SIZE))
+                                        end
+                                    end
+                                    if zip_path then
+                                        att_state[att_id] = {
+                                            to = rname, outbox_file = name,
+                                            original_path = filepath, filename = basename,
+                                            zip_id = zip_id,
+                                            compressed_path = zip_path,
+                                            total_chunks = total_chunks,
+                                            total_checksum = checksum,
+                                            expected_size = expected_size,
+                                            message_id = rmeta.message_id,
+                                            status = "awaiting_consent",
+                                        }
+                                        att_state_changed = true
+                                        ops[#ops + 1] = {
+                                            type = "attachment_request",
+                                            att_id = att_id, filename = name,
+                                            recipient = rname,
+                                            contact = contacts[rname],
+                                            att_filename = basename,
+                                            expected_size = expected_size,
+                                            message_id = rmeta.message_id,
+                                        }
+                                    else
+                                        log("failed to compress %s for %s", filepath, rname)
+                                    end
+                                end
                             end
                         end
                     end
@@ -1150,47 +1804,74 @@ local function sync_outbox(my_name)
     -- Phase 2: encode attachments and build requests
     if #ops > 0 then
         local requests = {}
+        local req_to_op = {}  -- compact requests index → ops index
         for i, op in ipairs(ops) do
             local path, data
             if op.type == "deliver" then
-                path = "/deliver"
-                local send_body = op.body
-                if ON_SEND then
-                    local transformed = run_hook(ON_SEND, op.body or "", op.recipient)
-                    if transformed and transformed ~= "" then send_body = transformed end
+                local body_size = #(op.body or "")
+                if body_size > 131072 then
+                    local kb = math.floor(body_size / 1024)
+                    local err_body = string.format(
+                        "error sending \"%s\": message body is too large (%d KB).\n" ..
+                        "The maximum message body size is 128 KB.\n" ..
+                        "To send large content, use an attach: line in your outbox file instead.",
+                        op.subject or op.filename or "untitled", kb)
+                    write_file(INBOX .. "/error-" .. sanitize_filename(op.subject or op.filename or "untitled"), err_body)
+                    -- mark state to prevent retry
+                    if state[op.filename] then
+                        state[op.filename].recipients[op.recipient] = {error = "body_too_large"}
+                    end
+                    log("body too large (%d KB), not sending %s to %s", kb, op.filename, op.recipient)
+                    did_work = true
+                    op.skip = true
                 end
-                local encoded = encode_attachments(op.attach_paths or {})
-                data = {["from"] = my_name, token = op.contact.token,
-                        subject = op.subject, message_id = op.message_id, body = send_body}
-                if #encoded > 0 then data.attachments = encoded end
-                op.encoded_attachments = encoded
-            elseif op.type == "deliver_attachment" then
+                if not op.skip then
+                    path = "/deliver"
+                    local send_body = op.body
+                    if ON_SEND then
+                        local transformed = run_hook(ON_SEND, op.recipient, op.subject or op.filename, op.body or "")
+                        if transformed and transformed ~= "" then send_body = transformed end
+                    end
+                    data = {["from"] = my_name, token = op.contact.token,
+                            type = "message",
+                            subject = op.subject, message_id = op.message_id, body = send_body}
+                end
+            elseif op.type == "attachment_request" then
                 path = "/deliver"
-                local encoded = encode_attachments(op.attach_paths or {})
                 data = {["from"] = my_name, token = op.contact.token,
-                        message_id = op.message_id, attachments = encoded}
-                op.encoded_attachments = encoded
-            elseif op.type == "delete_attachment" then
-                path = "/delete"
-                data = {["from"] = my_name, token = op.contact.token,
-                        attachment_id = op.attachment_id}
+                        type = "attachment_request",
+                        attachment_id = op.att_id,
+                        message_id = op.message_id,
+                        filename = op.att_filename,
+                        expected_size = op.expected_size}
             else
                 path = "/delete"
                 data = {["from"] = my_name, token = op.contact.token,
                         message_id = op.message_id}
             end
-            requests[i] = {
-                host = op.contact.host, port = op.contact.port,
-                path = path, payload = json.encode(data),
-                psk_identity = my_name, psk_key = op.contact.token,
-            }
+            if not op.skip then
+                local j = #requests + 1
+                requests[j] = {
+                    host = op.contact.ip, port = op.contact.port,
+                    path = path, payload = json.encode(data),
+                    psk_identity = my_name, psk_key = op.contact.token,
+                }
+                req_to_op[j] = i
+            end
         end
 
-        local results = http_post_batch(requests)
+        local raw_results = http_post_batch(requests)
+        -- expand results back to ops indexing
+        local results = {}
+        for j, oi in ipairs(req_to_op) do
+            results[oi] = raw_results[j]
+        end
 
         -- Phase 3: process results
         for i, op in ipairs(ops) do
-            if op.type == "notify_removal" then
+            if op.skip then
+                -- already handled in Phase 2
+            elseif op.type == "notify_removal" then
                 if results[i].ok then
                     if state[op.filename] then
                         state[op.filename].recipients[op.recipient] = nil
@@ -1204,13 +1885,8 @@ local function sync_outbox(my_name)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
-                        local att_state = {}
-                        for _, att in ipairs(op.encoded_attachments or {}) do
-                            att_state[att.filename] = {attachment_id = att.attachment_id}
-                        end
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
-                            attachments = next(att_state) and att_state or nil,
                             token = op.contact.token,
                         }
                     end
@@ -1219,31 +1895,19 @@ local function sync_outbox(my_name)
                 else
                     log("failed to send %s to %s", op.filename, op.recipient)
                 end
-            elseif op.type == "deliver_attachment" then
+            elseif op.type == "attachment_request" then
                 if results[i].ok then
-                    if state[op.filename] and state[op.filename].recipients[op.recipient] then
-                        local rmeta = state[op.filename].recipients[op.recipient]
-                        if not rmeta.attachments then rmeta.attachments = {} end
-                        for _, att in ipairs(op.encoded_attachments or {}) do
-                            rmeta.attachments[att.filename] = {attachment_id = att.attachment_id}
-                        end
-                    end
-                    log("sent attachments to %s: %s", op.recipient, op.filename)
-                    did_work = true
-                end
-            elseif op.type == "delete_attachment" then
-                if results[i].ok then
-                    if state[op.filename] and state[op.filename].recipients[op.recipient] then
-                        local rmeta = state[op.filename].recipients[op.recipient]
-                        if rmeta.attachments then
-                            rmeta.attachments[op.attachment_name] = nil
-                            if not next(rmeta.attachments) then rmeta.attachments = nil end
-                        end
-                    end
-                    log("notified %s of attachment removal: %s", op.recipient, op.attachment_name)
+                    log("sent attachment request to %s: %s", op.recipient, op.att_filename)
                     did_work = true
                 else
-                    log("failed to notify %s of attachment removal: %s (will retry)", op.recipient, op.attachment_name)
+                    -- remove this recipient's entry; release shared zip if no other recipients need it
+                    local transfer = att_state[op.att_id]
+                    if transfer then
+                        att_state[op.att_id] = nil
+                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        att_state_changed = true
+                    end
+                    log("failed to send attachment request to %s (will retry)", op.recipient)
                 end
             elseif op.type == "notify_deletion" then
                 if results[i].ok then
@@ -1264,6 +1928,15 @@ local function sync_outbox(my_name)
         if not current[name] then
             if not state[name].recipients or not next(state[name].recipients) then
                 state[name] = nil
+                -- cancel any outgoing chunk transfers for this outbox file
+                for att_id, transfer in pairs(att_state) do
+                    if transfer.outbox_file == name then
+                        att_state[att_id] = nil
+                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        att_state_changed = true
+                        log("cancelled outgoing chunks for %s (outbox file deleted)", att_id)
+                    end
+                end
             end
         end
     end
@@ -1278,6 +1951,7 @@ local function sync_outbox(my_name)
         end
     end
 
+    if att_state_changed then save_state("chunks-outgoing.json", att_state) end
     save_state("outbox.json", state)
     return did_work
 end
@@ -1321,7 +1995,7 @@ local function sync_inbox(my_name)
         local requests = {}
         for i, op in ipairs(ops) do
             requests[i] = {
-                host = op.contact.host, port = op.contact.port,
+                host = op.contact.ip, port = op.contact.port,
                 path = "/delete",
                 payload = json.encode({
                     ["from"] = my_name, token = op.contact.token,
@@ -1422,8 +2096,8 @@ local function detect_ip_change(my_name, port)
     local contacts = load_contacts()
     local pending = load_state("pending-address.json")
     for name, contact in pairs(contacts) do
-        if name ~= my_name and contact.host then
-            pending[name] = {host = new_ip, port = port}
+        if name ~= my_name and contact.ip then
+            pending[name] = {ip = new_ip, port = port}
         end
     end
     save_state("pending-address.json", pending)
@@ -1437,10 +2111,10 @@ local function sync_address_notifications(my_name)
     local ops = {}
 
     for name, info in pairs(pending) do
-        if contacts[name] and contacts[name].host then
+        if contacts[name] and contacts[name].ip then
             ops[#ops + 1] = {
                 name = name, contact = contacts[name],
-                host = info.host, port = info.port,
+                ip = info.ip, port = info.port,
             }
         else
             -- contact removed, drop the pending notification
@@ -1456,11 +2130,11 @@ local function sync_address_notifications(my_name)
     local requests = {}
     for i, op in ipairs(ops) do
         requests[i] = {
-            host = op.contact.host, port = op.contact.port,
+            host = op.contact.ip, port = op.contact.port,
             path = "/update-address",
             payload = json.encode({
                 ["from"] = my_name, token = op.contact.token,
-                host = op.host, port = op.port, notify = NOTIFY_IP_CHANGE,
+                ip = op.ip, port = op.port, notify = NOTIFY_IP_CHANGE,
             }),
             psk_identity = my_name, psk_key = op.contact.token,
         }
@@ -1487,13 +2161,25 @@ end
 -- ============================================================
 
 local function main()
-    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' .. ATTACHMENTS .. '"')
+    os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
+               ATTACHMENTS .. '" "' .. ATTACHMENT_PENDING_DIR .. '"')
     write_file(STATE .. "/new-mail", "")
 
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n")
         os.exit(1)
     end
+    if not ZIP then
+        io.stderr:write("error: 'zip' not found — required for attachment transfer\n")
+        io.stderr:write("       run: scripts/install.sh\n")
+        os.exit(1)
+    end
+    if not UNZIP then
+        io.stderr:write("error: 'unzip' not found — required for attachment transfer\n")
+        io.stderr:write("       run: scripts/install.sh\n")
+        os.exit(1)
+    end
+    align_contacts()
     local contacts = load_contacts()
     local my_name = config.name
     local port = tonumber(config.port or 8025)
@@ -1604,7 +2290,7 @@ local function main()
                     if not auth_check(data) then
                         send_response(client, 403, {error = "forbidden"})
                     elseif path == "/deliver" then
-                        local s, r = handle_deliver(data, body)
+                        local s, r = handle_deliver(data)
                         send_response(client, s, r)
                     elseif path == "/delete" then
                         local s, r = handle_delete(data)
@@ -1629,7 +2315,10 @@ local function main()
                 local w1 = sync_outbox(my_name)
                 local w2 = sync_inbox(my_name)
                 local w3 = sync_address_notifications(my_name)
-                if w1 or w2 or w3 then
+                local w4 = check_consent_pending()
+                local w5 = send_consent_responses(my_name)
+                local w6 = send_next_chunks(my_name)
+                if w1 or w2 or w3 or w4 or w5 or w6 then
                     interval = math.max(MIN_INTERVAL, interval - 240)
                     log("had work, interval -> %ds", interval)
                 else
