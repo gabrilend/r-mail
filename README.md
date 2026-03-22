@@ -73,9 +73,10 @@ yes
 no
 ```
 
-Delete `no` to accept, or `yes` to decline. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
+Leave either `yes` or `no` to accept or deny the attachment request. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-To cancel a transfer in progress, delete the outbox file.
+To cancel a transfer in progress as the sender, delete the outbox file.
+To cancel a transfer in progress as the receiver, delete the request form file or modify it to say `no` instead.
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
 
@@ -117,7 +118,7 @@ alice.token = "some-shared-secret"
 | Field   | Meaning                              |
 |---------|--------------------------------------|
 | `ip`    | their router's public IP address     |
-| `port`  | port their daemon listens on         |
+| `port`  | the port their computer listens on   |
 | `token` | shared secret (same on both sides)   |
 
 Both sides must have the same token for a given contact pair. Pick something long and random.
@@ -128,7 +129,7 @@ You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores 
 
 Each person runs their daemon on a single port. Unless provided, the install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.
 
-The only thing your contacts need is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
+The only thing your contacts need from you is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
 
 You will need your local IP however, when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
 
@@ -137,7 +138,7 @@ You will need your local IP however, when setting up port forwarding on your rou
 | Alice  | port 8025 → 192.168.1.10   | 203.0.113.1, port 8025          |
 | Bob    | port 8026 → 192.168.1.20   | 203.0.113.1, port 8026          |
 
-If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a mailbox with your mailman when you first move in to a new place, but for a specific computer.
+If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a your name to your specific mailbox with your mailman when you first move in to a new place, but for a specific computer.
 
 To find your **local IP** (for router port forwarding):
 
@@ -187,6 +188,8 @@ curl http://localhost:8025/
 ```
 
 This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP to confirm port forwarding is set up correctly.
+
+Be sure to change 8025 in these examples to whatever port you'd like to use.
 
 ### Automatic port forwarding (UPnP / NAT-PMP)
 
