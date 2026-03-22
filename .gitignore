@@ -1,0 +1,7 @@
+# compiled dependencies (built by scripts/install.sh)
+deps/
+libs/*
+!libs/dkjson.lua
+
+# local config used for testing
+config
