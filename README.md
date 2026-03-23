@@ -188,6 +188,14 @@ curl http://localhost:8025/
 
 This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly.
 
+Once the firewall is open, run the connectivity check to verify your router settings:
+
+```sh
+scripts/check-connectivity.sh
+```
+
+This checks whether your router supports hairpin NAT (needed for contacts on the same local network to reach you via your public IP) and whether UPnP is enabled (a security concern). It reads your port from the config file automatically.
+
 ### Automatic port forwarding (UPnP / NAT-PMP)
 
 > **WARNING: Automatic port forwarding uses UPnP or NAT-PMP, which are

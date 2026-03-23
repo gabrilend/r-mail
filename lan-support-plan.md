@@ -27,9 +27,13 @@ bob_home.token = "shared-secret"
 
 ---
 
-## Install script additions
+## Connectivity check script — `scripts/check-connectivity.sh`
 
-Two checks to add to `scripts/install.sh`, after the firewall setup step:
+**Implemented.** A standalone script the user runs after opening their firewall.
+Not part of install.sh — the firewall step and the install step can happen in
+either order, so the check lives separately.
+
+Two checks:
 
 ### 1. Hairpin NAT test
 
@@ -69,10 +73,8 @@ The daemon already runs this check at startup via `nat_security_check` and notif
 
 ---
 
-## Documentation needed
+## Documentation
 
-`docs/ports-explained.md` — new section covering:
-- What hairpin NAT is and why some routers don't support it
-- The manual workaround (separate LAN contact entry with local IP)
-- That the port number is still needed (it's the daemon's address), but no router forwarding rule is required for LAN connections
-- That port forwarding can be skipped entirely for LAN-only setups
+**Implemented.**
+- `docs/ports-explained.md` — new hairpin NAT section with the manual workaround and example contacts entries
+- `README.md` — mention of `scripts/check-connectivity.sh` after the firewall setup section

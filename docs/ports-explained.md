@@ -52,6 +52,42 @@ it automatically every time a message comes in.
 
 ---
 
+## What is hairpin NAT?
+
+Most of the time, your contacts are on different networks and their messages reach
+you from the internet. But what if a contact is on the same local network as you —
+same router, same WiFi? Their message goes to the router, which sees it's addressed
+to the public IP (the router's own address), and has to decide what to do with it.
+
+**Hairpin NAT** (also called NAT loopback) is when the router recognizes this
+situation and routes the packet back to the right device on the LAN instead of
+dropping it. It "loops back" through the NAT, like a hairpin.
+
+Many consumer routers do not support this. If yours doesn't, contacts on your local
+network can't reach you via your public IP — the packet is silently dropped.
+
+**The workaround:** they add a second contacts entry using your local IP address
+(e.g. `192.168.1.10`) instead of your public IP. LAN traffic bypasses the router's
+NAT entirely and goes directly between devices, so no hairpin support is needed and
+no port forwarding rule is required — just the firewall port being open.
+
+```
+# reachable from anywhere (requires hairpin NAT for LAN use)
+alice.ip    = 203.0.113.1
+alice.port  = 8025
+alice.token = "shared-secret"
+
+# reachable only from the same local network
+alice_home.ip    = 192.168.1.10
+alice_home.port  = 8025
+alice_home.token = "shared-secret"
+```
+
+To find out if your router supports hairpin NAT, run `scripts/check-connectivity.sh`
+after opening your firewall port.
+
+---
+
 ## What is a firewall, and why do you open a hole in it?
 
 A firewall is software — either in your OS or on your router — that blocks
