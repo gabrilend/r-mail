@@ -121,14 +121,16 @@ to do with them.
 
 ## What if a contact has a local IP address?
 
-If you accidentally put a local IP address (like `192.168.1.10`) in a contact's
-entry, nothing harmful happens — but rmail won't be able to reach them from the
-outside world.
+If you put a local IP address (like `192.168.1.10`) in a contact's entry, messages
+will work normally as long as both of you are on the same local network. Your router
+handles LAN-to-LAN traffic internally — no packets leave your network, and your ISP
+never sees them.
 
-Private IP ranges (`192.168.x.x`, `10.x.x.x`, `172.16–31.x.x`) are non-routable.
-Your router doesn't forward packets addressed to those IPs out to the internet;
-they stay entirely within your local network. From any machine outside your LAN,
-the connection will simply fail — and your ISP never sees those packets at all.
+From outside that network (a different house, a mobile connection), the connection
+will fail. Private IP ranges (`192.168.x.x`, `10.x.x.x`, `172.16–31.x.x`) are
+non-routable: your router won't forward those packets out to the internet, so a
+machine on a different network simply can't reach a private IP.
 
-So a local IP in the contacts file is a configuration mistake, not a privacy risk.
-The fix is to put in the public IP of their router instead.
+So a local IP in the contacts file works fine for local-only use, but won't work
+when either side is away from home. If you want to communicate from anywhere, use
+the public IP of their router instead.
