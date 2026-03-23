@@ -114,9 +114,10 @@ if [ ! -f "$CONTACTS_FILE" ]; then
     exit 0
 fi
 
-# Parse contacts file: emit "name:ip:port" for each entry that has ip+port
-# and is not marked own=true (local device entries).
-CONTACT_LIST=$(awk '
+# Parse contacts file into two lists:
+#   contacts: "name:ip:port"  — entries with ip+port and own != true
+#   devices:  "name:token_set" — entries with own=true
+PARSED=$(awk '
 {
     sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "")
     if ($0 == "" || $0 ~ /^[\/\#]/) next
@@ -131,39 +132,59 @@ CONTACT_LIST=$(awk '
     sub(/^[ \t]+/, "", value); sub(/[ \t]+$/, "", value)
     sub(/^"/, "", value); sub(/"$/, "", value)
 
-    if (field == "ip")   ip_map[name]   = value
-    if (field == "port") port_map[name] = value
-    if (field == "own")  own_map[name]  = value
+    if (field == "ip")    ip_map[name]    = value
+    if (field == "port")  port_map[name]  = value
+    if (field == "own")   own_map[name]   = value
+    if (field == "token") token_map[name] = value
 }
 END {
     for (n in ip_map)
         if (port_map[n] != "" && own_map[n] != "true")
-            print n ":" ip_map[n] ":" port_map[n]
+            print "contact:" n ":" ip_map[n] ":" port_map[n]
+    for (n in own_map)
+        if (own_map[n] == "true")
+            print "device:" n ":" (token_map[n] != "" ? "yes" : "no")
 }
-' "$CONTACTS_FILE" | sort)
+' "$CONTACTS_FILE")
 
+CONTACT_LIST=$(echo "$PARSED" | grep '^contact:' | sed 's/^contact://' | sort)
+DEVICE_LIST=$(echo "$PARSED"  | grep '^device:'  | sed 's/^device://'  | sort)
+
+# --- Contacts ---
 if [ -z "$CONTACT_LIST" ]; then
     info "No contacts found with ip/port set."
+else
+    echo "  Contacts:"
     echo ""
-    exit 0
+    echo "$CONTACT_LIST" | while IFS=: read -r cname cip cport; do
+        printf "    %-18s %s:%s  " "$cname" "$cip" "$cport"
+        curl -s --max-time 3 "http://$cip:$cport/" >/dev/null 2>&1
+        RESULT=$?
+        if [ "$RESULT" -eq 28 ]; then
+            printf "\033[33m!!\033[0m  timed out\n"
+            printf "                       is their daemon running? is the IP/port correct?\n"
+            printf "                       is the port forwarded on their router?\n"
+        elif [ "$RESULT" -eq 7 ]; then
+            printf "\033[33m!!\033[0m  connection refused\n"
+            printf "                       machine is reachable but daemon may not be running\n"
+        else
+            printf "\033[32mok\033[0m  reachable\n"
+        fi
+    done
+    echo ""
 fi
 
-echo "  Contacts:"
-echo ""
-echo "$CONTACT_LIST" | while IFS=: read -r cname cip cport; do
-    printf "    %-18s %s:%s  " "$cname" "$cip" "$cport"
-    curl -s --max-time 3 "http://$cip:$cport/" >/dev/null 2>&1
-    RESULT=$?
-    if [ "$RESULT" -eq 28 ]; then
-        printf "\033[33m!!\033[0m  timed out\n"
-        printf "                       check: is their daemon running? is the IP correct?\n"
-        printf "                       is the port forwarded on their router?\n"
-    elif [ "$RESULT" -eq 7 ]; then
-        printf "\033[33m!!\033[0m  connection refused\n"
-        printf "                       their machine is reachable but the daemon may not be running\n"
-    else
-        printf "\033[32mok\033[0m  reachable\n"
-    fi
-done
-
-echo ""
+# --- Devices ---
+if [ -n "$DEVICE_LIST" ]; then
+    echo "  Devices (own=true — they connect to this daemon, not tested outbound):"
+    echo ""
+    echo "$DEVICE_LIST" | while IFS=: read -r dname dtoken; do
+        if [ "$dtoken" = "yes" ]; then
+            printf "    %-18s token: set\n" "$dname"
+        else
+            printf "    %-18s \033[33m!!\033[0m  token: missing — add %s.token to contacts\n" \
+                "$dname" "$dname"
+        fi
+    done
+    echo ""
+fi
