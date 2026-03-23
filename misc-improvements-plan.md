@@ -60,13 +60,7 @@ Each line of the forwarded message (including original `to:` lines) is prefixed 
 
 **Save as PNG:**
 
-Renders the message as a static image using the app's current theme colors. The image can be saved to the device's gallery or shared via the system share sheet.
-
-Rendering rules:
-- Background and text colors: inherited from app theme settings
-- Text between `"..."`: rendered in a distinct quote color
-- Text between ` ``` ... ``` ` or inline `` ` `` : rendered in a code color (monospace font)
-- Other formatting markers can be added as the feature matures
+Renders the message as a static image using the app's current theme colors. The image can be saved to the device's gallery or shared via the system share sheet. No syntax highlighting — plain text rendered as-is.
 
 **Theme / settings:**
 
@@ -75,8 +69,6 @@ Default theme: black background, goldenrod text.
 Settings screen includes:
 - Background color picker
 - Text color picker
-- Quote color picker (for `"..."`)
-- Code color picker (for backtick blocks)
 - Toggle: swipe to delete (default on)
 
 **Attachments from phone — upload flow:**
