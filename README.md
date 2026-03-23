@@ -67,27 +67,17 @@ alice wants to send you an attachment.
   Available:     47.3 GB on this drive
   After:         47.3 GB remaining (71% of capacity)
 
-Delete one of these lines to make your choice:
+Delete one line and leave your choice behind for the system to read:
 
-yes
-no
+accept
+deny
 ```
 
-Leave either `yes` or `no` to accept or deny the attachment request. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
+Leave either `accept` or `deny` to make your choice. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-To cancel a transfer in progress as the sender, delete the outbox file.
-To cancel a transfer in progress as the receiver, delete the request form file or modify it to say `no` instead.
+To cancel as the sender, delete the outbox file. To cancel as the receiver before the transfer starts, delete the consent file or change `accept` to `deny`. Once a transfer is underway, delete the in-progress status file that appears in your inbox to cancel and clean up partial downloads.
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
-
-## Dependencies
-
-- **Lua** 5.1+ (5.4 recommended)
-- **LuaSocket** — TCP networking for Lua
-- **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
-- **zip / unzip** — file compression for attachment transfer (Info-ZIP)
-
-Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
 
 ## Configuration
 
@@ -138,7 +128,9 @@ You will need your local IP however, when setting up port forwarding on your rou
 | Alice  | port 8025 → 192.168.1.10   | 203.0.113.1, port 8025          |
 | Bob    | port 8026 → 192.168.1.20   | 203.0.113.1, port 8026          |
 
-If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like registering a your name to your specific mailbox with your mailman when you first move in to a new place, but for a specific computer.
+If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like filling out a paper slip and registering a name to your specific mailbox with your mailman when you first move in to a new place, but for a computer instead of a house.
+
+Not sure why any of this is necessary? See [docs/ports-explained.md](docs/ports-explained.md) for a plain-language walkthrough.
 
 To find your **local IP** (for router port forwarding):
 
@@ -148,9 +140,14 @@ ip addr show | grep 'inet '
 
 To find your **public IP** (what your contacts put in their file):
 
+```sh
+curl -s ifconfig.me           && echo "" || true
+curl -s icanhazip.com         && echo "" || true
+curl -s api.ipify.org         && echo "" || true
+curl -s checkip.amazonaws.com && echo "" || true
 ```
-curl ifconfig.me
-```
+
+All four should print the same IP. If they agree, that's your public IP.
 
 ### Opening the firewall
 
@@ -165,6 +162,8 @@ which iptables && echo "you have iptables"
 Then open the port:
 
 ```sh
+# Be sure to change 8025 in these examples to whatever port you'd like to use.
+
 # ufw
 sudo ufw allow 8025/tcp
 
@@ -187,9 +186,7 @@ To verify the daemon is reachable:
 curl http://localhost:8025/
 ```
 
-This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP to confirm port forwarding is set up correctly.
-
-Be sure to change 8025 in these examples to whatever port you'd like to use.
+This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly.
 
 ### Automatic port forwarding (UPnP / NAT-PMP)
 
@@ -220,6 +217,15 @@ Log into your router's admin panel and disable:
 - PCP (unless using authenticated PCP, which almost no routers support)
 
 Then set up a manual port forward for your rmail port. See [docs/nat-traversal-report.md](docs/nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
+
+## Dependencies
+
+- **Lua** 5.1+ (5.4 recommended)
+- **LuaSocket** — TCP networking for Lua
+- **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
+- **zip / unzip** — file compression for attachment transfer (Info-ZIP)
+
+Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
 
 ## Installation
 
@@ -296,7 +302,7 @@ Hooks are a powerful feature — any executable works, in any language. For full
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `no` line to accept.
+**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `deny` line to accept.
 
 **Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.
 
@@ -306,4 +312,5 @@ If the port isn't open or forwarded, the connection will either time out (packet
 - [docs/scripting-tutorial.md](docs/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C
 - [docs/service.md](docs/service.md) — running rmail automatically on boot, multiple instances
 - [docs/protocol.md](docs/protocol.md) — wire protocol reference, sync timing
+- [docs/ports-explained.md](docs/ports-explained.md) — plain-language explanation of ports and port forwarding
 - [docs/nat-traversal-report.md](docs/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security

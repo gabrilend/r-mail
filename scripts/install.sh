@@ -140,6 +140,23 @@ ask_yn() {
     esac
 }
 
+ask_value() {
+    # ask_value "prompt" "default" — prints prompt with default, reads input, echos result
+    # If user presses enter without input, returns the default.
+    printf "  %s [%s]: " "$1" "$2"
+    read -r _val
+    if [ -z "$_val" ]; then
+        echo "$2"
+    else
+        echo "$_val"
+    fi
+}
+
+read_config_value() {
+    # read_config_value FILE KEY — returns current value or ""
+    grep "^${2}[[:space:]]*=" "$1" 2>/dev/null | sed 's/^[^=]*=[[:space:]]*//' | head -1
+}
+
 download() {
     # download URL OUTFILE
     if command -v wget >/dev/null 2>&1; then
@@ -734,7 +751,6 @@ fi
 echo ""
 CONFIG_DIR="${HOME}/.config/rmail"
 CONFIG_FILE="$CONFIG_DIR/config"
-MAIL_DIR="${HOME}/mail"
 
 # generate random port in 50000-65000 (used in config and contacts)
 gen_random_port() {
@@ -748,6 +764,46 @@ gen_random_port() {
     done
 }
 RANDOM_PORT=$(gen_random_port)
+
+echo ""
+echo "Setting up your rmail identity..."
+
+DEFAULT_NAME=$(whoami)
+DEFAULT_PORT=$RANDOM_PORT
+DEFAULT_MAIL="${HOME}/mail"
+
+if [ -f "$CONFIG_FILE" ]; then
+    _existing_name=$(read_config_value "$CONFIG_FILE" "name")
+    _existing_port=$(read_config_value "$CONFIG_FILE" "port")
+    _existing_mail=$(read_config_value "$CONFIG_FILE" "mail")
+    [ -n "$_existing_name" ] && DEFAULT_NAME="$_existing_name"
+    [ -n "$_existing_port" ] && DEFAULT_PORT="$_existing_port"
+    [ -n "$_existing_mail" ] && DEFAULT_MAIL="$_existing_mail"
+fi
+
+# prompt for name (validate: non-empty, no spaces or special chars)
+while true; do
+    RMAIL_NAME=$(ask_value "Your name (shown to contacts)" "$DEFAULT_NAME")
+    if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+        break
+    fi
+    warn "Name must contain only letters, numbers, hyphens, and underscores."
+done
+
+# prompt for port (validate: 1–65535)
+while true; do
+    RMAIL_PORT=$(ask_value "Port to listen on" "$DEFAULT_PORT")
+    if echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' && [ "$RMAIL_PORT" -ge 1 ] && [ "$RMAIL_PORT" -le 65535 ]; then
+        break
+    fi
+    warn "Port must be a number between 1 and 65535."
+done
+
+# prompt for mail directory (expand tilde)
+RMAIL_MAIL=$(ask_value "Mail directory" "$DEFAULT_MAIL")
+RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
+
+MAIL_DIR="$RMAIL_MAIL"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Setting up config file..."
@@ -774,15 +830,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
 # ---- identity ----
 
 # your name as it appears to contacts (must match your key in the contacts file)
-name = $(whoami)
+name = $RMAIL_NAME
 
 # port rmail listens on for incoming messages
-port = $RANDOM_PORT
+port = $RMAIL_PORT
 
 # ---- directories ----
 
 # path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
-mail = ${HOME}/mail
+mail = $RMAIL_MAIL
 
 # where received attachments are saved (default: ~/mail/attachments)
 # attachments = ${HOME}/mail/attachments
@@ -842,7 +898,7 @@ notify_ip_change = true
 CONFIG
     ok "created config: $CONFIG_FILE"
     echo ""
-    echo "  your rmail port: $RANDOM_PORT"
+    echo "  your rmail port: $RMAIL_PORT"
     echo "  forward this port on your router to this machine"
 fi
 

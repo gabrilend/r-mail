@@ -320,4 +320,48 @@ causes rmail to log a warning and keep the original body unchanged.
   size that won't hit OS argument length limits.
 - Arbitrary contact fields (`ip`, `port`, `token`, plus anything you add) are
   stored in `~/mail/contacts` but not passed to hooks automatically. Read them
-  directly with grep, as shown in the contact fields example above.
+  with `scripts/rfield.sh` or directly with grep, as shown in the examples above.
+
+---
+
+## Reading contact data in hooks
+
+Contacts can store arbitrary fields alongside the required `ip`, `port`, and `token`:
+
+```
+alice.ip    = 203.0.113.1
+alice.port  = 8025
+alice.token = "shared-secret"
+alice.phone = "555-1234"
+alice.notify = "email@example.com"
+```
+
+The `scripts/rfield.sh` utility reads these fields by name:
+
+```sh
+rfield alice phone     # → 555-1234
+rfield alice notify    # → email@example.com
+```
+
+This is useful in hooks. For example, an `on_receive` hook that sends an SMS notification:
+
+```sh
+#!/bin/sh
+# on_receive hook: send SMS when a message arrives
+sender="$1"
+subject="$2"
+
+phone=$(rfield "$sender" phone 2>/dev/null)
+if [ -n "$phone" ]; then
+    # replace this with your SMS provider's CLI
+    sms-send "$phone" "New message from $sender: $subject"
+fi
+```
+
+Configure it in `~/.config/rmail/config`:
+
+```
+on_receive = /path/to/notify-sms.sh
+```
+
+rfield exits 0 and prints the value if the field exists, or exits 1 silently if it doesn't — so wrapping it in an `if` or checking for empty output handles missing fields cleanly.

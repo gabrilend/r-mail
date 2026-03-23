@@ -50,14 +50,14 @@ alice wants to send you an attachment.
   Available:     47.3 GB on this drive
   After:         47.3 GB remaining (71% of capacity)
 
-Delete one of these lines to make your choice:
+Delete one line and leave your choice behind for the system to read:
 
-yes
-no
+accept
+deny
 ```
 
-- **Delete `no`** (leave `yes`): accept the transfer
-- **Delete `yes`** (leave `no`): decline
+- **Delete `deny`** (leave `accept`): accept the transfer
+- **Delete `accept`** (leave `deny`): decline
 
 While both lines are present, the daemon treats the request as pending and
 checks again on the next sync cycle. You can leave it for as long as you like.
@@ -126,14 +126,26 @@ Whether partial chunks survive a reboot depends on `attachment_pending_dir`:
 
 ## Cancelling a transfer
 
-To cancel a transfer in progress, delete the outbox file. This sends a
-deletion notice to all recipients, which cancels any pending consent requests
-and stops any ongoing chunk transfer.
+**As the sender:** delete the outbox file. This sends a deletion notice to all
+recipients, which cancels any pending consent requests and stops any ongoing
+chunk transfer. You cannot cancel an individual attachment without cancelling
+the whole message.
 
-You cannot cancel an individual attachment without cancelling the whole message.
-To remove a recipient after sending, remove their `to:` line from the outbox
-file — but any attachment transfer already in progress for that recipient
-continues until the file is received or they decline.
+**As the receiver (before accepting):** delete the consent file entirely, or
+change `accept` to `deny`. Either way is treated as a decline.
+
+**As the receiver (after accepting):** once the transfer starts, the consent
+file is updated in-place with a progress report each time a chunk arrives:
+
+```
+Receiving photo.jpg from alice — 5 / 7 chunks (71%)
+Average: 2.5 seconds per chunk.
+
+Delete this file to cancel and clean up partial downloads.
+```
+
+Delete that file to cancel. The sender's daemon is notified automatically and
+stops sending. Partial chunks are cleaned up on both sides.
 
 ---
 

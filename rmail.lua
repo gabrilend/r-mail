@@ -501,15 +501,13 @@ local function nat_create_mapping(port)
 end
 
 local function nat_security_check(my_name)
-    -- only warn once
-    local warned = read_file(STATE .. "/nat_security_warned")
-    if warned and warned ~= "" then return end
+    local warned = load_state("nat_security_warned.json")
+    if type(warned) ~= "table" then warned = {} end
 
     local vulnerabilities = {}
 
     -- probe UPnP
     if nat_try_upnp_probe() then
-        -- confirm by creating and immediately deleting a test mapping
         local test_port = 60000 + (os.time() % 4000)
         local local_ip = nat_get_local_ip()
         if local_ip and nat_try_upnp_add(local_ip, test_port) then
@@ -523,18 +521,50 @@ local function nat_security_check(my_name)
         vulnerabilities[#vulnerabilities + 1] = "NAT-PMP"
     end
 
-    if #vulnerabilities == 0 then return end
+    -- if no longer vulnerable but we previously were, send "fixed" notice
+    if #vulnerabilities == 0 then
+        if file_exists(STATE .. "/nat_security_vulnerability_active") then
+            local contacts = load_contacts()
+            local recipients = {}
+            for name, _ in pairs(contacts) do
+                if name ~= my_name and warned[name] then
+                    recipients[#recipients + 1] = name
+                end
+            end
+            if #recipients > 0 then
+                local header = ""
+                for _, name in ipairs(recipients) do
+                    header = header .. "to: " .. name .. "\n"
+                end
+                local body = "RESOLVED: My router's insecure protocols (UPnP/NAT-PMP) " ..
+                    "have been disabled. The security risk I warned you about earlier " ..
+                    "has been addressed. You can resume sending sensitive information " ..
+                    "through this system.\n\n" ..
+                    "This is an automated message from rmail's security check."
+                write_file(OUTBOX .. "/SECURITY-RESOLVED-nat-fixed", header .. "\n" .. body)
+                log("security resolved notice sent to %d contact(s)", #recipients)
+            end
+            os.remove(STATE .. "/nat_security_vulnerability_active")
+            -- reset warned set so new vulnerability triggers fresh warnings
+            warned = {}
+            save_state("nat_security_warned.json", warned)
+        end
+        return
+    end
 
     local proto_list = table.concat(vulnerabilities, " and ")
     log("WARNING: router has %s enabled -- this is a security risk", proto_list)
     log("WARNING: any device on your network can open ports without authentication")
     log("WARNING: disable %s in your router settings", proto_list)
 
-    -- send warning to all contacts
+    -- mark vulnerability as active
+    write_file(STATE .. "/nat_security_vulnerability_active", os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+
+    -- send warning to contacts not yet warned
     local contacts = load_contacts()
     local recipients = {}
     for name, _ in pairs(contacts) do
-        if name ~= my_name then
+        if name ~= my_name and not warned[name] then
             recipients[#recipients + 1] = name
         end
     end
@@ -554,10 +584,14 @@ local function nat_security_check(my_name)
             "Please remind me to fix this.\n\n" ..
             "This is an automated message from rmail's security check."
         write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
-        log("security warning sent to %d contact(s)", #recipients)
+        log("security warning sent to %d new contact(s)", #recipients)
+        -- record that these contacts were warned
+        local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+        for _, name in ipairs(recipients) do
+            warned[name] = timestamp
+        end
+        save_state("nat_security_warned.json", warned)
     end
-
-    write_file(STATE .. "/nat_security_warned", os.date("%Y-%m-%d %H:%M:%S") .. "\n")
 end
 
 -- ============================================================
@@ -1285,7 +1319,7 @@ local function handle_attachment_request(data)
         "  Expected size: %s\n" ..
         "  Available:     %s on this drive\n" ..
         "  After:         %s remaining%s\n\n" ..
-        "Delete one of these lines to make your choice:\n\nyes\nno",
+        "Delete one line and leave your choice behind for the system to read:\n\naccept\ndeny",
         sender, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
 
     local pending = load_state("consent-pending.json")
@@ -1319,8 +1353,8 @@ local function check_consent_pending()
                 local has_yes, has_no = false, false
                 for line in (content .. "\n"):gmatch("([^\n]*)\n") do
                     line = line:match("^%s*(.-)%s*$")
-                    if line == "yes" then has_yes = true end
-                    if line == "no"  then has_no  = true end
+                    if line == "accept" then has_yes = true end
+                    if line == "deny"   then has_no  = true end
                 end
                 if     has_yes and not has_no then decision = true
                 elseif has_no  and not has_yes then decision = false

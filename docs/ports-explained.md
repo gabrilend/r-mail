@@ -1,0 +1,118 @@
+# Ports explained
+
+If you've followed the setup guide, you've run into the word "port" a few times.
+Here's what it actually means — and why you have to care about it.
+
+---
+
+## What is a port?
+
+Your computer has one network connection to the internet, but dozens of programs
+use it at the same time: your browser, your chat app, rmail, and so on. Ports are
+how the OS sorts incoming traffic to the right program.
+
+Think of your computer as an apartment building. The building has one street
+address (your IP address), but each apartment has its own number. When a letter
+arrives, the mailman looks at the apartment number to know which slot to put it in.
+Ports are the apartment numbers. When rmail starts, it claims one port — say,
+8025 — and tells the OS: "anything arriving on apartment 8025 is mine."
+
+Port numbers run from 1 to 65535. Numbers below 1024 are reserved for
+well-known services (80 for web, 443 for HTTPS, 25 for email servers, etc.).
+rmail uses a number in the high range — either one you pick or a random one the
+installer chose — to stay out of the way of everything else.
+
+---
+
+## Why does your computer need a port open?
+
+When someone sends you a message, their computer reaches out to yours over the
+internet. That connection has to land somewhere. If no port is open and listening,
+the OS discards the packet, and the message never arrives.
+
+"Opening a port" just means telling the OS to accept incoming connections on that
+number and hand them off to rmail instead of dropping them.
+
+---
+
+## What is port forwarding?
+
+If your computer is connected through a home router (which is almost always the
+case), there's a complication: the internet sees your *router's* address, not your
+computer's address. Your computer has a private address that's only meaningful
+inside your home network — something like `192.168.1.10`.
+
+When rmail traffic arrives at your router addressed to port 8025, the router
+doesn't know which device inside your home to send it to. You have to tell it.
+That's port forwarding: a rule in your router's settings that says "anything
+arriving on port 8025, send it to 192.168.1.10."
+
+You set this up once in your router's admin panel. After that, your router handles
+it automatically every time a message comes in.
+
+---
+
+## What is a firewall, and why do you open a hole in it?
+
+A firewall is software — either in your OS or on your router — that blocks
+incoming connections by default. It's a reasonable default: you probably don't
+want random strangers on the internet connecting to arbitrary programs on your
+machine.
+
+"Opening a port in the firewall" means adding an exception: "connections to port
+8025 are allowed through." The firewall still blocks everything else. You're not
+turning off protection — you're making a precise, narrow exception for the one port
+rmail uses.
+
+---
+
+## What is UPnP and why is it risky?
+
+Port forwarding normally requires logging into your router's admin panel and adding
+a rule manually. UPnP (Universal Plug and Play) is a protocol that lets software
+ask the router to create that rule automatically, without you having to log in.
+
+The problem is that UPnP has no authentication. Any device on your local network
+can open any port on your router, without a password or your approval. Malware
+routinely exploits this to punch holes in home routers. Many security-conscious
+people and organizations disable UPnP entirely.
+
+rmail supports UPnP as a fallback for situations where you genuinely can't reach
+your router's admin panel — but the README warns against relying on it, and for
+good reason. Manual port forwarding is one extra step up front and much safer.
+
+---
+
+## Only one port is opened — not your whole network
+
+When you open port 8025, only port 8025 is opened. Everything else remains blocked.
+Your router and your firewall continue rejecting connections to every other port
+on your machine. You haven't "opened your network" in any broad sense — you've made
+one small, specific exception.
+
+Your contacts need to know your router's public IP and your port number. That's it.
+They can't reach any other service on your machine through the same connection.
+
+---
+
+## The OS only delivers packets to the right application
+
+When a packet arrives on port 8025, the OS checks which program registered for that
+port. Only rmail did. The OS hands the packet to rmail and to nothing else.
+A program can't snoop on another program's port without the right system privileges
+— the separation is enforced by the OS itself, not by convention.
+
+---
+
+## Properly written software only accepts what it expects
+
+rmail expects messages formatted in a specific way. Anything that doesn't match
+that format is rejected and discarded. Sending rmail a packet that says "run this
+command" or "delete these files" doesn't work — rmail doesn't parse that as a valid
+message structure. It just drops it.
+
+This is a property of any well-designed network application: it validates every
+incoming packet against a strict schema and rejects anything malformed. The port
+being open doesn't mean arbitrary code can be delivered and executed; it means
+connections to that port are handed to a specific program, which then decides what
+to do with them.
