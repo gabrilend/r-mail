@@ -36,19 +36,18 @@ The install script should test hairpin NAT after the firewall setup step. No dae
 - **Hairpin NAT works:** packet reaches the machine, machine responds with TCP RST ("connection refused" — nothing is listening yet). Fast response.
 - **Hairpin NAT doesn't work:** router drops the packet. Timeout.
 
-The firewall must already be open for this test to work, otherwise the OS drops the packet and mimics a false timeout. Since the install script walks through firewall setup, run the probe immediately after.
+The firewall must already be open for this test to work, otherwise the OS drops the packet and mimics a false timeout. Since the install script walks through firewall setup, run the probe immediately after that step.
 
-Persist the result to `.state/hairpin_nat_tested`. On a clean install this runs once and is done. If a user wants to re-test (new router, firmware update), they delete the state file and re-run the install script or restart the daemon.
+No state file needed — this runs once as part of install and is done. If the user wants to re-test (new router, firmware update), they re-run the install script.
 
-**On failure, print during install and drop a notice in inbox on first startup:**
+**On failure, print a clear warning during install:**
 
 ```
-Heads up: your router does not support hairpin NAT.
+Warning: your router does not appear to support hairpin NAT.
 
 This means contacts on your local network cannot reach you using your
-public IP address (203.0.113.1). Either:
-  - They add a separate entry using your local IP (see docs/ports-explained.md), or
-  - rmail's automatic LAN discovery handles it transparently (see below).
+public IP address. Automatic LAN discovery (built into rmail) will
+handle this transparently in most cases — see docs/ports-explained.md.
 ```
 
 ---
@@ -61,29 +60,31 @@ Instead of requiring users to add manual `bob_home` entries, the daemon can disc
 
 **Discovery protocol (UDP broadcast):**
 
-1. Daemon broadcasts on LAN (UDP, port TBD — pick a fixed port, e.g. 8026 or same as rmail port):
+A fixed, hardcoded UDP discovery port is used by all rmail instances regardless of their configured TCP port — similar to how mDNS always uses 5353. All rmail daemons listen on this port for discovery probes. The install script opens it alongside the main TCP port.
+
+1. Daemon broadcasts on the local subnet (UDP, fixed discovery port, destination `255.255.255.255`):
    ```json
    {"type": "discover", "looking_for": "alice", "from": "bob", "nonce": "<random>",
     "auth": "<hmac-sha256(token, nonce)>"}
    ```
-2. Alice's daemon receives the broadcast, finds "bob" in its contacts, verifies the HMAC using the shared token.
-3. Alice's daemon responds directly to Bob (unicast):
+2. Every rmail daemon on the LAN receives the broadcast. Each checks whether it has a contact named "bob" and verifies the HMAC using the shared token. Only Alice's daemon passes this check.
+3. Alice's daemon responds directly to Bob (unicast, to the source IP of the broadcast):
    ```json
    {"type": "discover_response", "name": "alice", "port": 8025,
     "auth": "<hmac-sha256(token, nonce)>"}
    ```
    Response auth uses the same nonce so Bob can verify it.
-4. Bob's daemon retries the connection using Alice's LAN IP (source IP of the UDP response) and port.
+4. Bob's daemon retries the connection using Alice's LAN IP (source IP of the UDP response) and the port in the response body.
 5. Bob's daemon caches the LAN address for the session (not persisted — LAN IPs change).
 
-**Security:** the shared token authenticates both sides. An eavesdropper on the LAN learns that Bob is looking for Alice, but learns nothing else (no token, no message content). The nonce prevents replay attacks.
+**Security:** the shared token authenticates both sides. An eavesdropper on the LAN sees that someone is looking for a contact named "alice", but learns nothing else — no token, no message content. The nonce prevents replay.
 
 **No changes needed to the contacts file.** Discovery is a transparent fallback, invisible to the user.
 
 **Edge cases:**
 - Multiple rmail daemons on the LAN: all hear the broadcast, only the one with a matching contact and valid token responds.
 - Alice is offline: no response, Bob falls back to existing retry logic.
-- Discovery UDP port blocked by OS firewall: falls back gracefully (no discovery, user gets the manual-entry notice instead). The daemon should open the discovery port alongside the main port during setup.
+- Discovery UDP port blocked by OS firewall: falls back gracefully (no discovery, user gets the manual-entry notice instead). The install script should open this port alongside the main TCP port.
 
 ---
 
