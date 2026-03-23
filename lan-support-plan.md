@@ -25,48 +25,73 @@ bob_home.token = "shared-secret"
 
 **The port number is still required** in the contacts entry. The port is the address of the daemon's listening socket; any TCP connection (LAN or internet) needs it. What's not required for LAN connections is the port forwarding *rule* on the router — those rules only apply to inbound internet traffic. The OS firewall rule (which is needed anyway for external access) is sufficient for LAN traffic.
 
-So both use cases are already handled. What's missing is:
-1. Documentation explaining this (see below)
-2. A startup check for hairpin NAT so users know they need LAN entries
+This handles both use cases manually. The automatic approach below eliminates the need for separate entries.
 
 ---
 
-## Hairpin NAT detection at startup
+## Hairpin NAT detection — install script
 
-The daemon knows its own public IP (checked at startup for dynamic IP tracking) and its own port. It can test hairpin NAT by connecting to itself via the public IP and verifying the response.
+The install script should test hairpin NAT after the firewall setup step. No daemon needed — the TCP handshake itself is the signal:
 
-**Test:**
-1. `GET http://<own_public_ip>:<own_port>/` — same probe used for IP verification
-2. Response should be `{"ok": true, "name": "<own_name>"}`
-3. If connection succeeds and name matches → hairpin NAT works, no LAN entries needed
-4. If connection fails or times out → hairpin NAT not supported
+- **Hairpin NAT works:** packet reaches the machine, machine responds with TCP RST ("connection refused" — nothing is listening yet). Fast response.
+- **Hairpin NAT doesn't work:** router drops the packet. Timeout.
 
-**On failure:** drop a one-time notice in the inbox explaining the situation and what to do:
+The firewall must already be open for this test to work, otherwise the OS drops the packet and mimics a false timeout. Since the install script walks through firewall setup, run the probe immediately after.
+
+Persist the result to `.state/hairpin_nat_tested`. On a clean install this runs once and is done. If a user wants to re-test (new router, firmware update), they delete the state file and re-run the install script or restart the daemon.
+
+**On failure, print during install and drop a notice in inbox on first startup:**
 
 ```
-Heads up: your router does not appear to support hairpin NAT.
+Heads up: your router does not support hairpin NAT.
 
 This means contacts on your local network cannot reach you using your
-public IP address (203.0.113.1). They should use your local IP instead
-(e.g. 192.168.1.10) and add a separate entry to their contacts file.
-
-See docs/ports-explained.md for details.
+public IP address (203.0.113.1). Either:
+  - They add a separate entry using your local IP (see docs/ports-explained.md), or
+  - rmail's automatic LAN discovery handles it transparently (see below).
 ```
 
-Track whether the notice has been sent in `.state/` so it only fires once (same pattern as UPnP warnings). Re-run the check on each startup; if hairpin NAT starts working (router firmware update, config change), suppress the notice going forward.
+---
+
+## Automatic LAN discovery — hairpin NAT workaround
+
+Instead of requiring users to add manual `bob_home` entries, the daemon can discover contacts on the LAN automatically when a connection fails.
+
+**Trigger condition:** connection to a contact times out AND the contact's IP matches the daemon's own public IP. This combination reliably indicates a hairpin NAT failure — both devices are behind the same router.
+
+**Discovery protocol (UDP broadcast):**
+
+1. Daemon broadcasts on LAN (UDP, port TBD — pick a fixed port, e.g. 8026 or same as rmail port):
+   ```json
+   {"type": "discover", "looking_for": "alice", "from": "bob", "nonce": "<random>",
+    "auth": "<hmac-sha256(token, nonce)>"}
+   ```
+2. Alice's daemon receives the broadcast, finds "bob" in its contacts, verifies the HMAC using the shared token.
+3. Alice's daemon responds directly to Bob (unicast):
+   ```json
+   {"type": "discover_response", "name": "alice", "port": 8025,
+    "auth": "<hmac-sha256(token, nonce)>"}
+   ```
+   Response auth uses the same nonce so Bob can verify it.
+4. Bob's daemon retries the connection using Alice's LAN IP (source IP of the UDP response) and port.
+5. Bob's daemon caches the LAN address for the session (not persisted — LAN IPs change).
+
+**Security:** the shared token authenticates both sides. An eavesdropper on the LAN learns that Bob is looking for Alice, but learns nothing else (no token, no message content). The nonce prevents replay attacks.
+
+**No changes needed to the contacts file.** Discovery is a transparent fallback, invisible to the user.
 
 **Edge cases:**
-- Public IP not yet known (first startup): skip the check, run it next cycle
-- Firewall blocks loopback to public IP even though hairpin NAT works: this would be a false positive. The notice isn't harmful in that case — it's extra info the user doesn't need. Acceptable.
-- No internet connection: public IP probe will already fail elsewhere; skip the hairpin check too
+- Multiple rmail daemons on the LAN: all hear the broadcast, only the one with a matching contact and valid token responds.
+- Alice is offline: no response, Bob falls back to existing retry logic.
+- Discovery UDP port blocked by OS firewall: falls back gracefully (no discovery, user gets the manual-entry notice instead). The daemon should open the discovery port alongside the main port during setup.
 
 ---
 
 ## Documentation needed
 
-`docs/ports-explained.md` should get a section (or expand the existing local IP section) covering:
+`docs/ports-explained.md` — new section covering:
 - What hairpin NAT is and why some routers don't support it
-- How to add a LAN entry alongside a regular contact entry
-- That the port number is still needed (it's the daemon's address), but no router rule is required
+- The manual workaround (separate LAN contact entry)
+- That automatic discovery handles it transparently when both daemons are updated
 
-`README.md` or `docs/ports-explained.md` should mention that the port forwarding step can be skipped entirely for LAN-only setups, at the cost of not being reachable from outside the network.
+`README.md` or `docs/ports-explained.md` — note that port forwarding can be skipped entirely for LAN-only setups.
