@@ -1368,6 +1368,14 @@ local function check_consent_pending()
                 }
                 changed = true
             end
+        elseif entry.status == "receiving" then
+            if not file_exists(INBOX .. "/" .. entry.inbox_file) then
+                os.execute('rm -rf ' .. shell_quote(
+                    ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+                entry.status = "cancel_pending"
+                changed = true
+                log("attachment transfer cancelled by user: %s from %s", att_id, entry["from"])
+            end
         end
     end
     if changed then
@@ -1412,6 +1420,8 @@ local function send_consent_responses(my_name)
                     write_file(INBOX .. "/" .. entry.inbox_file,
                         "Sending: " .. entry["from"] .. "'s attachment " .. entry.filename ..
                         " is being transferred.")
+                    entry.status = "receiving"
+                    entry.start_time = os.time()
                 else
                     write_file(INBOX .. "/" .. entry.inbox_file,
                         "You declined " .. entry["from"] .. "'s attachment " .. entry.filename .. ".")
@@ -1426,6 +1436,51 @@ local function send_consent_responses(my_name)
     save_state("consent-pending.json", pending)
     save_state("consent-responses.json", remaining)
     return #remaining < #valid
+end
+
+local function send_attachment_cancellations(my_name)
+    local pending = load_state("consent-pending.json")
+    if not next(pending) then return false end
+    local contacts = load_contacts()
+    local to_cancel = {}
+    for att_id, entry in pairs(pending) do
+        if entry.status == "cancel_pending" then
+            to_cancel[#to_cancel + 1] = {att_id = att_id, entry = entry}
+        end
+    end
+    if #to_cancel == 0 then return false end
+    local requests, valid = {}, {}
+    for _, item in ipairs(to_cancel) do
+        local c = contacts[item.entry["from"]]
+        if c and c.ip then
+            valid[#valid + 1] = item
+            requests[#requests + 1] = {
+                host = c.ip, port = c.port, path = "/delete",
+                payload = json.encode({
+                    ["from"] = my_name, token = c.token,
+                    message_id = item.entry.message_id,
+                }),
+                psk_identity = my_name, psk_key = c.token,
+            }
+        else
+            pending[item.att_id] = nil
+        end
+    end
+    if #requests == 0 then
+        save_state("consent-pending.json", pending)
+        return true
+    end
+    local results = http_post_batch(requests)
+    for i, item in ipairs(valid) do
+        if results[i].ok then
+            pending[item.att_id] = nil
+            log("notified %s of attachment cancellation: %s", item.entry["from"], item.att_id)
+        else
+            log("failed to notify %s of attachment cancellation (will retry)", item.entry["from"])
+        end
+    end
+    save_state("consent-pending.json", pending)
+    return true
 end
 
 local function handle_attachment_chunk(data)
@@ -1462,11 +1517,22 @@ local function handle_attachment_chunk(data)
     end
 
     local received = total_chunks - #missing
-    write_file(pending_dir .. "/STATUS", string.format(
-        "%s: %d / %d chunks (%d%%) — last received: %s",
-        filename, received, total_chunks,
-        math.floor(received / total_chunks * 100),
-        os.date("%Y-%m-%d %H:%M")))
+    local cprog = load_state("consent-pending.json")
+    local cpe = cprog[att_id]
+    if cpe and cpe.status == "receiving" then
+        local avg_str = ""
+        if cpe.start_time and received > 0 then
+            local elapsed = os.time() - cpe.start_time
+            if elapsed > 0 then
+                avg_str = string.format(
+                    "\nAverage: %.1f seconds per chunk.", elapsed / received)
+            end
+        end
+        write_file(INBOX .. "/" .. cpe.inbox_file, string.format(
+            "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nDelete this file to cancel and clean up partial downloads.",
+            filename, sender, received, total_chunks,
+            math.floor(received / total_chunks * 100), avg_str))
+    end
 
     if #missing > 0 then
         return 200, {ok = true, missing = missing}
@@ -1504,9 +1570,11 @@ local function handle_attachment_chunk(data)
 
     local cpending = load_state("consent-pending.json")
     if cpending[att_id] then
-        write_file(INBOX .. "/" .. cpending[att_id].inbox_file, string.format(
-            "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
-            sender, filename, target))
+        if cpending[att_id].status ~= "cancel_pending" then
+            write_file(INBOX .. "/" .. cpending[att_id].inbox_file, string.format(
+                "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
+                sender, filename, target))
+        end
         cpending[att_id] = nil
         save_state("consent-pending.json", cpending)
     end
@@ -2352,7 +2420,8 @@ local function main()
                 local w4 = check_consent_pending()
                 local w5 = send_consent_responses(my_name)
                 local w6 = send_next_chunks(my_name)
-                if w1 or w2 or w3 or w4 or w5 or w6 then
+                local w7 = send_attachment_cancellations(my_name)
+                if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
                     interval = math.max(MIN_INTERVAL, interval - 240)
                     log("had work, interval -> %ds", interval)
                 else

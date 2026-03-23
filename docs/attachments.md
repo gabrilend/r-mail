@@ -102,13 +102,15 @@ configured).
 
 ### In-progress visibility
 
-While a transfer is running, a STATUS file is updated with each received chunk:
+While a transfer is running, the consent file in your inbox is updated after each
+chunk arrives:
 
 ```
-photo.jpg: 87 / 200 chunks (43%) — last received: 2026-03-21 14:32
-```
+Receiving photo.jpg from alice — 87 / 200 chunks (43%)
+Average: 4.2 seconds per chunk.
 
-Find it at `~/mail/attachments/.pending/<transfer-id>/STATUS`.
+Delete this file to cancel and clean up partial downloads.
+```
 
 ### Interrupted transfers
 

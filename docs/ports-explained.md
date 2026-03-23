@@ -116,3 +116,19 @@ incoming packet against a strict schema and rejects anything malformed. The port
 being open doesn't mean arbitrary code can be delivered and executed; it means
 connections to that port are handed to a specific program, which then decides what
 to do with them.
+
+---
+
+## What if a contact has a local IP address?
+
+If you accidentally put a local IP address (like `192.168.1.10`) in a contact's
+entry, nothing harmful happens — but rmail won't be able to reach them from the
+outside world.
+
+Private IP ranges (`192.168.x.x`, `10.x.x.x`, `172.16–31.x.x`) are non-routable.
+Your router doesn't forward packets addressed to those IPs out to the internet;
+they stay entirely within your local network. From any machine outside your LAN,
+the connection will simply fail — and your ISP never sees those packets at all.
+
+So a local IP in the contacts file is a configuration mistake, not a privacy risk.
+The fix is to put in the public IP of their router instead.
