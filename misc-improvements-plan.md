@@ -16,7 +16,7 @@ The app is a file sync layer over the home computer's mail directory, plus a min
 
 Directory structure synced from home daemon:
 ```
-inbox/       — received messages (read-only from phone)
+inbox/       — received messages (phone can read and delete)
 outbox/      — messages in flight (phone can create/delete)
 contacts     — address book (phone can edit)
 ```
@@ -25,15 +25,39 @@ contacts     — address book (phone can edit)
 - Inbox list → tap to open → read view
   - Back (top-left)
   - Reply (top-right) → editor with `to: sender` pre-filled
+  - Swipe to delete (can be disabled in settings)
+  - Three dots menu → Delete / Forward / View raw
 - Compose → editor
   - X / cancel (top-left)
   - Send arrow (top-right) → writes file to outbox/ on home daemon
   - Attachment button → file/image picker, triggers phone→home upload (see below)
-- Contacts → raw file editor (with auto-backup before save)
+- Contacts → raw file editor
 
-**Attachments from phone:**
+**Attachments from phone — upload flow:**
 
-Phone acts as sender, home computer acts as receiver for the upload leg using the existing chunked transfer protocol. Home computer stores the uploaded file locally. Outbox file gets `attach: /path/to/uploaded-file`. Home daemon then handles delivery to the recipient as normal (consent + chunk transfer). Two hops: phone → home (upload), home → recipient (existing protocol).
+Two phases:
+1. **Upload:** app uploads the file to the home daemon. Home daemon stores it in `~/mail/attachments/.uploads/<uuid>-filename`. API returns the server-side path.
+2. **Compose:** app writes the outbox file with `attach: /home/user/mail/attachments/.uploads/<uuid>-filename`. The phone path never appears on the server.
+
+Home daemon's regular sync then handles delivery to the recipient using the existing consent + chunk protocol. Two hops: phone → home (upload), home → recipient (existing protocol).
+
+**Deletion of uploaded file:**
+The intermediate file in `.uploads/` is deleted when `release_zip` runs and finds no more active transfers referencing that zip — i.e., when all recipients have completed or cancelled the transfer. This reuses existing cleanup logic.
+
+Config option: `keep_phone_uploads = false` (default: delete after all transfers done). Set to `true` to keep a copy on the home computer.
+
+**Upload staging directory:** `~/mail/attachments/.uploads/` — persistent across reboots (phone doesn't need to re-upload if home computer restarts), inside the mail directory, separate from received attachments.
+
+**Upload API:** a dedicated upload endpoint rather than reusing the chunked transfer system (no consent flow needed for authenticated device uploads):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/upload` | upload a file (small files, single request) |
+| `POST` | `/api/upload/start` | start chunked upload → returns `upload_id` |
+| `PUT` | `/api/upload/{id}/chunk/{n}` | upload one chunk |
+| `POST` | `/api/upload/{id}/complete` | finalize → returns server-side path |
+
+For files under a configurable threshold (e.g. 5 MB), single-request upload is fine. Larger files use the chunked path.
 
 **Auth:** The phone is added to the contacts file as a device entry:
 ```
@@ -55,9 +79,11 @@ Management API uses TLS-PSK with the device token — same concept users already
 | `PUT` | `/api/outbox/{filename}` | write/create an outbox file |
 | `DELETE` | `/api/outbox/{filename}` | delete outbox file |
 | `GET` | `/api/contacts` | read contacts file |
-| `PUT` | `/api/contacts` | overwrite contacts file (home daemon backs up old version first) |
-
-For attachment upload: reuse the existing `/deliver` endpoint with type `attachment_chunk`, authenticated as a device contact. The home daemon receives the file into a staging area (e.g. `~/mail/attachments/.uploads/`), and the phone-side compose flow inserts `attach: /path/to/staged/file` into the outbox file.
+| `PUT` | `/api/contacts` | overwrite contacts file |
+| `POST` | `/api/upload` | single-request file upload |
+| `POST` | `/api/upload/start` | start chunked upload |
+| `PUT` | `/api/upload/{id}/chunk/{n}` | upload one chunk |
+| `POST` | `/api/upload/{id}/complete` | finalize upload, returns server path |
 
 **Android app plan doc:** `android-app-plan.md` — create separately.
 
