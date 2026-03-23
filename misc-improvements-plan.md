@@ -26,12 +26,58 @@ contacts     — address book (phone can edit)
   - Back (top-left)
   - Reply (top-right) → editor with `to: sender` pre-filled
   - Swipe to delete (can be disabled in settings)
-  - Three dots menu → Delete / Forward / View raw
+  - Three dots menu → Delete / Forward / Save as PNG
 - Compose → editor
   - X / cancel (top-left)
   - Send arrow (top-right) → writes file to outbox/ on home daemon
-  - Attachment button → file/image picker, triggers phone→home upload (see below)
+  - No explicit attachment button — user types `attach:` in the document body
+    - A linter detects the bare `attach:` token and converts it to an inline button
+    - The button is atomic: cannot place cursor inside it, deletes as a whole unit
+    - Tapping it opens a picker window (choose file source: camera, gallery, files, etc.)
+    - After selection, the button returns to text with the full filepath filled in: `attach: /sdcard/...`
+    - Upload happens when the message is sent (send arrow tapped)
 - Contacts → raw file editor
+
+**Forward behavior:**
+
+Opens a new compose window. Template:
+
+```
+to:
+                          ← blank line (cursor starts here for "to:" entry)
+
+                          ← blank line for user's own added text
+
+                          ← blank separator
+
+| to: alice
+| to: bob
+|
+| Original message body here, each line prefixed with "| "
+```
+
+Each line of the forwarded message (including original `to:` lines) is prefixed with `| ` to indicate it is a forward. The user can delete or modify anything freely — no integrity guarantees. The four lines at the top give the user space for new recipients and an optional note before the quoted text.
+
+**Save as PNG:**
+
+Renders the message as a static image using the app's current theme colors. The image can be saved to the device's gallery or shared via the system share sheet.
+
+Rendering rules:
+- Background and text colors: inherited from app theme settings
+- Text between `"..."`: rendered in a distinct quote color
+- Text between ` ``` ... ``` ` or inline `` ` `` : rendered in a code color (monospace font)
+- Other formatting markers can be added as the feature matures
+
+**Theme / settings:**
+
+Default theme: black background, goldenrod text.
+
+Settings screen includes:
+- Background color picker
+- Text color picker
+- Quote color picker (for `"..."`)
+- Code color picker (for backtick blocks)
+- Toggle: swipe to delete (default on)
 
 **Attachments from phone — upload flow:**
 
@@ -46,7 +92,7 @@ The intermediate file in `.uploads/` is deleted when `release_zip` runs and find
 
 Config option: `keep_phone_uploads = false` (default: delete after all transfers done). Set to `true` to keep a copy on the home computer.
 
-**Upload staging directory:** `~/mail/attachments/.uploads/` — persistent across reboots (phone doesn't need to re-upload if home computer restarts), inside the mail directory, separate from received attachments.
+**Upload staging directory:** `.uploads/` subdirectory inside the configured attachments directory (i.e. `{attachments}/.uploads/`). Persistent across reboots, inside the mail directory, separate from received attachments. Follows the user's `attachments` config key automatically.
 
 **Upload API:** a dedicated upload endpoint rather than reusing the chunked transfer system (no consent flow needed for authenticated device uploads):
 
