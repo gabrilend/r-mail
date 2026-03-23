@@ -1,5 +1,5 @@
 #!/bin/sh
-# check-connectivity.sh — verify router settings for rmail
+# check-connectivity.sh — verify port, router settings, and contact reachability
 #
 # Run this after opening your firewall port. The hairpin NAT test requires
 # the port to be open in your firewall; if it isn't, the result will be
@@ -21,19 +21,24 @@ echo "rmail connectivity check"
 echo "========================"
 echo ""
 
-# --- Read port from config ---
+# --- Read config ---
 if [ ! -f "$CONFIG" ]; then
     fail "Config not found at $CONFIG"
     info "Run scripts/install.sh first."
     exit 1
 fi
 
-PORT=$(grep '^port[[:space:]]*=' "$CONFIG" 2>/dev/null \
-    | sed 's/^[^=]*=[[:space:]]*//' | head -1 | tr -d '[:space:]')
+read_config() { grep "^${1}[[:space:]]*=" "$CONFIG" 2>/dev/null \
+    | sed 's/^[^=]*=[[:space:]]*//' | head -1 | tr -d '[:space:]'; }
+
+PORT=$(read_config port)
 if [ -z "$PORT" ]; then
     fail "Could not read port from $CONFIG"
     exit 1
 fi
+
+MAIL_DIR=$(read_config mail | sed "s|^~|$HOME|")
+CONTACTS_FILE="${MAIL_DIR}/contacts"
 
 # --- Fetch public IP ---
 printf "  Fetching public IP...   "
@@ -63,11 +68,10 @@ curl -s --max-time 2 "http://$PUBLIC_IP:$PORT/" >/dev/null 2>&1
 CURL_EXIT=$?
 if [ "$CURL_EXIT" -eq 28 ]; then
     warn "not supported"
-    info "Your router does not loop connections from inside your LAN back"
-    info "to your public IP. Contacts on the same local network should use"
-    info "your local IP and add a separate contacts entry:"
+    info "Contacts on your local network cannot reach you via your public IP."
+    info "They should use your local IP address instead (e.g. 192.168.x.x):"
     info ""
-    info "  you_home.ip    = 192.168.x.x   (your local IP)"
+    info "  you_home.ip    = 192.168.x.x   <- find with: ip addr show"
     info "  you_home.port  = $PORT"
     info "  you_home.token = \"shared-secret\""
     info ""
@@ -101,5 +105,65 @@ else
         ok "UPnP not detected"
     fi
 fi
+echo ""
+
+# --- Per-contact connectivity ---
+if [ ! -f "$CONTACTS_FILE" ]; then
+    info "Contacts file not found at $CONTACTS_FILE — skipping contact checks."
+    echo ""
+    exit 0
+fi
+
+# Parse contacts file: emit "name:ip:port" for each entry that has ip+port
+# and is not marked own=true (local device entries).
+CONTACT_LIST=$(awk '
+{
+    sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "")
+    if ($0 == "" || $0 ~ /^[\/\#]/) next
+    if ($0 !~ /^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+[ \t]*=/) next
+
+    dotpos = index($0, ".")
+    eqpos  = index($0, "=")
+    name   = substr($0, 1, dotpos - 1)
+    field  = substr($0, dotpos + 1, eqpos - dotpos - 1)
+    sub(/[ \t]+$/, "", field)
+    value  = substr($0, eqpos + 1)
+    sub(/^[ \t]+/, "", value); sub(/[ \t]+$/, "", value)
+    sub(/^"/, "", value); sub(/"$/, "", value)
+
+    if (field == "ip")   ip_map[name]   = value
+    if (field == "port") port_map[name] = value
+    if (field == "own")  own_map[name]  = value
+}
+END {
+    for (n in ip_map)
+        if (port_map[n] != "" && own_map[n] != "true")
+            print n ":" ip_map[n] ":" port_map[n]
+}
+' "$CONTACTS_FILE" | sort)
+
+if [ -z "$CONTACT_LIST" ]; then
+    info "No contacts found with ip/port set."
+    echo ""
+    exit 0
+fi
+
+echo "  Contacts:"
+echo ""
+echo "$CONTACT_LIST" | while IFS=: read -r cname cip cport; do
+    printf "    %-18s %s:%s  " "$cname" "$cip" "$cport"
+    curl -s --max-time 3 "http://$cip:$cport/" >/dev/null 2>&1
+    RESULT=$?
+    if [ "$RESULT" -eq 28 ]; then
+        printf "\033[33m!!\033[0m  timed out\n"
+        printf "                       check: is their daemon running? is the IP correct?\n"
+        printf "                       is the port forwarded on their router?\n"
+    elif [ "$RESULT" -eq 7 ]; then
+        printf "\033[33m!!\033[0m  connection refused\n"
+        printf "                       their machine is reachable but the daemon may not be running\n"
+    else
+        printf "\033[32mok\033[0m  reachable\n"
+    fi
+done
 
 echo ""

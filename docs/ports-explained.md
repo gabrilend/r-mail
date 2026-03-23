@@ -66,10 +66,10 @@ dropping it. It "loops back" through the NAT, like a hairpin.
 Many consumer routers do not support this. If yours doesn't, contacts on your local
 network can't reach you via your public IP — the packet is silently dropped.
 
-**The workaround:** they add a second contacts entry using your local IP address
-(e.g. `192.168.1.10`) instead of your public IP. LAN traffic bypasses the router's
-NAT entirely and goes directly between devices, so no hairpin support is needed and
-no port forwarding rule is required — just the firewall port being open.
+If your router doesn't support hairpin NAT, contacts on your local network should
+use your local IP address (e.g. `192.168.1.10`) instead of your public IP. LAN
+traffic bypasses the router's NAT entirely and goes directly between devices — no
+hairpin support needed, and no port forwarding rule required either.
 
 ```
 # reachable from anywhere (requires hairpin NAT for LAN use)
