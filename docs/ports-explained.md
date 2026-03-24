@@ -155,6 +155,35 @@ to do with them.
 
 ---
 
+## Why does the Android app need a home computer?
+
+When you send a message from your phone, it goes outward — your phone connects to
+the recipient's computer. That works fine. The tricky part is receiving.
+
+For your computer to receive messages, it needs an open port: it sits there listening,
+and senders connect to it. But your phone can't do this. Here's why.
+
+Your phone is on a mobile network. The carrier runs its own version of the router
+NAT described above — called **carrier-grade NAT (CGNAT)** — but at a much larger
+scale. Thousands of phones share a single public IP address. There's no router admin
+panel you can log into, no port forwarding rule you can set. The carrier controls all
+of it. Incoming connections to your phone from the internet simply have nowhere to
+land.
+
+The rmail Android app works around this by flipping the direction. Instead of waiting
+for messages to arrive, the phone regularly checks your home computer: "any new
+messages for me?" Your home computer does have an open port and does receive the
+incoming connections from your contacts. The phone just polls it on a schedule and
+picks them up.
+
+This is why a home daemon (a desktop or laptop, or a small always-on machine like a
+VPS) is required. The phone is a frontend, not a standalone node.
+
+For a technical explanation of why alternatives like hole punching and IP spoofing
+don't work, see [nat-traversal-report.md](nat-traversal-report.md#part-9-cgnat-and-mobile-devices).
+
+---
+
 ## What if a contact has a local IP address?
 
 If you put a local IP address (like `192.168.1.10`) in a contact's entry, messages

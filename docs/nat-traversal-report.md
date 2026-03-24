@@ -384,6 +384,56 @@ The UPnP/NAT-PMP detection on startup isn't about rmail specifically. It's about
 Use a VPN (Tailscale is the easiest), or set up an SSH tunnel to a VPS. No port forwarding needed at all — NAT stops being a problem because you're not accepting inbound connections through it. Your router's firewall stays intact. The only downside is the dependency on external infrastructure (a VPN coordination server, or a VPS you pay for). For a personal messaging system, this is probably overkill. But it's the right answer if your threat model includes adversaries on your LAN.
 
 
+## Part 9: CGNAT and mobile devices
+
+Home router NAT is the problem described in Part 1 — one router, one public IP, devices behind it. You at least own the router and can configure it. Carrier-grade NAT (CGNAT) is the same problem one level up, and you have no control over it at all.
+
+### What CGNAT is
+
+Mobile carriers face the same IPv4 exhaustion that led to home NAT, but at much larger scale. Rather than give each customer a public IP, carriers assign private addresses (often in the `10.x.x.x` range) to phones and run their own NAT infrastructure between those private addresses and the internet. Thousands of phones share a single public IP. There is no router admin panel. There is no port you can forward. The carrier controls the NAT entirely.
+
+The result: incoming connections to your phone from the internet are impossible. A packet sent to your phone's carrier IP doesn't know which phone it's for — there's no mapping, and the carrier doesn't create one on your behalf.
+
+### Approaches considered and why they fail
+
+**1. Wifi-to-cellular loopback**
+
+Idea: send a packet from wifi to the phone's cellular IP, tricking the cellular NAT into creating an inbound mapping. This fails for three reasons:
+
+- The OS routes packets destined for its own IP via loopback internally. The packet never leaves the phone, never touches the cellular NAT, and no mapping is created.
+- Even if the packet were forced out over wifi, the cellular IP is private (behind CGNAT). The wifi network has no route to it.
+- NAT mappings are destination-specific. A mapping created by sending to `1.2.3.4:9000` only permits replies from `1.2.3.4:9000`, not arbitrary inbound connections.
+
+**2. IP or MAC address spoofing**
+
+Idea: spoof a LAN IP or MAC address to trick the carrier into thinking the traffic is local. This fails because cellular networks don't use Ethernet. Device identity is at the radio/SIM/IMEI layer, not MAC. Even on WiFi, spoofing a LAN IP just impersonates another device on that LAN — it doesn't create inbound NAT mappings from the internet.
+
+**3. UDP hole punching (the WebRTC approach)**
+
+Both sides send packets to each other simultaneously, creating symmetric NAT mappings that let the other's packet through. Used by games, WebRTC, and other P2P protocols.
+
+The problem: this requires a signaling server to coordinate timing and exchange addresses, and it's unreliable through CGNAT and symmetric NAT — which is what most mobile carriers use. Success rates are well below 100%. An approach that fails silently and intermittently is not a good foundation for a messaging system.
+
+**4. VPN mesh networks (Tailscale, Hamachi, ZeroTier)**
+
+These work. Every client connects outward to a central coordination server, which brokers P2P connections via hole punching and relays traffic when P2P fails. A virtual network adapter makes it look like a LAN. No port forwarding, NAT transparent.
+
+The tradeoff: requires a central server (either one you run, or one you trust a third party to run). This is a dependency that rmail otherwise doesn't have.
+
+**5. IPv6**
+
+The only real fix. IPv6 addresses are globally routable — no NAT at all. A phone with an IPv6 address can receive incoming connections directly, exactly like any server. Carrier IPv6 support is growing, but not universal. rmail doesn't currently require it.
+
+### What rmail does instead
+
+The Android app never needs to receive incoming connections. The phone connects *outward* to the home daemon, which does have an open port. The phone polls: "any new messages for me?" The home daemon queues outgoing messages and delivers them when polled.
+
+This is the design consequence of CGNAT: the always-on home daemon is not optional. Standalone phone-to-phone messaging without any server is not feasible with current internet infrastructure unless both sides have working IPv6.
+
+For a plain-language explanation of this, see [ports-explained.md](ports-explained.md#why-does-the-android-app-need-a-home-computer).
+
+---
+
 ## Summary of protocols
 
 | Protocol | Auth | Transport | Complexity | Router support | Verdict |
