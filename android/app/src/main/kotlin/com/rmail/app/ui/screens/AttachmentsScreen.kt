@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -66,12 +67,12 @@ fun AttachmentsScreen(vm: MainViewModel, onBack: () -> Unit) {
                             downloadingFile = info.filename
                             vm.downloadAttachment(info) { file ->
                                 downloadingFile = null
-                                if (file != null) shareFile(context, file, vm)
+                                if (file != null) shareFile(context, file)
                             }
                         },
                         onOpen = {
                             val file = vm.store.cachedAttachmentFile(info.filename)
-                            if (file.exists()) shareFile(context, file, vm)
+                            if (file.exists()) shareFile(context, file)
                         }
                     )
                     HorizontalDivider(thickness = 0.5.dp)
@@ -100,7 +101,7 @@ private fun AttachmentItem(
             imageVector = when (info.category) {
                 "image" -> Icons.Default.Image
                 "audio" -> Icons.Default.AudioFile
-                "text" -> Icons.Default.TextSnippet
+                "text" -> Icons.AutoMirrored.Filled.TextSnippet
                 else -> Icons.Default.AttachFile
             },
             contentDescription = null,
@@ -128,7 +129,7 @@ private fun AttachmentItem(
     }
 }
 
-private fun shareFile(context: android.content.Context, file: File, vm: MainViewModel) {
+private fun shareFile(context: android.content.Context, file: File) {
     val uri = FileProvider.getUriForFile(
         context, "${context.packageName}.fileprovider", file
     )
