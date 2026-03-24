@@ -4,7 +4,7 @@
 
 **Confirmed architecture:** Android → sender's home computer → receiver's home computer → receiver's Android (polls).
 
-The phone submits messages to its own home daemon and never needs to be reachable. Delete/IP notifications flow between home daemons as normal.
+The phone submits messages to its own home daemon and never needs to be reachable by other peers. Delete/IP notifications flow between home daemons as normal.
 
 **App design: file sync + text editor**
 
@@ -26,8 +26,8 @@ Received attachments live on the home server. The app shows a listing of filenam
 **Kotlin** (native Android). No Lua porting needed.
 
 - `java.util.zip` — zip/unzip, built-in
-- **BouncyCastle** — TLS-PSK support. Standard Android (JSSE) doesn't expose PSK via the normal TLS API, so BouncyCastle provides its own TLS stack. Added as a Gradle dependency. (Gradle is Android's standard build system — it manages library downloads, compilation, and APK packaging. Dependencies declared in `build.gradle` are downloaded automatically.)
-- **OkHttp** — HTTP client
+- **`javax.crypto.Cipher`** (`AES/GCM/NoPadding`) — AES-256-GCM encryption, built into Android. No third-party crypto library needed. (Gradle is Android's standard build system — it manages library downloads, compilation, and APK packaging. Dependencies declared in `build.gradle` are downloaded automatically.)
+- **`HttpURLConnection`** — HTTP client, built into Android. No third-party library needed; our request patterns are simple (POST manifest, GET file, PUT chunk). Each connection is wrapped in the custom AES-GCM encryption layer before transmission.
 - **Jetpack Compose** — UI
 
 ---
@@ -41,9 +41,9 @@ myphone.token = "phone-secret"
 myphone.own   = true
 ```
 
-`own = true` means "this is my own device" — it cannot be confused with a contact for another person. Own-device entries have no `ip` or `port` (the phone connects to you, not the reverse). The sync and upload APIs use TLS-PSK with the device token.
+`own = true` means "this is my own device" — it cannot be confused with a contact for another person. Own-device entries have no `ip` or `port` (the phone connects to you, not the reverse). All sync and upload API calls are encrypted with the device token using the custom AES-GCM protocol.
 
-The PSK client identity label (sent during the TLS handshake) is the device's entry name (e.g., `myphone`). The server receives this label, looks up `contacts[name]` where `own == true`, and returns the corresponding token as the PSK key.
+No identity label is sent in cleartext. The server identifies the caller by trial decryption: it tries each known token in turn (own-device entries first, then contacts). The first token whose AES-GCM auth tag validates identifies the caller. An eavesdropper sees only destination IP and port — no names, no handshake labels. See the **Encryption protocol** section at the end for the full spec.
 
 **Multiple phones:** all `own = true` entries access the same sync API and see the same mail directory.
 
@@ -65,41 +65,54 @@ When the app is first installed:
    - Device token (must match the token in the contacts file)
 2. Tap "Connect" — app performs first sync
 3. If successful, inbox appears and normal use begins
+4. If unsuccessful, a message explains what to check: "Please verify your home computer's contacts file contains: `myphone.token = <your-token>` and `myphone.own = true`"
 
 These settings are stored in app storage and editable later via the settings screen.
 
 **First sync:** no previous sync state exists. Server sends all current inbox and outbox files as "fetch". Phone starts with a clean local copy.
 
+**Home server IP changes:** if the home router's IP changes, the phone silently fails to connect. The phone does not attempt recovery automatically — it presents a troubleshooting screen: "Is the home server on? Is the rmail service running?" etc. One of the steps offers to query contacts for the current IP: "Your home IP may have been reassigned by your ISP. Ask your contacts?" The user confirms. The phone randomly selects at least 3 contacts and queries each via `GET /peer-address` using each contact's token for encryption — the server identifies the phone via trial decryption, no identity label sent. Responses are compared; the IP appearing in the majority is used. If no consensus, the phone reports failure. A malicious contact returning a wrong IP cannot hijack the phone: the subsequent sync requires TLS-PSK with the home daemon's token. The contact's daemon checks `allow_peer_address_requests` (config key, default `true`) before responding.
+
 ---
 
 ## Sync protocol (phone ↔ home daemon)
 
-Manifest-based file sync. The phone tracks its previous sync state locally so the server can detect intentional deletions vs files the phone never had.
+Message-ID-based sync, consistent with how the desktop daemon already tracks state in `inbox.json`. The phone maintains its own equivalent state file locally — no per-device history is stored server-side.
+
+**Phone-side state:** `sync-state.json` — maps `{message_id: {filename, from}}` for all inbox messages currently on the phone, plus a list of known outbox filenames. Analogous to the desktop's `inbox.json`.
 
 **Sync flow:**
-1. Phone builds a current manifest: `{inbox: {filename: sha256, ...}, outbox: {filename: sha256, ...}, contacts: sha256}`
-2. Phone POSTs manifest to `POST /api/sync` (TLS-PSK authenticated)
-3. Server compares manifest against its stored per-device "last known state" and the server's current file system
-4. Server responds: `{fetch: [filenames], delete: [filenames], upload: [filenames], contacts: "fetch"|"upload"|null}`
-5. Phone executes the diff:
-   - Downloads each file in `fetch` from the server
-   - Deletes local files in `delete`
-   - Uploads each file in `upload` to the server
-   - If `contacts == "fetch"`: downloads server's contacts file
-   - If `contacts == "upload"`: uploads phone's contacts file
-6. Phone updates its local `sync-state.json` with the current manifest (only after all operations succeed)
+1. Phone computes a local diff by comparing `sync-state.json` against current local files:
+   - `deleted_inbox`: entries in state whose file no longer exists → user deleted them
+   - `new_outbox`: local outbox files not in state → user created them
+   - `deleted_outbox`: outbox filenames in state that no longer exist → user deleted them
+2. Phone POSTs to `POST /api/sync` (authenticated via AES-GCM trial decryption):
+   ```json
+   {
+     "inbox": {"message_id": "filename", ...},
+     "deleted_inbox": [{"message_id": "...", "from": "..."}, ...],
+     "outbox": ["filename.txt", ...],
+     "deleted_outbox": ["old.txt", ...],
+     "contacts_hash": "sha256..."
+   }
+   ```
+3. Server processes deletions:
+   - `deleted_inbox`: same logic as `sync_inbox` on the desktop — notifies each original sender's daemon to remove their `to:` line, cleans up associated attachments
+   - `deleted_outbox`: same logic as `sync_outbox` — notifies recipients to delete
+4. Server computes response by diffing against its current state:
+   - `fetch_inbox`: server inbox entries whose message IDs are absent from the phone's `inbox` map → new messages for phone
+   - `remove_inbox`: message IDs in phone's `inbox` map not found in server's `inbox.json` → deleted elsewhere (by desktop or another phone), phone removes local copy
+   - `fetch_outbox`: server outbox files not in phone's `outbox` list → created on desktop, send to phone
+   - `remove_outbox`: filenames in phone's `outbox` list not on server → sent/deleted, phone removes local copy
+   - `contacts`: `"fetch"` if server's contacts are newer; `"upload"` if phone's are newer; `null` if same
+5. Phone executes: downloads fetched files, deletes removed files, uploads new outbox files, syncs contacts
+6. Phone updates `sync-state.json` only after all operations complete successfully
 
-**Server decision logic:**
-- **fetch** (server → phone): file is on the server but not in the phone's last-known manifest → new for this device
-- **delete** (remove from phone): file was in the phone's last-known manifest but no longer on the server (deleted by desktop user or another device)
-- **upload** (phone → server): file is in the phone's current manifest but not in the phone's last-known manifest → phone created this file
-- **deletion detection**: file was in phone's last-known manifest, not in phone's current manifest → intentional delete by phone user → server runs delete-notification logic (sends `/delete` to original sender) and removes file from inbox
+**No per-device state on server.** The phone provides enough context on each request for the server to compute the full diff against its own current `inbox.json` and outbox directory. No history of previous phone syncs is stored server-side.
 
-**Server per-device state:** stored in `.state/device-<name>.json`. Contains the last manifest the server saw from this device. Updated after each successful sync.
+**Deletion across devices:** phone A deletes inbox message X → phone A's `deleted_inbox` triggers the server to run delete-notification exactly once (removes X from server's `inbox.json`, notifies the original sender to remove their `to:` line). Phone B still has X locally; on its next sync, X's ID is in phone B's `inbox` map but absent from server's `inbox.json` → server puts X in `remove_inbox` → phone B deletes its local copy. No duplicate notifications.
 
-**Interrupted sync:** naturally idempotent. Phone only updates `sync-state.json` after all operations complete successfully. If the connection drops mid-sync, the next sync repeats the same operations.
-
-**Deletion across devices:** when phone A deletes a message, the server removes it from inbox and sends `/delete` to the sender. Phone B, on its next sync, receives it in the `delete` list and removes it locally. The `/delete` notification to the sender fires only once (when the file is first removed from the server inbox), not again when other devices sync.
+**Interrupted sync:** naturally idempotent. Phone only updates `sync-state.json` after all operations complete. Next sync repeats any incomplete operations.
 
 ---
 
@@ -107,32 +120,31 @@ Manifest-based file sync. The phone tracks its previous sync state locally so th
 
 All new code required in `rmail.lua`:
 
-**New HTTP endpoints** (all require `own = true` device auth via TLS-PSK):
+**New HTTP endpoints** (all require `own = true` device auth, verified via AES-GCM trial decryption):
 
 - `POST /api/sync` — manifest sync (core endpoint)
 - `GET /api/file/inbox/<filename>` — download inbox file to phone
 - `GET /api/file/outbox/<filename>` — download outbox file to phone
 - `POST /api/file/outbox/<filename>` — upload new outbox file from phone
 - `GET /api/myaddress` — returns `{ip, port}`; daemon fetches IP from external services (same logic as dynamic IP detection)
+- `GET /peer-address` — returns `{ip, port}` for the caller's own contacts entry. The server identifies the caller via trial decryption — no identity label is transmitted. The server looks up the matched token's contact name and returns that entry's stored address. Gated by `allow_peer_address_requests` config key (default `true`).
+
 - `GET /api/attachments` — list filenames in attachments directory (JSON array)
 - `GET /api/attachments/<filename>` — download attachment file to phone
 - `POST /api/upload/start` — begin chunked attachment upload from phone
 - `PUT /api/upload/<id>/chunk/<n>` — upload one chunk of a staged attachment
 
-**PSK identity routing:**
-The server's PSK callback must handle multiple device identities. When a device connects, it sends its name as the PSK identity label. The server looks up `contacts[name].token` where `contacts[name].own == true`. This may require restructuring the existing per-contact PSK logic.
-
-**Per-device sync state:**
-Read/write `.state/device-<name>.json` on each sync request.
+**Encryption layer:**
+TLS/LuaSec is removed from rmail.lua entirely. Every connection — daemon-to-daemon and phone-to-daemon — uses the custom AES-GCM protocol. On the Android side, `javax.crypto.Cipher` (built-in) replaces BouncyCastle. On the Lua side, OpenSSL's AES-GCM is called directly (OpenSSL is already a dependency of LuaSec, so it remains available on disk — the change is calling it via FFI rather than the TLS socket abstraction). The trial decryption loop replaces the PSK callback entirely. See the **Encryption protocol** section for the full spec.
 
 **`own = true` contact parsing:**
-The contacts parser already reads the `own` field. Verify the daemon actually loads and stores `own = true` entries — they have no `ip` or `port` and may currently be skipped by connection-oriented code paths.
+Own-device entries store only two fields: `token` and `own = true`. No `ip` or `port`. The contacts parser reads these fields already. Confirm that `load_contacts()` includes them in its returned table so the PSK callback can find them.
 
 **Deletion logic integration:**
-When a file disappears from a device's manifest compared to its last-known state, run the same delete-notification code path used for desktop inbox deletions.
+The phone sends deletions as direct `/delete` requests to its home server (same endpoint used between home servers), rather than bundling them in the sync request. The home server receives the request, recognizes the sender as an `own = true` device, and routes accordingly: removes the file from its inbox, notifies the original sender's daemon (so they can remove the `to:` line from their outbox), and any other attached own devices will receive `remove_inbox` on their next sync.
 
 **Staged upload cleanup:**
-Intermediate files in `attachments/.uploads/` are deleted when `release_zip` runs for the last active transfer referencing them. Config: `keep_phone_uploads = false` (default: delete; `true` keeps a copy).
+Uploads from the phone go to `attachments/.uploads/<uuid>-filename`. Partial chunks are kept on interruption so the phone can resume — same behavior as interrupted desktop-to-desktop transfers (partial `.pending/` chunks persist until resumed or the transfer is cancelled). Once delivery to all recipients completes, `release_zip` deletes the staged file.
 
 ---
 
@@ -140,15 +152,15 @@ Intermediate files in `attachments/.uploads/` are deleted when `release_zip` run
 
 **Polling model:** the phone polls the home server on a schedule. The phone does not need to be reachable — no push channel required.
 
-**Foreground:** while the app is open, poll every 30 seconds.
+**Foreground:** while the app is open, poll every 15 seconds.
 
-**Background:** Android's WorkManager enforces a minimum interval of 15 minutes for periodic background tasks. This is an OS-level constraint that cannot be overridden. rmail's model is closer to email than instant messaging, so 15-minute background delivery is acceptable.
+**Background:** Android's WorkManager enforces a minimum interval of 15 minutes for periodic background tasks. This is an OS-level constraint that cannot be overridden. Apps like WhatsApp get around it by using Firebase Cloud Messaging (FCM) — Google's push notification service maintains a persistent connection to Android devices and wakes apps on demand. Using FCM would introduce Google as a third party and is inconsistent with rmail's privacy model. WorkManager polling is the correct tradeoff.
 
-**Doze mode:** Android aggressively defers background work when the device is idle. WorkManager respects Doze and cannot guarantee exact delivery times. This is acceptable for the email-like use case.
+**Doze mode:** Android aggressively defers background work when the device is idle. WorkManager respects Doze and cannot guarantee exact delivery times. Acceptable for this use case.
 
-**Notifications:** when a background sync finds new inbox files, the app posts a notification ("New message from Alice"). Notification shows the sender name and subject (filename). Tapping opens the message.
+**Notifications:** when a sync finds new inbox files, the app posts a notification. Notification detail is configurable in settings — three levels: full (sender + subject), sender only, or no preview ("New message"). Default: sender + subject. Users who want their lock screen to reveal nothing can set no preview.
 
-**Sync interval in settings:** configurable. Default: 30 seconds foreground, 15 minutes background. Reading the home server's sync interval from the config file adds complexity with little benefit — sensible defaults are sufficient.
+**Sync interval in settings:** configurable. Defaults: 15 seconds foreground, 15 minutes background. Phone sync is independent of the home server's own sync cycle — different systems, different mechanics.
 
 ---
 
@@ -156,20 +168,19 @@ Intermediate files in `attachments/.uploads/` are deleted when `release_zip` run
 
 Lazy download model. Attachments are not automatically synced to the phone — they stay on the home server until explicitly requested.
 
-**Listing:** during sync, the app fetches the attachment filename list from `GET /api/attachments`. These appear in an Attachments screen (separate from inbox).
+**Listing:** `GET /api/attachments` returns each file's name, size, broad type category (image / text / audio / other — not the specific format), and sender. These appear in an Attachments screen (separate from inbox). Each entry has a three-dots button that shows a detail panel with the full metadata.
 
-**Download on demand:** user taps a filename and chooses to save to the gallery or file browser. App downloads from `GET /api/attachments/<filename>`.
+**Download on demand:** user taps a filename to download it, then chooses to save to the gallery or file browser. No auto-downloading — all transfers to the phone device are explicit.
 
 **Consent flow on phone:**
-- Consent file arrives in inbox via normal sync (it's just a regular inbox file)
-- App detects consent format: checks for lines containing `accept` and `deny`
-- Detection happens when the file is received, before it appears in the inbox list
-- When user opens the file, Accept (✓) and Deny (✗) buttons appear where those lines would be
-- User has no keyboard at this point — only the buttons
-- Accept: app rewrites consent file to contain only `accept`, syncs to server → home daemon proceeds with transfer
-- Deny: app rewrites with `deny`, syncs → home daemon cancels; consent file is then deleted
-
-**Auto-download after accept on phone:** when the user accepts consent on the phone, the home daemon begins receiving the file from the sender. Once the transfer completes, the file appears in `attachments/` on the home server. The phone should automatically download it at that point rather than just adding it to the listing. Mechanism: on each sync, the app checks for new entries in the attachment listing that match recently-accepted consent filenames; if found, downloads automatically to local storage.
+- Consent file arrives in inbox via normal sync — when the file is synced to the phone, not when the home server receives it
+- App detects consent format when syncing: checks for lines containing `accept` and `deny`
+- Detection happens at sync time, before the file appears in the inbox list
+- When user opens the file, two large rectangular buttons fill the screen (half each, to prevent mis-taps): Accept (✓) and Deny (✗), with the consent information text above
+- User has no keyboard — only the buttons
+- Accept (✓): app rewrites consent file to contain only `accept`, syncs to server → home daemon proceeds with transfer
+- Deny (✗): app rewrites with `deny`, syncs → home daemon cancels; consent file is then deleted
+- Once accepted, the file transfers to the home server. It then appears in the Attachments screen listing. The user taps it there when they want to download it to the phone.
 
 ---
 
@@ -177,13 +188,13 @@ Lazy download model. Attachments are not automatically synced to the phone — t
 
 When composing a message, the user types `attach:` in the body. The editor detects this token and converts it into an inline button. Tapping the button opens a file picker (camera, gallery, files). After selection, the button becomes `attach: /sdcard/...` as plain text.
 
-**Upload on send:** when the user taps the send arrow, any `attach:` paths pointing to local files are uploaded to the home server before the outbox file is written.
+**Upload on send:** when the user taps the send arrow, any `attach:` paths pointing to local files are uploaded to the home server before the outbox file is written to the server's filesystem.
 
 Upload protocol:
-1. `POST /api/upload/start` with `{filename, num_chunks}` → returns `{upload_id, server_path}`; server pre-creates staging slot at `attachments/.uploads/<uuid>-filename`
-2. `PUT /api/upload/<id>/chunk/<n>` for each chunk
-3. Server auto-assembles when all chunks received (no explicit complete request)
-4. Outbox file is written with `attach: <server_path>`; the phone-local path never appears on the server
+1. `POST /api/upload/start` with `{filename, num_chunks}` → returns `{upload_id, server_path}`. The `/start` call registers the upload so the server can allocate a stable path (`attachments/.uploads/<uuid>-filename`) that the phone can reference in the outbox file before the upload is complete. The message body stays on the phone (in the compose draft) throughout the upload.
+2. `PUT /api/upload/<id>/chunk/<n>` for each chunk, numbered 0 to num_chunks-1. The phone computed `num_chunks = ceil(filesize / chunk_size)` before calling `/start` and just sends all chunks in sequence. No manifest is involved — this is a direct upload loop.
+3. Server auto-assembles when it has received all `num_chunks` chunks (tracked by count). No explicit complete request.
+4. Phone writes the outbox file to the server with `attach: <server_path>`; the phone-local path never appears on the server.
 
 Always chunked — no single-request path. The home daemon's regular sync then handles delivery to the recipient using the existing consent + chunk protocol.
 
@@ -195,7 +206,17 @@ The contacts file is a single text file edited directly via the phone's raw edit
 
 **Resolution rule for v1:** phone wins. When the phone uploads a contacts file, it replaces the server's version. The server pushes its version to the phone only when the phone hasn't made local changes (hashes match since last sync).
 
-This is a rare edge case. If it becomes a problem in practice, add per-entry timestamps and merge by last-write-wins per entry.
+**Editing contacts while offline:** when the phone can't reach the home server, the contacts editor is read-only (indicated by an offline status icon). If the user taps Edit, a message explains the situation and offers a "Create note-to-self" option. Tapping it prompts for a contact name, then opens a new draft in the inbox (no `to:` line, so it doesn't attempt delivery) pre-filled with:
+
+```
+please add this to the contacts file:
+
+Alice.ip    =
+Alice.port  =
+Alice.token =
+```
+
+The user fills in the details while the information is fresh. When they get home, the note is in their inbox waiting. Automating the final step (parsing the note and inserting into the contacts file) is left as a future improvement — it would need robust parsing to avoid mishandling user-added notes in the same message.
 
 ---
 
@@ -219,7 +240,7 @@ This is a rare edge case. If it becomes a problem in practice, add per-entry tim
 **Contacts → raw file editor**
 - "My address" button (top-right or toolbar) — displays the user's public IP and port so they can tell a new contact what to put in their contacts file. The IP must come from the home daemon, not the phone — the phone would return the mobile carrier's IP, which is wrong. Implementation: a new `GET /api/myaddress` endpoint on the daemon returns `{ip, port}`; the daemon fetches the IP from its usual external services (`ifconfig.me`, `icanhazip.com`, etc.), the same logic already used for dynamic IP detection. The app calls this endpoint and displays the result.
 
-**Attachments screen** — separate from inbox; lists filenames on home server; tap to download to device
+**Attachments screen** — separate from inbox; similar from a UI standpoint. Lists filenames on home server; tap to download to device
 
 ---
 
@@ -263,14 +284,81 @@ Settings screen:
 
 ---
 
-## Open questions
+## Multiple mailboxes
 
-1. **PSK identity routing in LuaSec:** does the current LuaSec TLS-PSK server implementation support a callback that receives the client's identity label and returns the matching key? This is required for the server to handle multiple devices with different tokens. Needs verification before implementing the server-side sync endpoint.
+The app supports multiple completely independent mailbox configurations — for users running more than one rmail instance (different home servers, multiple household members sharing a device, or multiple use-cases (send scientific data to this inbox to be processed by these hooks, sent chatbot requests to this inbox to be updated and returned, send communication messages for this corporation or organization to this inbox, all on the same computer for the same human user).
 
-2. **Interrupted attachment upload from phone:** if the chunked upload is interrupted mid-way (e.g., chunk 3 of 10 arrives, then connection drops), does the server discard partial data and require a restart, or keep the chunks and allow resumption from where it left off? Resume is better UX but more complex to implement — decide before building the upload endpoint.
+Each mailbox has its own:
+- Settings (home server address, port, device token)
+- Local `sync-state.json`
+- Contacts file copy
+- Inbox / outbox / attachments views
 
-3. **Auto-download trigger after phone accept:** when an accepted attachment finishes transferring to the home server, how does the phone know it's ready? Options: (a) poll the attachment listing each sync and match against recently-accepted consent filenames; (b) server includes a "ready" flag in the sync response for newly-completed transfers. Which approach?
+A mailbox switcher (drawer or top-bar dropdown) lets the user switch between configured mailboxes. Adding a new mailbox follows the same onboarding flow as the first setup, but by default onboarding only initializes one inbox. Subsequent mailboxes can be created and onboarded afterwards.
 
-4. **Delete-notification deduplication across devices:** when phone A deletes a message, the server sends `/delete` to the sender once. If phone B still has the file and syncs later, the server should not send a second `/delete`. Confirm the delete-notification code path only fires when the file is first removed from the server inbox, not when a device is told to remove its local copy.
+---
 
-5. **Device entry setup during onboarding:** the user must manually add the device entry to the contacts file before first app sync. Should the install script or rmail.lua offer a helper command (e.g., `lua rmail.lua --add-device myphone`) to generate the entry, or is a documentation note sufficient?
+## Encryption protocol
+
+rmail replaces TLS entirely with a custom AES-256-GCM layer. This removes the LuaSec dependency from the daemon, removes BouncyCastle from Android, and eliminates the cleartext identity label that TLS-PSK requires during handshake. An observer sees only destination IP and port.
+
+**This change affects both rmail.lua (desktop daemon) and the Android app.**
+
+### Packet format
+
+Every connection is a raw TCP socket. The entire HTTP request/response is encrypted as a single payload:
+
+```
+[nonce: 12 bytes] [ciphertext + GCM auth tag: N + 16 bytes]
+```
+
+- **Nonce:** 12 bytes of cryptographically random data, generated fresh for each packet.
+- **Ciphertext:** the HTTP bytes encrypted with AES-256-GCM.
+- **GCM auth tag:** 16 bytes appended by the cipher; validates both authenticity and integrity. Forgery requires the correct key.
+
+### Key
+
+```
+key = SHA256(psk)
+```
+
+Computed once per contact when the contacts file is loaded; stored in memory alongside the token. SHA256 maps the variable-length token string to a fixed 32-byte AES key. The nonce does not need to feed into the key — AES-GCM with a fresh nonce per packet is already safe with a fixed key.
+
+The PSK is stored in cleartext in the contacts file on both machines — this is inherent to any symmetric shared-secret scheme. Security depends on filesystem permissions protecting the contacts file, same as an SSH private key.
+
+SHA256 does not improve entropy. A weak token like `"dog"` produces a weak key. Tokens are per-contact shared secrets agreed on out-of-band — there is nothing to generate at install time. Security depends entirely on users choosing long, random tokens.
+
+### Trial decryption (sender identification)
+
+No identity is sent in cleartext. The receiver tries each known token in turn:
+
+```
+for each token in contacts:
+    key = SHA256(token)   // precomputed on load
+    plaintext, ok = AES_GCM_Decrypt(key, nonce, ciphertext)
+    if ok: process request as this contact; break
+if no token succeeded: drop connection
+```
+
+The GCM auth tag either validates or fails — no ambiguity, no timing attack surface from a correct implementation. The number of trials is the number of contacts, which is small (tens to low hundreds at most).
+
+### Replay prevention
+
+The encrypted payload includes a timestamp (Unix seconds, 8 bytes). The receiver checks that the timestamp is within ±30 seconds of the current time. Replay window: 30 seconds.
+
+```
+plaintext = [timestamp: 8 bytes] [HTTP request bytes]
+```
+
+### Critical implementation notes
+
+1. **Nonce reuse is catastrophic for GCM.** Two packets encrypted under the same (key, nonce) pair completely break confidentiality. Always generate a fresh random nonce per packet. Do not use a counter unless the counter state is stored durably.
+
+2. **Constant-time tag comparison.** Use the cipher's built-in authenticated decryption (which handles this). Do not compare tags with `==` or `memcmp` — these short-circuit on first differing byte and leak timing information.
+
+### Implementation
+
+- **Android:** `javax.crypto.Cipher` with `AES/GCM/NoPadding` (built-in). `MessageDigest.getInstance("SHA-256")` for key derivation. `SecureRandom` for nonce generation.
+- **Lua (rmail.lua):** OpenSSL AES-GCM and SHA-256 via FFI. OpenSSL is already present as a LuaSec dependency; LuaSec itself is removed.
+
+Estimated implementation size: ~250 lines per platform to replace the TLS socket abstraction.
