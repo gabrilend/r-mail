@@ -56,10 +56,8 @@ local DEPS_REGISTRY = {
                  description = "Lua interpreter and headers"},
     luasocket = {min = "3.0.0", max = "3.1.0", default = "3.1.0", required = true,
                  description = "TCP networking for Lua"},
-    luasec    = {min = "1.3.2", max = "1.3.2", default = "1.3.2", required = true,
-                 description = "TLS-PSK encryption (must compile with -DLSEC_ENABLE_PSK)"},
     openssl   = {min = "1.1.1", max = "3.2.1", default = "3.2.1", required = true,
-                 description = "SSL/TLS library (must support PSK ciphers)"},
+                 description = "AES-256-GCM encryption via rmail_crypto.so"},
     dkjson    = {min = "2.5",   max = "2.8",   default = "2.8",   required = true,
                  description = "JSON encoding/decoding"},
     miniupnpc = {min = "2.0",   max = "2.3.3", default = "2.3.3", required = false,
@@ -96,15 +94,10 @@ end
 
 local mime = require("mime")  -- base64 encoding (part of luasocket)
 
-local ok3, ssl = pcall(require, "ssl")
+local ok3, crypto = pcall(require, "rmail_crypto")
 if not ok3 then
-    io.stderr:write("error: luasec not found\n")
-    io.stderr:write("       " .. tostring(ssl) .. "\n")
-    io.stderr:write("       run: scripts/install.sh\n")
-    os.exit(1)
-end
-if not ssl.config or not ssl.config.capabilities or not ssl.config.capabilities.psk then
-    io.stderr:write("error: luasec was not compiled with PSK support\n")
+    io.stderr:write("error: rmail_crypto.so not found\n")
+    io.stderr:write("       " .. tostring(crypto) .. "\n")
     io.stderr:write("       run: scripts/install.sh\n")
     os.exit(1)
 end
@@ -650,12 +643,10 @@ local function send_raw_response(client, status, content_type, body, extra_heade
     client:send(header .. body)
 end
 
-local function auth_check(data)
-    local sender = data["from"] or ""
-    local token = data.token or ""
-    local contacts = load_contacts()
-    if not contacts[sender] then return false end
-    return contacts[sender].token == token
+-- Identity is established by the encryption layer (trial decryption).
+-- We just confirm the body's "from" field matches the decrypted identity.
+local function auth_check(data, contact_name)
+    return (data["from"] or "") == contact_name
 end
 
 local function save_attachments(attachments, sender, inbox_meta)
@@ -880,18 +871,141 @@ local function handle_update_address(data)
 end
 
 -- ============================================================
+-- Encryption helpers (AES-256-GCM)
+-- ============================================================
+
+-- Derive a 32-byte AES key from a contact token string.
+local function derive_key(token)
+    return crypto.sha256(token)
+end
+
+-- Encode n as a 4-byte big-endian string.
+local function uint32_be(n)
+    return string.char(
+        math.floor(n / 16777216) % 256,
+        math.floor(n / 65536)   % 256,
+        math.floor(n / 256)     % 256,
+        n % 256)
+end
+
+-- Decode a 4-byte big-endian string to a number.
+local function parse_uint32_be(s)
+    local a, b, c, d = string.byte(s, 1, 4)
+    return a * 16777216 + b * 65536 + c * 256 + d
+end
+
+-- Send a length-prefixed encrypted packet over sock.
+-- Packet format: [4-byte length][12-byte nonce][ciphertext+16-byte tag]
+local function send_encrypted(sock, key, plaintext)
+    local nonce      = crypto.random_bytes(12)
+    local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
+    local payload    = nonce .. ciphertext
+    sock:send(uint32_be(#payload) .. payload)
+end
+
+-- Receive and decrypt a length-prefixed encrypted packet.
+-- Returns plaintext string or nil on error / auth failure.
+local function recv_encrypted(sock, key)
+    sock:settimeout(10)
+    local len_bytes = sock:receive(4)
+    if not len_bytes or #len_bytes ~= 4 then return nil end
+    local len = parse_uint32_be(len_bytes)
+    if len < 28 or len > 64 * 1024 * 1024 then return nil end  -- 12+16 min, 64 MB max
+    local packet = sock:receive(len)
+    if not packet or #packet ~= len then return nil end
+    local nonce      = packet:sub(1, 12)
+    local ciphertext = packet:sub(13)
+    return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
+end
+
+-- Try to decrypt a raw packet (nonce..ciphertext+tag) against every known
+-- contact token. Returns (plaintext, contact_name) or (nil, nil).
+local function trial_decrypt(packet)
+    if #packet < 28 then return nil, nil end
+    local nonce      = packet:sub(1, 12)
+    local ciphertext = packet:sub(13)
+    local contacts   = load_contacts()
+    for name, c in pairs(contacts) do
+        if c.token then
+            local key       = derive_key(c.token)
+            local plaintext = crypto.aes_gcm_decrypt(key, nonce, ciphertext)
+            if plaintext then
+                return plaintext, name
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- Parse an HTTP request from a string (instead of a socket).
+local function parse_request_string(s)
+    local pos = 1
+    local function read_line()
+        local i = s:find("\n", pos, true)
+        if not i then return nil end
+        local line = s:sub(pos, i - 1):gsub("\r$", "")
+        pos = i + 1
+        return line
+    end
+
+    local request_line = read_line()
+    if not request_line then return nil end
+    local method, path = request_line:match("^(%S+)%s+(%S+)")
+    if not method then return nil end
+
+    local headers = {}
+    while true do
+        local line = read_line()
+        if not line or line == "" then break end
+        local k, v = line:match("^(.-):%s*(.+)$")
+        if k then headers[k:lower()] = v end
+    end
+
+    local body = ""
+    local length = tonumber(headers["content-length"] or 0)
+    if length > 50 * 1024 * 1024 then
+        return method, path, headers, nil
+    end
+    if length > 0 then
+        body = s:sub(pos, pos + length - 1)
+    end
+
+    return method, path, headers, body
+end
+
+-- Create a response buffer that captures send() calls into a string.
+-- Mimics the subset of the socket API used by send_response / send_raw_response.
+local function make_response_buffer()
+    local parts = {}
+    local buf = {}
+    function buf:send(data)
+        if data then parts[#parts + 1] = data end
+        return #(data or ""), nil
+    end
+    function buf:get()
+        return table.concat(parts)
+    end
+    return buf
+end
+
+-- ============================================================
 -- Sync (outgoing)
 -- ============================================================
 
-local function http_send_request(e)
-    e.conn:settimeout(3)
-    local sent = e.conn:send(
+-- Encrypt and send the HTTP request, then mark as "sent" (waiting for response).
+local function http_encrypt_and_send(e)
+    local req_str =
         "POST " .. e.req.path .. " HTTP/1.1\r\n" ..
         "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
         "Content-Type: application/json\r\n" ..
         "Content-Length: " .. #e.req.payload .. "\r\n" ..
         "Connection: close\r\n\r\n" ..
-        e.req.payload)
+        e.req.payload
+    local key   = derive_key(e.req.psk_key)
+    local nonce = crypto.random_bytes(12)
+    local ct    = crypto.aes_gcm_encrypt(key, nonce, req_str)
+    local frame = nonce .. ct
+    local sent  = e.conn:send(uint32_be(#frame) .. frame)
     if sent then
         e.phase = "sent"
     else
@@ -900,21 +1014,14 @@ local function http_send_request(e)
     end
 end
 
-local function http_read_response(e)
-    e.conn:settimeout(3)
-    local status_line = e.conn:receive("*l")
-    if status_line then
-        local status = tonumber(status_line:match("(%d+)"))
-        local hdrs = {}
-        while true do
-            local line = e.conn:receive("*l")
-            if not line or line == "" then break end
-            local k, v = line:match("^(.-):%s*(.+)$")
-            if k then hdrs[k:lower()] = v end
-        end
-        local resp_body = ""
-        local len = tonumber(hdrs["content-length"] or 0)
-        if len > 0 then resp_body = e.conn:receive(len) or "" end
+-- Read and decrypt the length-prefixed response, then parse the HTTP status/body.
+local function http_read_encrypted_response(e)
+    local key  = derive_key(e.req.psk_key)
+    local text = recv_encrypted(e.conn, key)
+    if text then
+        local status = tonumber(text:match("^HTTP/%S+ (%d+)"))
+        local body_start = text:find("\r\n\r\n", 1, true)
+        local resp_body = body_start and text:sub(body_start + 4) or ""
         if resp_body ~= "" then
             local ok2, dec = pcall(json.decode, resp_body)
             if ok2 then e.data = dec or {} end
@@ -923,60 +1030,6 @@ local function http_read_response(e)
     end
     e.phase = "done"
     e.conn:close()
-end
-
-local function http_start_tls(e, lookup)
-    local ctx = ssl.newcontext({
-        mode = "client",
-        protocol = "tlsv1_2",
-        ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
-        psk = function(hint, max_identity_len, max_psk_len)
-            return e.req.psk_identity, e.req.psk_key
-        end,
-    })
-    if not ctx then
-        e.phase = "done"
-        e.conn:close()
-        return
-    end
-    local old_conn = e.conn
-    local ssl_conn = ssl.wrap(old_conn, ctx)
-    if not ssl_conn then
-        e.phase = "done"
-        old_conn:close()
-        return
-    end
-    lookup[old_conn] = nil
-    e.conn = ssl_conn
-    lookup[ssl_conn] = e
-    ssl_conn:settimeout(0)
-    local hok, herr = ssl_conn:dohandshake()
-    if hok then
-        http_send_request(e)
-    elseif herr == "wantread" then
-        e.phase = "handshaking"
-        e.want = "read"
-    elseif herr == "wantwrite" then
-        e.phase = "handshaking"
-        e.want = "write"
-    else
-        e.phase = "done"
-        ssl_conn:close()
-    end
-end
-
-local function http_retry_handshake(e)
-    local hok, herr = e.conn:dohandshake()
-    if hok then
-        http_send_request(e)
-    elseif herr == "wantread" then
-        e.want = "read"
-    elseif herr == "wantwrite" then
-        e.want = "write"
-    else
-        e.phase = "done"
-        e.conn:close()
-    end
 end
 
 local function http_post_batch(requests)
@@ -1007,12 +1060,6 @@ local function http_post_batch(requests)
             if e.phase == "connecting" then
                 sendt[#sendt + 1] = e.conn
                 any = true
-            elseif e.phase == "handshaking" and e.want == "write" then
-                sendt[#sendt + 1] = e.conn
-                any = true
-            elseif e.phase == "handshaking" and e.want == "read" then
-                recvt[#recvt + 1] = e.conn
-                any = true
             elseif e.phase == "sent" then
                 recvt[#recvt + 1] = e.conn
                 any = true
@@ -1033,13 +1080,7 @@ local function http_post_batch(requests)
             for _, conn in ipairs(writable) do
                 local e = lookup[conn]
                 if e and e.phase == "connecting" then
-                    if e.req.psk_identity then
-                        http_start_tls(e, lookup)
-                    else
-                        http_send_request(e)
-                    end
-                elseif e and e.phase == "handshaking" then
-                    http_retry_handshake(e)
+                    http_encrypt_and_send(e)
                 end
             end
         end
@@ -1047,10 +1088,8 @@ local function http_post_batch(requests)
         if readable then
             for _, conn in ipairs(readable) do
                 local e = lookup[conn]
-                if e and e.phase == "handshaking" then
-                    http_retry_handshake(e)
-                elseif e and e.phase == "sent" then
-                    http_read_response(e)
+                if e and e.phase == "sent" then
+                    http_read_encrypted_response(e)
                 end
             end
         end
@@ -1073,7 +1112,7 @@ local function http_post(host, port, path, data, my_name, token)
     local results = http_post_batch({{
         host = host, port = port, path = path,
         payload = json.encode(data),
-        psk_identity = my_name, psk_key = token,
+        psk_key = token,
     }})
     return results[1].ok, results[1].data
 end
@@ -1403,7 +1442,7 @@ local function send_consent_responses(my_name)
                     consent = resp.consent,
                     message_id = resp.message_id,
                 }),
-                psk_identity = my_name, psk_key = c.token,
+                psk_key = c.token,
             }
         end
     end
@@ -1460,7 +1499,7 @@ local function send_attachment_cancellations(my_name)
                     ["from"] = my_name, token = c.token,
                     message_id = item.entry.message_id,
                 }),
-                psk_identity = my_name, psk_key = c.token,
+                psk_key = c.token,
             }
         else
             pending[item.att_id] = nil
@@ -1658,7 +1697,7 @@ local function send_next_chunks(my_name)
                     chunk_checksum = sha256_of_bytes(raw),
                     total_checksum = transfer.total_checksum,
                 }),
-                psk_identity = my_name, psk_key = contact.token,
+                psk_key = contact.token,
             }})
             if results[1].ok then
                 -- receiver tells us what's still missing
@@ -1956,7 +1995,7 @@ local function sync_outbox(my_name)
                 requests[j] = {
                     host = op.contact.ip, port = op.contact.port,
                     path = path, payload = json.encode(data),
-                    psk_identity = my_name, psk_key = op.contact.token,
+                    psk_key = op.contact.token,
                 }
                 req_to_op[j] = i
             end
@@ -2103,7 +2142,7 @@ local function sync_inbox(my_name)
                     ["from"] = my_name, token = op.contact.token,
                     message_id = op.message_id,
                 }),
-                psk_identity = my_name, psk_key = op.contact.token,
+                psk_key = op.contact.token,
             }
         end
         local results = http_post_batch(requests)
@@ -2238,7 +2277,7 @@ local function sync_address_notifications(my_name)
                 ["from"] = my_name, token = op.contact.token,
                 ip = op.ip, port = op.port, notify = NOTIFY_IP_CHANGE,
             }),
-            psk_identity = my_name, psk_key = op.contact.token,
+            psk_key = op.contact.token,
         }
     end
 
@@ -2288,7 +2327,7 @@ local function main()
 
     log("rmail starting: name=%s port=%d", my_name, port)
     log("mail dir: %s", MAIL)
-    log("TLS-PSK encryption enabled")
+    log("AES-256-GCM encryption enabled")
 
     -- NAT: clean up stale mapping from previous run
     pcall(nat_cleanup_old_mapping)
@@ -2309,23 +2348,6 @@ local function main()
         end
     end
 
-    local server_ssl_ctx = ssl.newcontext({
-        mode = "server",
-        protocol = "tlsv1_2",
-        ciphers = "kECDHEPSK+HIGH:kDHEPSK+HIGH:kPSK+HIGH",
-        psk = function(identity, max_psk_len)
-            local c = load_contacts()
-            if c[identity] and c[identity].token then
-                return c[identity].token
-            end
-            return nil
-        end,
-    })
-    if not server_ssl_ctx then
-        log("error: failed to create TLS context")
-        os.exit(1)
-    end
-
     local server = assert(socket.bind("0.0.0.0", port))
     server:settimeout(1)
     log("listening on :%d", port)
@@ -2340,36 +2362,61 @@ local function main()
     while true do
         local client = server:accept()
         if client then
-            local ssl_client = ssl.wrap(client, server_ssl_ctx)
-            if ssl_client then
-                ssl_client:settimeout(5)
-                local hok, herr = ssl_client:dohandshake()
-                if hok then
-                    client = ssl_client
-                else
-                    log("TLS handshake failed: %s", tostring(herr))
-                    ssl_client:close()
-                    client = nil
-                end
-            else
-                log("TLS wrap failed")
-                client:close()
-                client = nil
-            end
-        end
-        if client then
             local ok, err = pcall(function()
-                local method, path, headers, body = parse_request(client)
+                client:settimeout(10)
+
+                -- Read first 4 bytes to distinguish plaintext health-check from
+                -- an encrypted packet (length prefix).
+                local first4 = client:receive(4)
+                if not first4 or #first4 ~= 4 then return end
+
+                if first4 == "GET " then
+                    -- Plaintext HTTP: serve health check only (used by curl,
+                    -- check-connectivity.sh, etc.).  No auth required.
+                    while true do
+                        local line = client:receive("*l")
+                        if not line or line == "" then break end
+                    end
+                    local hc_body = json.encode({ok = true, name = my_name})
+                    client:send(
+                        "HTTP/1.1 200 OK\r\n" ..
+                        "Content-Type: application/json\r\n" ..
+                        "Content-Length: " .. #hc_body .. "\r\n" ..
+                        "Connection: close\r\n\r\n" ..
+                        hc_body)
+                    return
+                end
+
+                -- Encrypted packet: first4 is the 4-byte big-endian length prefix.
+                local len = parse_uint32_be(first4)
+                if len < 28 or len > 64 * 1024 * 1024 then return end
+                local packet = client:receive(len)
+                if not packet or #packet ~= len then return end
+
+                local plaintext, contact_name = trial_decrypt(packet)
+                if not plaintext then
+                    log("decryption failed: no matching contact key")
+                    return
+                end
+
+                local method, path, headers, body = parse_request_string(plaintext)
+                if not method then return end
+
+                -- key for encrypting the response (same contact's token)
+                local contacts = load_contacts()
+                local key = derive_key(contacts[contact_name].token)
+                local resp = make_response_buffer()
+
                 if method == "GET" and path == "/" then
-                    send_response(client, 200, {ok = true, name = my_name})
+                    send_response(resp, 200, {ok = true, name = my_name})
                 elseif method == "GET" and path == "/deps" then
-                    send_response(client, 200, {deps = DEPS_REGISTRY})
+                    send_response(resp, 200, {deps = DEPS_REGISTRY})
                 elseif method == "GET" and path:match("^/deps/(.+)$") then
                     local dep_name = path:match("^/deps/(.+)$")
                     if DEPS_REGISTRY[dep_name] then
-                        send_response(client, 200, DEPS_REGISTRY[dep_name])
+                        send_response(resp, 200, DEPS_REGISTRY[dep_name])
                     else
-                        send_response(client, 404, {error = "unknown dependency: " .. dep_name})
+                        send_response(resp, 404, {error = "unknown dependency: " .. dep_name})
                     end
                 elseif method == "GET" and path == "/install-script" then
                     local script_path = script_dir .. "scripts/install.sh"
@@ -2383,29 +2430,31 @@ local function main()
                             sha256 = (hash_handle:read("*a") or ""):match("^(%x+)") or ""
                             hash_handle:close()
                         end
-                        send_raw_response(client, 200, "application/x-shellscript", content, {["X-SHA256"] = sha256})
+                        send_raw_response(resp, 200, "application/x-shellscript", content, {["X-SHA256"] = sha256})
                     else
-                        send_response(client, 404, {error = "install script not found"})
+                        send_response(resp, 404, {error = "install script not found"})
                     end
                 elseif method == "POST" and body and body ~= "" then
                     local data = json.decode(body)
-                    if not auth_check(data) then
-                        send_response(client, 403, {error = "forbidden"})
+                    if not auth_check(data, contact_name) then
+                        send_response(resp, 403, {error = "forbidden"})
                     elseif path == "/deliver" then
                         local s, r = handle_deliver(data)
-                        send_response(client, s, r)
+                        send_response(resp, s, r)
                     elseif path == "/delete" then
                         local s, r = handle_delete(data)
-                        send_response(client, s, r)
+                        send_response(resp, s, r)
                     elseif path == "/update-address" then
                         local s, r = handle_update_address(data)
-                        send_response(client, s, r)
+                        send_response(resp, s, r)
                     else
-                        send_response(client, 404, {error = "not found"})
+                        send_response(resp, 404, {error = "not found"})
                     end
                 else
-                    send_response(client, 404, {error = "not found"})
+                    send_response(resp, 404, {error = "not found"})
                 end
+
+                send_encrypted(client, key, resp:get())
             end)
             if not ok then log("request error: %s", tostring(err)) end
             client:close()

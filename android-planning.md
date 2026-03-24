@@ -300,65 +300,6 @@ A mailbox switcher (drawer or top-bar dropdown) lets the user switch between con
 
 ## Encryption protocol
 
-rmail replaces TLS entirely with a custom AES-256-GCM layer. This removes the LuaSec dependency from the daemon, removes BouncyCastle from Android, and eliminates the cleartext identity label that TLS-PSK requires during handshake. An observer sees only destination IP and port.
+rmail uses AES-256-GCM over raw TCP. LuaSec and BouncyCastle are removed — see `rmail_crypto.c` and the daemon implementation in `rmail.lua` for the full spec.
 
-**This change affects both rmail.lua (desktop daemon) and the Android app.**
-
-### Packet format
-
-Every connection is a raw TCP socket. The entire HTTP request/response is encrypted as a single payload:
-
-```
-[nonce: 12 bytes] [ciphertext + GCM auth tag: N + 16 bytes]
-```
-
-- **Nonce:** 12 bytes of cryptographically random data, generated fresh for each packet.
-- **Ciphertext:** the HTTP bytes encrypted with AES-256-GCM.
-- **GCM auth tag:** 16 bytes appended by the cipher; validates both authenticity and integrity. Forgery requires the correct key.
-
-### Key
-
-```
-key = SHA256(psk)
-```
-
-Computed once per contact when the contacts file is loaded; stored in memory alongside the token. SHA256 maps the variable-length token string to a fixed 32-byte AES key. The nonce does not need to feed into the key — AES-GCM with a fresh nonce per packet is already safe with a fixed key.
-
-The PSK is stored in cleartext in the contacts file on both machines — this is inherent to any symmetric shared-secret scheme. Security depends on filesystem permissions protecting the contacts file, same as an SSH private key.
-
-SHA256 does not improve entropy. A weak token like `"dog"` produces a weak key. Tokens are per-contact shared secrets agreed on out-of-band — there is nothing to generate at install time. Security depends entirely on users choosing long, random tokens.
-
-### Trial decryption (sender identification)
-
-No identity is sent in cleartext. The receiver tries each known token in turn:
-
-```
-for each token in contacts:
-    key = SHA256(token)   // precomputed on load
-    plaintext, ok = AES_GCM_Decrypt(key, nonce, ciphertext)
-    if ok: process request as this contact; break
-if no token succeeded: drop connection
-```
-
-The GCM auth tag either validates or fails — no ambiguity, no timing attack surface from a correct implementation. The number of trials is the number of contacts, which is small (tens to low hundreds at most).
-
-### Replay prevention
-
-The encrypted payload includes a timestamp (Unix seconds, 8 bytes). The receiver checks that the timestamp is within ±30 seconds of the current time. Replay window: 30 seconds.
-
-```
-plaintext = [timestamp: 8 bytes] [HTTP request bytes]
-```
-
-### Critical implementation notes
-
-1. **Nonce reuse is catastrophic for GCM.** Two packets encrypted under the same (key, nonce) pair completely break confidentiality. Always generate a fresh random nonce per packet. Do not use a counter unless the counter state is stored durably.
-
-2. **Constant-time tag comparison.** Use the cipher's built-in authenticated decryption (which handles this). Do not compare tags with `==` or `memcmp` — these short-circuit on first differing byte and leak timing information.
-
-### Implementation
-
-- **Android:** `javax.crypto.Cipher` with `AES/GCM/NoPadding` (built-in). `MessageDigest.getInstance("SHA-256")` for key derivation. `SecureRandom` for nonce generation.
-- **Lua (rmail.lua):** OpenSSL AES-GCM and SHA-256 via FFI. OpenSSL is already present as a LuaSec dependency; LuaSec itself is removed.
-
-Estimated implementation size: ~250 lines per platform to replace the TLS socket abstraction.
+Android uses `javax.crypto.Cipher` (`AES/GCM/NoPadding`) and `MessageDigest` (`SHA-256`), both built into the platform.

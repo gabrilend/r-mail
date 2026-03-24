@@ -230,7 +230,7 @@ Then set up a manual port forward for your rmail port. See [docs/nat-traversal-r
 
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
-- **LuaSec** — TLS-PSK encryption, must be compiled with PSK support
+- **OpenSSL** — AES-256-GCM encryption via `rmail_crypto.so` (compiled from source by install script)
 - **zip / unzip** — file compression for attachment transfer (Info-ZIP)
 
 Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
@@ -257,9 +257,14 @@ To run rmail automatically on boot, see [docs/service.md](docs/service.md).
 
 ## Encryption
 
-All connections are encrypted with TLS-PSK (Pre-Shared Key). Every message delivery and deletion notification is sent over TLS using the shared token from each contact pair as the key. Both sides must have the same token.
+All connections use AES-256-GCM encryption. Every message delivery and deletion notification is sent over an encrypted channel using the shared token from each contact pair as the key. Both sides must have the same token.
 
-LuaSec with PSK support is required — run `scripts/install.sh` to compile it.
+The protocol:
+- Each packet is `[4-byte length][12-byte random nonce][ciphertext][16-byte GCM auth tag]`
+- The AES key is `SHA256(token)` — a 32-byte key derived from the contact's token
+- The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in cleartext — only destination IP and port are visible to an observer.
+
+`rmail_crypto.so` (compiled from source by `scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
 
 ## Dynamic IP
 
@@ -295,7 +300,7 @@ Hooks are a powerful feature — any executable works, in any language. For full
 
 **"luasocket not found"** — run `scripts/install.sh` to compile it locally.
 
-**"luasec not found" or "not compiled with PSK support"** — run `scripts/install.sh` to compile LuaSec with PSK support from source. System packages often don't include PSK.
+**"rmail_crypto.so not found"** — run `scripts/install.sh` to compile it from source. OpenSSL headers are required.
 
 **"zip not found" or "unzip not found"** — run `scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
 

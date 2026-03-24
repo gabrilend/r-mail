@@ -26,14 +26,12 @@ BUILD="$ROOT/.build-tmp"
 # default versions
 LUA_VERSION="5.4.7"
 LUASOCKET_VERSION="3.1.0"
-LUASEC_VERSION="1.3.2"
 OPENSSL_VERSION="3.2.1"
 DKJSON_VERSION="2.8"
 
 # version ranges (min max) for validation
 LUA_MIN="5.1"; LUA_MAX="5.4.7"
 LUASOCKET_MIN="3.0.0"; LUASOCKET_MAX="3.1.0"
-LUASEC_MIN="1.3.2"; LUASEC_MAX="1.3.2"
 OPENSSL_MIN="1.1.1"; OPENSSL_MAX="3.2.1"
 DKJSON_MIN="2.5"; DKJSON_MAX="2.8"
 
@@ -89,10 +87,6 @@ while [ $# -gt 0 ]; do
                     validate_version luasocket "$_val" "$LUASOCKET_MIN" "$LUASOCKET_MAX"
                     LUASOCKET_VERSION="$_val"
                     ;;
-                luasec)
-                    validate_version luasec "$_val" "$LUASEC_MIN" "$LUASEC_MAX"
-                    LUASEC_VERSION="$_val"
-                    ;;
                 openssl)
                     validate_version openssl "$_val" "$OPENSSL_MIN" "$OPENSSL_MAX"
                     OPENSSL_VERSION="$_val"
@@ -103,7 +97,7 @@ while [ $# -gt 0 ]; do
                     ;;
                 *)
                     err "unknown dependency: $_key"
-                    err "valid dependencies: lua, luasocket, luasec, openssl, dkjson"
+                    err "valid dependencies: lua, luasocket, openssl, dkjson"
                     exit 1
                     ;;
             esac
@@ -472,10 +466,10 @@ else
 fi
 
 # ============================================================
-# 6. luasec (with PSK support)
+# 6. rmail_crypto.so (AES-256-GCM + SHA-256)
 # ============================================================
 
-echo "Checking for luasec..."
+echo "Checking for rmail_crypto.so..."
 
 # determine OpenSSL libdir for RPATH
 if [ -d "$DEPS/openssl" ]; then
@@ -487,53 +481,22 @@ else
     SSL_RPATH="$(openssl_libdir)"
 fi
 
-install_luasec() {
-    info "Downloading luasec v$LUASEC_VERSION..."
-    mkdir -p "$BUILD"
-    download "https://github.com/lunarmodules/luasec/archive/refs/tags/v$LUASEC_VERSION.tar.gz" "$BUILD/luasec.tar.gz"
-    cd "$BUILD"
-    tar xzf luasec.tar.gz
-    cd "luasec-$LUASEC_VERSION/src"
-
-    info "Building luasocket helper library..."
-    cd luasocket
-    for src in io.c buffer.c timeout.c usocket.c; do
-        $CC $LUA_INC -Wall -O2 -fPIC -c -o "${src%.c}.o" "$src"
-    done
-    ar rcs libluasocket.a io.o buffer.o timeout.o usocket.o
-    ranlib libluasocket.a
-    cd ..
-
-    info "Compiling ssl.so (with PSK support)..."
-    LUASEC_DEFS="-DWITH_LUASOCKET"
-    LUASEC_SRCS="options.c x509.c context.c ssl.c config.c ec.c"
-    for src in $LUASEC_SRCS; do
-        $CC -O2 -fPIC -Wall -Wno-deprecated-declarations \
-            -I. $LUA_INC $OPENSSL_INC \
-            $LUASEC_DEFS \
-            -c -o "${src%.c}.o" "$src"
-    done
-    $CC -shared -fPIC -O \
-        -L./luasocket $OPENSSL_LIB \
+install_rmail_crypto() {
+    info "Compiling rmail_crypto.so..."
+    $CC -shared -fPIC -O2 -Wall \
+        $LUA_INC $OPENSSL_INC \
         -Wl,-rpath,"$SSL_RPATH" \
-        -o ssl.so \
-        options.o x509.o context.o ssl.o config.o ec.o \
-        -lluasocket -lssl -lcrypto
-
-    info "Installing to libs/..."
-    mkdir -p "$LIBS/ssl"
-    cp ssl.so "$LIBS/ssl.so"
-    cp ssl.lua "$LIBS/ssl.lua"
-    cp https.lua "$LIBS/ssl/https.lua"
-
+        -o "$LIBS/rmail_crypto.so" \
+        "$ROOT/rmail_crypto.c" \
+        $OPENSSL_LIB -lcrypto
     cd "$ROOT"
-    ok "done (libs/ssl.so with PSK support)"
+    ok "done (libs/rmail_crypto.so)"
 }
 
-if [ -f "$LIBS/ssl.so" ] && ! $FORCE; then
-    ok "found in libs/ssl.so"
+if [ -f "$LIBS/rmail_crypto.so" ] && ! $FORCE; then
+    ok "found in libs/rmail_crypto.so"
 else
-    install_luasec
+    install_rmail_crypto
 fi
 
 # ============================================================
@@ -1154,9 +1117,9 @@ echo ""
 echo "  libs/dkjson.lua        — JSON library"
 echo "  libs/socket/core.so    — luasocket"
 echo "  libs/mime/core.so      — luasocket mime"
-echo "  libs/ssl.so            — luasec (PSK enabled)"
+echo "  libs/rmail_crypto.so   — AES-256-GCM encryption"
 echo ""
-echo "TLS-PSK encryption is active — no configuration needed."
+echo "AES-256-GCM encryption is active — no configuration needed."
 if $NAT_INSECURE; then
     echo ""
     warn "NOTE: insecure NAT protocols detected on your router (see warnings above)"
