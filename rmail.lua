@@ -1515,6 +1515,13 @@ local function handle_attachment_chunk(data, sender)
     local raw = mime.unb64(data.data)
     if not raw then return 400, {error = "invalid base64"} end
 
+    -- Check cancellation before storing anything
+    local cprog = load_state("consent-pending.json")
+    local cpe = cprog[att_id]
+    if cpe and cpe.status == "cancel_pending" then
+        return 200, {ok = false, cancelled = true}
+    end
+
     local pending_dir = ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id
     os.execute('mkdir -p ' .. shell_quote(pending_dir))
     local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
@@ -1534,10 +1541,18 @@ local function handle_attachment_chunk(data, sender)
         end
     end
 
-    local received = total_chunks - #missing
-    local cprog = load_state("consent-pending.json")
-    local cpe = cprog[att_id]
     if cpe and cpe.status == "receiving" then
+        -- Check if user deleted the progress file (cancellation during transfer)
+        if not file_exists(INBOX .. "/" .. cpe.inbox_file) then
+            os.execute('rm -rf ' .. shell_quote(
+                ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+            cpe.status = "cancel_pending"
+            cprog[att_id] = cpe
+            save_state("consent-pending.json", cprog)
+            log("attachment transfer cancelled by user: %s from %s", att_id, sender)
+            return 200, {ok = false, cancelled = true}
+        end
+        local received = total_chunks - #missing
         local avg_str = ""
         if cpe.start_time and received > 0 then
             local elapsed = os.time() - cpe.start_time
@@ -1586,15 +1601,14 @@ local function handle_attachment_chunk(data, sender)
                    shell_quote(filename) .. " " .. shell_quote(target) .. " &")
     end
 
-    local cpending = load_state("consent-pending.json")
-    if cpending[att_id] then
-        if cpending[att_id].status ~= "cancel_pending" then
-            write_file(INBOX .. "/" .. cpending[att_id].inbox_file, string.format(
+    if cprog[att_id] then
+        if cprog[att_id].status ~= "cancel_pending" then
+            write_file(INBOX .. "/" .. cprog[att_id].inbox_file, string.format(
                 "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
                 sender, filename, target))
         end
-        cpending[att_id] = nil
-        save_state("consent-pending.json", cpending)
+        cprog[att_id] = nil
+        save_state("consent-pending.json", cprog)
     end
 
     os.execute('rm -rf ' .. shell_quote(pending_dir))
@@ -1757,6 +1771,7 @@ local function send_next_chunks(my_name)
         if not f then goto continue end
         local missing = transfer.missing or {}
         local aborted = false
+        local cancelled = false
         for _, chunk_index in ipairs(missing) do
             f:seek("set", chunk_index * ATTACHMENT_CHUNK_SIZE)
             local raw = f:read(ATTACHMENT_CHUNK_SIZE)
@@ -1787,6 +1802,9 @@ local function send_next_chunks(my_name)
                 end
                 changed = true; did_work = true
                 if #transfer.missing == 0 then break end
+            elseif results[1].cancelled then
+                log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
+                cancelled = true; break
             else
                 log("chunk %d/%d failed for %s -> %s, will retry",
                     chunk_index + 1, transfer.total_chunks, transfer.filename, transfer.to)
@@ -1794,7 +1812,11 @@ local function send_next_chunks(my_name)
             end
         end
         f:close()
-        if not aborted and #transfer.missing == 0 then
+        if cancelled then
+            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            chunks[att_id] = nil
+            changed = true
+        elseif not aborted and #transfer.missing == 0 then
             transfer.status = "complete"
             log("all chunks sent for %s to %s", transfer.filename, transfer.to)
             changed = true
