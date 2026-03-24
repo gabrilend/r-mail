@@ -88,8 +88,8 @@ If you **delete the consent file entirely**: this is treated as a decline.
 ## Transfer mechanics
 
 The sender compresses the file (zip) once and splits it into chunks (default
-5 MB each). Each chunk is sent as a separate request over the same TLS-encrypted
-channel as messages. The receiver responds to each chunk with a list of still-
+5 MB each). Each chunk is sent as a separate request over the same AES-256-GCM
+encrypted channel as messages. The receiver responds to each chunk with a list of still-
 missing chunk indices, so chunks can be received in any order. The sender
 continues until the missing list is empty, then marks the transfer complete.
 

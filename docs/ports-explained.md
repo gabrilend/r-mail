@@ -83,7 +83,7 @@ alice_home.port  = 8025
 alice_home.token = "shared-secret"
 ```
 
-To find out if your router supports hairpin NAT, run `scripts/check-connectivity.sh`
+To find out if your router supports hairpin NAT, run `scripts/validate-router-settings.sh`
 after opening your firewall port.
 
 ---

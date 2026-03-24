@@ -1,5 +1,5 @@
 #!/bin/sh
-# check-connectivity.sh — verify port, router settings, and contact reachability
+# validate-router-settings.sh — verify port, router settings, and contact reachability
 #
 # Run this after opening your firewall port. The hairpin NAT test requires
 # the port to be open in your firewall; if it isn't, the result will be

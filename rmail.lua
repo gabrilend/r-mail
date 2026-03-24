@@ -2469,7 +2469,7 @@ local function main()
 
                 if first4 == "GET " then
                     -- Plaintext HTTP: serve health check only (used by curl,
-                    -- check-connectivity.sh, etc.).  No auth required.
+                    -- validate-router-settings.sh, etc.).  No auth required.
                     while true do
                         local line = client:receive("*l")
                         if not line or line == "" then break end

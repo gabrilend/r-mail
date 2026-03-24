@@ -35,7 +35,7 @@ Meeting at 3pm tomorrow.
 
 Each recipient gets their own independent copy. They only see the message body, not who else received it.
 
-The daemon picks it up and delivers it to each recipient's inbox as a plain text file (without the `to:` headers).
+The daemon picks it up and delivers it to each recipient's inbox as a plain text file.
 
 Deleting works both ways:
 
@@ -45,7 +45,7 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
-There is no history for deleted messages. If you'd like such functionality, check out the scripting hooks, which enable whatever behavior you'd like, including backing up old messages.
+There is no history for deleted messages. If you'd like such functionality, check out the [scripting hooks](docs/scripting-tutorial.md), which enable whatever behavior you'd like, including backing up old messages.
 
 ### Attachments
 
@@ -59,7 +59,17 @@ attach: /path/to/photo.jpg
 Here's the photo from yesterday.
 ```
 
-Before any data is transferred, the recipient sees a consent request in their inbox:
+In this example, only alice receives the photo:
+
+```
+to: alice
+attach: /path/to/photo.jpg
+to: bob
+
+Here's the photo from yesterday. Sorry bob, you don't get to see it.
+```
+
+Before any data is transferred, the recipient gets a consent request in their inbox:
 
 ```
 alice wants to send you an attachment.
@@ -77,10 +87,6 @@ deny
 
 Leave either `accept` or `deny` to make your choice. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-To cancel as the **sender**, edit `~/mail/transfers` — it lists all active outgoing attachments, one section per file, with a line per recipient showing progress. Remove a recipient's line to cancel their transfer only. Remove the entire section (or delete the file) to cancel all recipients for that file. Deleting the outbox file also works and additionally removes the message from all recipients' inboxes.
-
-To cancel as the **receiver** before the transfer starts, delete the consent file or change `accept` to `deny`. Once a transfer is underway, delete the in-progress status file that appears in your inbox to cancel and clean up partial downloads.
-
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
 
 ## Dependencies
@@ -90,7 +96,7 @@ For full details on the attachment workflow, per-recipient targeting, configurat
 - **OpenSSL** — AES-256-GCM encryption
 - **zip / unzip** — file compression for attachment transfer
 
-Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
+Run `scripts/install.sh` to compile all dependencies from source into the r-mail directory.
 
 ## Installation
 
@@ -108,19 +114,9 @@ To run manually:
 ./run-rmail.sh
 ```
 
-`run-rmail.sh` in the project root auto-detects whether Lua was compiled locally by `install.sh` and picks the right binary. Or run directly:
-
-```sh
-lua rmail.lua
-# or, if you compiled Lua locally:
-deps/lua/bin/lua rmail.lua
-```
-
 To run rmail automatically on boot, see [docs/service.md](docs/service.md).
 
 ## Configuration
-
-The daemon creates `~/mail/inbox`, `~/mail/outbox`, and `~/mail/.state` on startup if they don't exist. The install script creates both the config file and a contacts file with your identity pre-filled.
 
 ### Config file
 
@@ -150,7 +146,7 @@ alice.token = "some-shared-secret"
 | `port`  | the mailbox their router uses to talk to their computer |
 | `token` | shared secret password (same on both sides)             |
 
-Both sides must have the same token for a given contact pair. Pick something long and random. But pick something different for each contact.
+Both sides must have the same token for a given contact pair. Pick something long and random, but pick something different for each contact. I like to do words separated by dashes, like "apple-box-racecar-spelled-backwards-is-racecar"
 
 You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
 
@@ -198,7 +194,7 @@ which nft && echo "you have nftables" || \
 which iptables && echo "you have iptables"
 ```
 
-Then open the port in the firewall:
+Then open the port in your computer's firewall:
 
 ```sh
 # Be sure to change 8025 in these examples to whatever port you'd like to use.
@@ -230,7 +226,7 @@ This returns `{"ok":true,"name":"yourname"}` if everything is working. You can a
 Once the firewall is open, run the connectivity check to verify your router settings:
 
 ```sh
-scripts/check-connectivity.sh
+scripts/validate-router-settings.sh
 ```
 
 This checks whether your router supports hairpin NAT (needed for contacts on the same router to talk to each other) and whether UPnP is enabled in the router settings (a security concern). It reads your port from the config file automatically.
@@ -271,7 +267,7 @@ To find your router's admin panel, first get your default gateway address:
 ip route show default | awk '{print $3}'
 ```
 
-Then enter that address into your web browser. Every router's admin interface is different — the username and password are usually printed on a sticker on the bottom of the router.
+Then enter that address into your web browser's address bar. Every router's admin interface is different, because of course they are. The username and password are usually printed on a sticker on the bottom of the router.
 
 ## Encryption
 
