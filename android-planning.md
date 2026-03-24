@@ -200,6 +200,48 @@ Always chunked — no single-request path. The home daemon's regular sync then h
 
 ---
 
+## Share-to / open-with intent handling
+
+The app registers as a handler for `ACTION_SEND` and `ACTION_SEND_MULTIPLE` intents so that any file browser, gallery, or other app can offer "Open with r-mail" or "Share via r-mail" as an option.
+
+When the app receives one of these intents it opens a new compose window pre-filled as follows:
+
+```
+to: |          ← cursor starts here, ready to type a contact name
+
+attach: /sdcard/path/to/file.jpg
+```
+
+**One file selected:** one `attach:` line.
+
+**Multiple files selected:** one `attach:` line per file, regardless of type.
+
+**A directory selected:** one `attach:` line for the directory path. The home daemon zips the directory recursively on send — the app does not enumerate the contents.
+
+**Multiple directories:** one `attach:` line per directory, not one per file inside them.
+
+The general rule: whatever the user selected in the external app (file, directory, or a mixed set) maps directly to one `attach:` line per selected item. The user never needs to think about the difference between a file and a folder; both go on a single line.
+
+**Intent filter in AndroidManifest.xml:**
+```xml
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="*/*" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.SEND_MULTIPLE" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="*/*" />
+</intent-filter>
+```
+
+**Implementation:** the Activity (or the Compose destination it routes to) checks `intent.action` on resume. For `ACTION_SEND`, extract `EXTRA_STREAM` (a single URI). For `ACTION_SEND_MULTIPLE`, extract `EXTRA_STREAM` as a `ArrayList<Uri>`. Resolve each URI to a filesystem path or a content URI that the upload code can read. Build the attach lines and open the compose screen with the cursor on the `to:` line.
+
+If the app is not connected to a home server yet (first run, no credentials), store the incoming intent and complete onboarding first, then open the pre-filled compose window afterward.
+
+---
+
 ## Contacts conflict resolution
 
 The contacts file is a single text file edited directly via the phone's raw editor. Conflict scenario: user edits contacts on desktop and phone while both are offline; both diverge before the next sync.
