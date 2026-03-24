@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme. Used in AndroidManifest.xml.
+         The actual visual theme is applied via Compose (Theme.kt). -->
+    <style name="Theme.Rmail" parent="android:Theme.Material.NoTitleBar">
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:statusBarColor">@color/black</item>
+        <item name="android:navigationBarColor">@color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

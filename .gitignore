@@ -5,3 +5,10 @@ libs/*
 
 # local config used for testing
 config
+
+# Android SDK path (machine-specific)
+android/local.properties
+# Android build outputs
+android/.gradle/
+android/app/build/
+android/build/
