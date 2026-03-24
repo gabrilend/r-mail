@@ -40,6 +40,8 @@ local ATTACHMENTS            = config.attachments or (MAIL .. "/attachments")
 local ATTACHMENT_PENDING_DIR = config.attachment_pending_dir or "/tmp"
 local ATTACHMENT_CHUNK_SIZE  = tonumber(config.attachment_chunk_size) or 5242880
 local TRANSFERS_FILE         = MAIL .. "/transfers"
+local UPLOADS_DIR            = ATTACHMENTS .. "/.uploads"
+local ALLOW_PEER_ADDRESS     = config.allow_peer_address_requests ~= false
 
 local LIBS             = config.libs
 local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
@@ -2395,12 +2397,298 @@ local function sync_address_notifications(my_name)
 end
 
 -- ============================================================
+-- Phone API endpoints
+-- ============================================================
+
+local function infer_attachment_category(filename)
+    local ext = (filename:match("%.([^%.]+)$") or ""):lower()
+    local images = {jpg=1,jpeg=1,png=1,gif=1,bmp=1,webp=1,heic=1,heif=1,svg=1,tiff=1,tif=1}
+    local audio  = {mp3=1,wav=1,ogg=1,m4a=1,flac=1,aac=1,opus=1,wma=1}
+    local text   = {txt=1,md=1,csv=1,json=1,xml=1,html=1,htm=1,log=1,lua=1,sh=1,py=1,js=1}
+    if   images[ext] then return "image"
+    elseif audio[ext] then return "audio"
+    elseif text[ext]  then return "text"
+    else return "other" end
+end
+
+-- Serialize contacts in a canonical, deterministic form for hashing and wire transfer.
+-- Contacts sorted by name, fields sorted by key. Values are quoted when non-numeric.
+local function serialize_contacts_canonical()
+    local contacts = load_contacts()
+    local names = {}
+    for name in pairs(contacts) do names[#names+1] = name end
+    table.sort(names)
+    local lines = {}
+    for _, name in ipairs(names) do
+        local c = contacts[name]
+        local fields = {}
+        for field in pairs(c) do fields[#fields+1] = field end
+        table.sort(fields)
+        for _, field in ipairs(fields) do
+            local v = tostring(c[field])
+            if not v:match("^%d+$") then v = '"' .. v .. '"' end
+            lines[#lines+1] = name .. "." .. field .. " = " .. v
+        end
+        lines[#lines+1] = ""
+    end
+    return table.concat(lines, "\n")
+end
+
+local function canonical_contacts_hash()
+    local bytes = crypto.sha256(serialize_contacts_canonical())
+    local hex = ""
+    for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
+    return hex
+end
+
+-- GET /peer-address — return the caller's stored address (ip/port) from our contacts file.
+-- Used by phones to recover the home server's public IP after a dynamic IP change.
+-- Available to any authenticated contact, not restricted to own-device entries.
+local function handle_peer_address(contact_name)
+    if not ALLOW_PEER_ADDRESS then
+        return 403, {error = "peer address requests disabled"}
+    end
+    local contacts = load_contacts()
+    local c = contacts[contact_name]
+    if not c then return 404, {error = "contact not found"} end
+    return 200, {ip = c.ip or "", port = c.port or ""}
+end
+
+-- GET /api/myaddress — return this daemon's current public IP and configured port.
+local function handle_api_myaddress(port)
+    local ip = check_public_ip()
+    return 200, {ip = ip or "", port = port}
+end
+
+-- POST /api/sync — core phone sync endpoint.
+-- Phone sends its current state; server responds with what to fetch/remove.
+local function handle_api_sync(data, caller_name)
+    local phone_inbox    = data.inbox or {}          -- {message_id -> filename}
+    local deleted_inbox  = data.deleted_inbox or {}  -- [{message_id, from}]
+    local phone_outbox   = data.outbox or {}         -- ["filename", ...]
+    local deleted_outbox = data.deleted_outbox or {} -- ["filename", ...]
+
+    -- Process inbox deletions from phone
+    local inbox_state = load_state("inbox.json")
+    for _, del in ipairs(deleted_inbox) do
+        for filename, meta in pairs(inbox_state) do
+            if meta.message_id == del.message_id and not meta.pending_delete then
+                if file_exists(INBOX .. "/" .. filename) then
+                    os.remove(INBOX .. "/" .. filename)
+                end
+                delete_inbox_attachments(meta)
+                if ON_DELETE then run_hook(ON_DELETE, meta["from"] or "") end
+                meta.pending_delete = true  -- sync_inbox will notify original sender
+                log("phone deleted inbox: %s (from %s)", filename, meta["from"] or "?")
+                break
+            end
+        end
+    end
+    save_state("inbox.json", inbox_state)
+
+    -- Process outbox deletions from phone (delete file; sync_outbox notifies recipients)
+    for _, fname in ipairs(deleted_outbox) do
+        fname = sanitize_filename(fname)
+        local fpath = OUTBOX .. "/" .. fname
+        if file_exists(fpath) then
+            os.remove(fpath)
+            log("phone deleted outbox: %s", fname)
+        end
+    end
+
+    -- Build set of message IDs the phone currently has
+    local phone_ids = {}
+    for mid, _ in pairs(phone_inbox) do phone_ids[mid] = true end
+
+    -- Build server's current ID set (excluding pending-delete entries)
+    local server_ids = {}
+    for _, meta in pairs(inbox_state) do
+        if not meta.pending_delete then server_ids[meta.message_id] = true end
+    end
+
+    -- fetch_inbox: server has it, phone doesn't
+    local fetch_inbox = {}
+    for filename, meta in pairs(inbox_state) do
+        if not meta.pending_delete and not phone_ids[meta.message_id] then
+            fetch_inbox[#fetch_inbox+1] = {
+                message_id = meta.message_id,
+                filename   = filename,
+                from       = meta["from"] or "",
+            }
+        end
+    end
+
+    -- remove_inbox: phone has it, server no longer has it
+    local remove_inbox = {}
+    for mid, _ in pairs(phone_inbox) do
+        if not server_ids[mid] then remove_inbox[#remove_inbox+1] = mid end
+    end
+
+    -- fetch_outbox: server has it, phone doesn't
+    local phone_outbox_set = {}
+    for _, fname in ipairs(phone_outbox) do phone_outbox_set[fname] = true end
+    local server_outbox_files = list_files(OUTBOX)
+    local fetch_outbox = {}
+    for _, fname in ipairs(server_outbox_files) do
+        if not phone_outbox_set[fname] then fetch_outbox[#fetch_outbox+1] = fname end
+    end
+
+    -- remove_outbox: phone has it, server doesn't
+    local server_outbox_set = {}
+    for _, fname in ipairs(server_outbox_files) do server_outbox_set[fname] = true end
+    local remove_outbox = {}
+    for _, fname in ipairs(phone_outbox) do
+        if not server_outbox_set[fname] then remove_outbox[#remove_outbox+1] = fname end
+    end
+
+    -- contacts: "fetch" when hashes differ, null when same
+    local contacts_action = nil
+    local phone_hash = data.contacts_hash
+    if phone_hash and phone_hash ~= canonical_contacts_hash() then
+        contacts_action = "fetch"
+    end
+
+    return 200, {
+        fetch_inbox   = fetch_inbox,
+        remove_inbox  = remove_inbox,
+        fetch_outbox  = fetch_outbox,
+        remove_outbox = remove_outbox,
+        contacts      = contacts_action,
+    }
+end
+
+-- GET /api/file/inbox/<f> or /api/file/outbox/<f> — download a mail file to the phone.
+local function handle_api_get_file(dir, filename)
+    filename = sanitize_filename(filename)
+    local content = read_file(dir .. "/" .. filename)
+    if not content then return 404, nil, nil end
+    return 200, "text/plain; charset=utf-8", content
+end
+
+-- POST /api/file/outbox/<f> — create or replace an outbox file from the phone.
+local function handle_api_post_outbox_file(filename, body)
+    filename = sanitize_filename(filename)
+    write_file(OUTBOX .. "/" .. filename, body)
+    log("phone created outbox: %s", filename)
+    return 200, {ok = true}
+end
+
+-- GET /api/contacts — return contacts in canonical serialization for hashing/transfer.
+local function handle_api_get_contacts()
+    return 200, "text/plain; charset=utf-8", serialize_contacts_canonical()
+end
+
+-- POST /api/contacts — accept contacts file from phone, replacing server's version.
+local function handle_api_post_contacts(body)
+    if not body or body == "" then return 400, {error = "empty body"} end
+    write_file(CONTACTS, body)
+    align_contacts()
+    log("contacts updated from phone")
+    return 200, {ok = true}
+end
+
+-- GET /api/attachments — list received attachments with name, size, category, sender.
+local function handle_api_list_attachments()
+    local inbox_state = load_state("inbox.json")
+    local sender_for = {}
+    for _, meta in pairs(inbox_state) do
+        if meta.attachments then
+            for att_filename, _ in pairs(meta.attachments) do
+                sender_for[att_filename] = meta["from"] or ""
+            end
+        end
+    end
+    local result = {}
+    for _, f in ipairs(list_files(ATTACHMENTS)) do
+        local path = ATTACHMENTS .. "/" .. f
+        local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
+        local size = h and tonumber(h:read("*a"))
+        if h then h:close() end
+        result[#result+1] = {
+            filename = f,
+            size     = size or 0,
+            category = infer_attachment_category(f),
+            sender   = sender_for[f] or "",
+        }
+    end
+    return 200, {files = result}
+end
+
+-- GET /api/attachments/<filename> — download an attachment file to the phone.
+local function handle_api_get_attachment(filename)
+    filename = sanitize_filename(filename)
+    local content = read_file_binary(ATTACHMENTS .. "/" .. filename)
+    if not content then return 404, nil, nil end
+    return 200, "application/octet-stream", content
+end
+
+-- POST /api/upload/start — register a new phone-to-server attachment upload.
+-- Returns upload_id and the server_path the phone should reference in attach: lines.
+local function handle_api_upload_start(data)
+    if not data or not data.filename then return 400, {error = "missing filename"} end
+    local filename   = sanitize_filename(data.filename)
+    local num_chunks = tonumber(data.num_chunks)
+    if not num_chunks or num_chunks < 1 or num_chunks > 100000 then
+        return 400, {error = "invalid num_chunks"}
+    end
+    local upload_id  = uuid()
+    local upload_dir = UPLOADS_DIR .. "/" .. upload_id
+    os.execute("mkdir -p " .. shell_quote(upload_dir))
+    local server_path = upload_dir .. "/" .. filename
+    local uploads = load_state("uploads.json")
+    uploads[upload_id] = {
+        filename   = filename,
+        num_chunks = num_chunks,
+        path       = server_path,
+        upload_dir = upload_dir,
+        created_at = os.time(),
+    }
+    save_state("uploads.json", uploads)
+    log("phone upload started: %s (%d chunks) id=%s", filename, num_chunks, upload_id)
+    return 200, {upload_id = upload_id, server_path = server_path}
+end
+
+-- PUT /api/upload/<id>/chunk/<n> — receive one chunk of a phone-to-server upload.
+-- Auto-assembles the file once all chunks are present.
+local function handle_api_upload_chunk(upload_id, chunk_n, body)
+    if not body or body == "" then return 400, {error = "empty chunk"} end
+    local uploads = load_state("uploads.json")
+    local upload = uploads[upload_id]
+    if not upload then return 404, {error = "upload not found"} end
+    if chunk_n < 0 or chunk_n >= upload.num_chunks then
+        return 400, {error = "chunk index out of range"}
+    end
+    write_file_binary(upload.upload_dir .. "/chunk-" .. tostring(chunk_n), body)
+    -- Check whether all chunks are now present
+    for i = 0, upload.num_chunks - 1 do
+        if not file_exists(upload.upload_dir .. "/chunk-" .. tostring(i)) then
+            save_state("uploads.json", uploads)
+            return 200, {ok = true, complete = false}
+        end
+    end
+    -- All chunks present: assemble and clean up
+    local f = io.open(upload.path, "wb")
+    if not f then return 500, {error = "cannot create output file"} end
+    for i = 0, upload.num_chunks - 1 do
+        local cp = upload.upload_dir .. "/chunk-" .. tostring(i)
+        local d  = read_file_binary(cp)
+        if d then f:write(d) end
+        os.remove(cp)
+    end
+    f:close()
+    uploads[upload_id] = nil
+    save_state("uploads.json", uploads)
+    log("phone upload complete: %s id=%s", upload.filename, upload_id)
+    return 200, {ok = true, complete = true}
+end
+
+-- ============================================================
 -- Main
 -- ============================================================
 
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
-               ATTACHMENTS .. '" "' .. ATTACHMENT_PENDING_DIR .. '"')
+               ATTACHMENTS .. '" "' .. ATTACHMENT_PENDING_DIR .. '" "' .. UPLOADS_DIR .. '"')
     write_file(STATE .. "/new-mail", "")
 
     if not config.name then
@@ -2502,6 +2790,7 @@ local function main()
                 -- key for encrypting the response (same contact's token)
                 local contacts = load_contacts()
                 local key = derive_key(contacts[contact_name].token)
+                local is_own_device = contacts[contact_name].own == "true"
                 local resp = make_response_buffer()
 
                 if method == "GET" and path == "/" then
@@ -2530,6 +2819,61 @@ local function main()
                         send_raw_response(resp, 200, "application/x-shellscript", content, {["X-SHA256"] = sha256})
                     else
                         send_response(resp, 404, {error = "install script not found"})
+                    end
+                elseif method == "GET" and path == "/peer-address" then
+                    local s, r = handle_peer_address(contact_name)
+                    send_response(resp, s, r)
+                elseif path:match("^/api/") then
+                    if not is_own_device then
+                        send_response(resp, 403, {error = "own device required"})
+                    else
+                        local fn
+                        if method == "GET" and path == "/api/myaddress" then
+                            local s, r = handle_api_myaddress(port)
+                            send_response(resp, s, r)
+                        elseif method == "GET" and path == "/api/contacts" then
+                            local s, ct, c = handle_api_get_contacts()
+                            send_raw_response(resp, s, ct, c)
+                        elseif method == "POST" and path == "/api/contacts" then
+                            local s, r = handle_api_post_contacts(body)
+                            send_response(resp, s, r)
+                        elseif method == "POST" and path == "/api/sync" then
+                            local data = json.decode(body or "{}") or {}
+                            local s, r = handle_api_sync(data, contact_name)
+                            send_response(resp, s, r)
+                        elseif method == "GET" and path:match("^/api/file/inbox/(.+)$") then
+                            fn = path:match("^/api/file/inbox/(.+)$")
+                            local s, ct, c = handle_api_get_file(INBOX, fn)
+                            if ct then send_raw_response(resp, s, ct, c)
+                            else send_response(resp, s, {error = "not found"}) end
+                        elseif method == "GET" and path:match("^/api/file/outbox/(.+)$") then
+                            fn = path:match("^/api/file/outbox/(.+)$")
+                            local s, ct, c = handle_api_get_file(OUTBOX, fn)
+                            if ct then send_raw_response(resp, s, ct, c)
+                            else send_response(resp, s, {error = "not found"}) end
+                        elseif method == "POST" and path:match("^/api/file/outbox/(.+)$") then
+                            fn = path:match("^/api/file/outbox/(.+)$")
+                            local s, r = handle_api_post_outbox_file(fn, body or "")
+                            send_response(resp, s, r)
+                        elseif method == "GET" and path == "/api/attachments" then
+                            local s, r = handle_api_list_attachments()
+                            send_response(resp, s, r)
+                        elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
+                            fn = path:match("^/api/attachments/(.+)$")
+                            local s, ct, c = handle_api_get_attachment(fn)
+                            if ct then send_raw_response(resp, s, ct, c)
+                            else send_response(resp, s, {error = "not found"}) end
+                        elseif method == "POST" and path == "/api/upload/start" then
+                            local data = json.decode(body or "{}") or {}
+                            local s, r = handle_api_upload_start(data)
+                            send_response(resp, s, r)
+                        elseif method == "PUT" and path:match("^/api/upload/([^/]+)/chunk/(%d+)$") then
+                            local uid, cn = path:match("^/api/upload/([^/]+)/chunk/(%d+)$")
+                            local s, r = handle_api_upload_chunk(uid, tonumber(cn), body or "")
+                            send_response(resp, s, r)
+                        else
+                            send_response(resp, 404, {error = "not found"})
+                        end
                     end
                 elseif method == "POST" and body and body ~= "" then
                     local data = json.decode(body)
