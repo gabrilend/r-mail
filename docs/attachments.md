@@ -128,10 +128,26 @@ Whether partial chunks survive a reboot depends on `attachment_pending_dir`:
 
 ## Cancelling a transfer
 
-**As the sender:** delete the outbox file. This sends a deletion notice to all
-recipients, which cancels any pending consent requests and stops any ongoing
-chunk transfer. You cannot cancel an individual attachment without cancelling
-the whole message.
+**As the sender:** edit `~/mail/transfers`. It lists all active outgoing
+attachments, one section per file, with a line per recipient showing progress:
+
+```
+--------------------------------------------------------------------------------
+/home/alice/photos/photo.jpg
+
+bob    5 / 12 chunks received
+carol  awaiting consent
+--------------------------------------------------------------------------------
+```
+
+Remove a recipient's line to cancel their transfer only — the file is still
+sent to the other recipients and the outbox message is preserved. Remove the
+entire section (or delete the `transfers` file) to cancel all recipients for
+that file.
+
+Deleting the outbox file also works and is more drastic: it sends a deletion
+notice to all recipients, cancels any pending consent requests, stops any
+in-progress chunk transfers, and removes the message from all inboxes.
 
 **As the receiver (before accepting):** delete the consent file entirely, or
 change `accept` to `deny`. Either way is treated as a decline.

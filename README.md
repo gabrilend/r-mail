@@ -45,6 +45,8 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
+There is no history for deleted messages. If you'd like such functionality, check out the scripting hooks, which enable whatever behavior you'd like, including backing up old messages.
+
 ### Attachments
 
 Add `attach:` lines to send files. Each recipient receives all `attach:` lines that appear below their `to:` line:
@@ -75,9 +77,46 @@ deny
 
 Leave either `accept` or `deny` to make your choice. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-To cancel as the sender, delete the outbox file. To cancel as the receiver before the transfer starts, delete the consent file or change `accept` to `deny`. Once a transfer is underway, delete the in-progress status file that appears in your inbox to cancel and clean up partial downloads.
+To cancel as the **sender**, edit `~/mail/transfers` — it lists all active outgoing attachments, one section per file, with a line per recipient showing progress. Remove a recipient's line to cancel their transfer only. Remove the entire section (or delete the file) to cancel all recipients for that file. Deleting the outbox file also works and additionally removes the message from all recipients' inboxes.
+
+To cancel as the **receiver** before the transfer starts, delete the consent file or change `accept` to `deny`. Once a transfer is underway, delete the in-progress status file that appears in your inbox to cancel and clean up partial downloads.
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
+
+## Dependencies
+
+- **Lua** 5.1+ (5.4 recommended)
+- **LuaSocket** — TCP networking for Lua
+- **OpenSSL** — AES-256-GCM encryption
+- **zip / unzip** — file compression for attachment transfer
+
+Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
+
+## Installation
+
+```sh
+git clone https://github.com/gabrilend/r-mail.git
+cd r-mail
+scripts/install.sh
+```
+
+`install.sh` compiles all dependencies from source into `libs/`, and generates your config and contacts files. It will ask whether to compile Lua locally or use your system version.
+
+To run manually:
+
+```sh
+./run-rmail.sh
+```
+
+`run-rmail.sh` in the project root auto-detects whether Lua was compiled locally by `install.sh` and picks the right binary. Or run directly:
+
+```sh
+lua rmail.lua
+# or, if you compiled Lua locally:
+deps/lua/bin/lua rmail.lua
+```
+
+To run rmail automatically on boot, see [docs/service.md](docs/service.md).
 
 ## Configuration
 
@@ -105,15 +144,15 @@ alice.port  = 8025
 alice.token = "some-shared-secret"
 ```
 
-| Field   | Meaning                              |
-|---------|--------------------------------------|
-| `ip`    | their router's public IP address     |
-| `port`  | the port their computer listens on   |
-| `token` | shared secret (same on both sides)   |
+| Field   | Meaning                                                 |
+|---------|---------------------------------------------------------|
+| `ip`    | their router's public IP address                        |
+| `port`  | the mailbox their router uses to talk to their computer |
+| `token` | shared secret password (same on both sides)             |
 
-Both sides must have the same token for a given contact pair. Pick something long and random.
+Both sides must have the same token for a given contact pair. Pick something long and random. But pick something different for each contact.
 
-You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly with grep. See [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
+You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
 
 ## Ports
 
@@ -159,7 +198,7 @@ which nft && echo "you have nftables" || \
 which iptables && echo "you have iptables"
 ```
 
-Then open the port:
+Then open the port in the firewall:
 
 ```sh
 # Be sure to change 8025 in these examples to whatever port you'd like to use.
@@ -167,11 +206,11 @@ Then open the port:
 # ufw
 sudo ufw allow 8025/tcp
 
+# nftables
+tcp dport 8025 accept
+
 # iptables
 sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
-
-# nftables (add to your ruleset)
-tcp dport 8025 accept
 ```
 
 To verify that the port is open, run this from a computer on the network:
@@ -194,7 +233,7 @@ Once the firewall is open, run the connectivity check to verify your router sett
 scripts/check-connectivity.sh
 ```
 
-This checks whether your router supports hairpin NAT (needed for contacts on the same local network to reach you via your public IP) and whether UPnP is enabled (a security concern). It reads your port from the config file automatically.
+This checks whether your router supports hairpin NAT (needed for contacts on the same router to talk to each other) and whether UPnP is enabled in the router settings (a security concern). It reads your port from the config file automatically.
 
 ### Automatic port forwarding (UPnP / NAT-PMP)
 
@@ -226,34 +265,13 @@ Log into your router's admin panel and disable:
 
 Then set up a manual port forward for your rmail port. See [docs/nat-traversal-report.md](docs/nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
 
-## Dependencies
-
-- **Lua** 5.1+ (5.4 recommended)
-- **LuaSocket** — TCP networking for Lua
-- **OpenSSL** — AES-256-GCM encryption via `rmail_crypto.so` (compiled from source by install script)
-- **zip / unzip** — file compression for attachment transfer (Info-ZIP)
-
-Run `scripts/install.sh` to compile all dependencies from source into the local `libs/` directory.
-
-## Installation
+To find your router's admin panel, first get your default gateway address:
 
 ```sh
-git clone https://github.com/gabrilend/r-mail.git
-cd r-mail
-scripts/install.sh
+ip route show default | awk '{print $3}'
 ```
 
-`install.sh` compiles all dependencies from source into `libs/`, and generates your config and contacts files. It will ask whether to compile Lua locally or use your system version.
-
-To run manually:
-
-```sh
-lua rmail.lua
-# or, if you compiled Lua locally:
-deps/lua/bin/lua rmail.lua
-```
-
-To run rmail automatically on boot, see [docs/service.md](docs/service.md).
+Then enter that address into your web browser. Every router's admin interface is different — the username and password are usually printed on a sticker on the bottom of the router.
 
 ## Encryption
 
@@ -280,17 +298,17 @@ Hooks let you run scripts in response to message events. Configure them in `~/.c
 
 | Hook            | `$1`       | `$2`       | `$3`               | stdout        |
 |-----------------|------------|------------|--------------------|---------------|
+| `on_send`       | recipient  | subject    | message body       | replaces body |
 | `on_receive_raw`| sender     | subject    | message body       | replaces body |
 | `on_receive`    | sender     | subject    | path to inbox file | ignored       |
-| `on_send`       | recipient  | subject    | message body       | replaces body |
 | `on_delete`     | other party| —          | —                  | ignored       |
 | `on_package`    | sender     | filename   | path to saved file | ignored       |
 
-- **`on_receive_raw`** — synchronous, runs before the message is written. stdout replaces the saved body.
-- **`on_receive`** — runs in background after the message is on disk.
-- **`on_send`** — synchronous, runs once per recipient. stdout replaces the body for that recipient only.
-- **`on_delete`** — runs when a message is deleted from inbox or outbox.
-- **`on_package`** — runs in background after an attachment is fully received and saved.
+- **`on_send`** — runs once per recipient. message only sends after the script finishes. stdout replaces the body for that recipient only.
+- **`on_receive_raw`** — runs to completion before the message is written. stdout replaces the saved body.
+- **`on_receive`** — runs in the background after the message is on disk.
+- **`on_delete`**  — runs in the background when a message is deleted from inbox or outbox.
+- **`on_package`** — runs in the background after an attachment is fully received and saved.
 
 Hooks are a powerful feature — any executable works, in any language. For full documentation and examples in bash, Lua, and C, see [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
 
@@ -312,10 +330,11 @@ Hooks are a powerful feature — any executable works, in any language. For full
 5. Is the `ip`/`port` in your contacts file correct (public IP, not local IP)?
 6. Do both sides have the same token?
 7. Did you wait long enough for the daemon to try sending the messages again?
+8. Is there a script on the `on_send` hook that is stuck in a loop, exiting with an error, or outputting an empty body to stdout?
 
 If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
 
-**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `deny` line to accept.
+**Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `deny` line and leave `accept` for their daemon to read.
 
 **Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.
 

@@ -39,6 +39,7 @@ local CONTACTS    = MAIL .. "/contacts"
 local ATTACHMENTS            = config.attachments or (MAIL .. "/attachments")
 local ATTACHMENT_PENDING_DIR = config.attachment_pending_dir or "/tmp"
 local ATTACHMENT_CHUNK_SIZE  = tonumber(config.attachment_chunk_size) or 5242880
+local TRANSFERS_FILE         = MAIL .. "/transfers"
 
 local LIBS             = config.libs
 local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
@@ -1630,6 +1631,109 @@ local function handle_attachment_response(data, sender)
 end
 
 
+-- Write ~/mail/transfers showing outgoing attachment progress.
+-- Groups active transfers by source file path, one section per file.
+-- Removes the file when there are no active transfers.
+local function write_transfers_file(att_state)
+    local by_path = {}
+    local path_order = {}
+    for _, transfer in pairs(att_state) do
+        if transfer.status == "awaiting_consent" or transfer.status == "sending" then
+            local path = transfer.original_path
+            if not by_path[path] then
+                by_path[path] = {}
+                path_order[#path_order + 1] = path
+            end
+            local progress
+            if transfer.status == "awaiting_consent" then
+                progress = "awaiting consent"
+            else
+                local missing_count = transfer.missing and #transfer.missing or 0
+                local sent = transfer.total_chunks - missing_count
+                progress = sent .. " / " .. transfer.total_chunks .. " chunks received"
+            end
+            by_path[path][transfer.to] = progress
+        end
+    end
+
+    if #path_order == 0 then
+        if file_exists(TRANSFERS_FILE) then os.remove(TRANSFERS_FILE) end
+        return
+    end
+
+    table.sort(path_order)
+    local sep = string.rep("-", 80)
+    local lines = {}
+    for _, path in ipairs(path_order) do
+        lines[#lines + 1] = sep
+        lines[#lines + 1] = path
+        lines[#lines + 1] = ""
+        local sorted_contacts = {}
+        for cname in pairs(by_path[path]) do
+            sorted_contacts[#sorted_contacts + 1] = cname
+        end
+        table.sort(sorted_contacts)
+        for _, cname in ipairs(sorted_contacts) do
+            lines[#lines + 1] = cname .. "  " .. by_path[path][cname]
+        end
+    end
+    lines[#lines + 1] = sep
+    write_file(TRANSFERS_FILE, table.concat(lines, "\n") .. "\n")
+end
+
+-- Check ~/mail/transfers for user-initiated cancellations.
+-- If a recipient line or entire file section was removed, cancel those
+-- transfers in chunks-outgoing.json and stop sending their chunks.
+local function check_transfers_file_cancellations()
+    if not file_exists(TRANSFERS_FILE) then return end
+    local content = read_file(TRANSFERS_FILE)
+    if not content then return end
+
+    local chunks = load_state("chunks-outgoing.json")
+    if not next(chunks) then return end
+
+    -- Parse file into {path -> {contact_name -> true}}
+    local file_contacts = {}
+    local current_path = nil
+    local sep = string.rep("-", 80)
+    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+        line = line:match("^%s*(.-)%s*$")
+        if line == sep then
+            current_path = nil
+        elseif not current_path and line ~= "" then
+            current_path = line
+            file_contacts[current_path] = {}
+        elseif current_path and line ~= "" then
+            local cname = line:match("^(%S+)")
+            if cname then file_contacts[current_path][cname] = true end
+        end
+    end
+
+    -- Collect cancellations (don't modify chunks while iterating)
+    local to_cancel = {}
+    for att_id, transfer in pairs(chunks) do
+        if transfer.status == "awaiting_consent" or transfer.status == "sending" then
+            local contacts_in_file = file_contacts[transfer.original_path]
+            if not contacts_in_file or not contacts_in_file[transfer.to] then
+                to_cancel[att_id] = transfer
+            end
+        end
+    end
+
+    local changed = false
+    for att_id, transfer in pairs(to_cancel) do
+        release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+        chunks[att_id] = nil
+        log("transfer cancelled via transfers file: %s to %s", transfer.filename, transfer.to)
+        changed = true
+    end
+
+    if changed then
+        save_state("chunks-outgoing.json", chunks)
+        write_transfers_file(chunks)
+    end
+end
+
 local function send_next_chunks(my_name)
     local chunks = load_state("chunks-outgoing.json")
     if not next(chunks) then return false end
@@ -2432,6 +2536,7 @@ local function main()
         local now = socket.gettime()
         if now - last_sync >= interval then
             local ok, err = pcall(function()
+                check_transfers_file_cancellations()
                 local w1 = sync_outbox(my_name)
                 local w2 = sync_inbox(my_name)
                 local w3 = sync_address_notifications(my_name)
@@ -2439,6 +2544,7 @@ local function main()
                 local w5 = send_consent_responses(my_name)
                 local w6 = send_next_chunks(my_name)
                 local w7 = send_attachment_cancellations(my_name)
+                write_transfers_file(load_state("chunks-outgoing.json"))
                 if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
                     interval = math.max(MIN_INTERVAL, interval - 240)
                     log("had work, interval -> %ds", interval)

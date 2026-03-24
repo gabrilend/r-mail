@@ -358,15 +358,8 @@ openssl_libdir() {
     echo "/usr/lib"
 }
 
-if [ -d "$DEPS/openssl" ] && [ -f "$DEPS/openssl/include/openssl/ssl.h" ] && ! $FORCE; then
-    OPENSSL_INC="-I$DEPS/openssl/include"
-    OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
-    ok "found locally compiled: deps/openssl/"
-elif find_openssl_system; then
-    ok "found system-wide (headers: ${OPENSSL_INC:-default paths})"
-else
-    info "OpenSSL not found system-wide, compiling locally (this takes a few minutes)..."
-    echo "  Downloading openssl-$OPENSSL_VERSION..."
+compile_openssl() {
+    info "Downloading openssl-$OPENSSL_VERSION (this takes a few minutes)..."
     mkdir -p "$BUILD"
     OPENSSL_MAJOR=$(echo "$OPENSSL_VERSION" | awk -F. '{print $1}')
     if [ "$OPENSSL_MAJOR" -ge 3 ]; then
@@ -390,6 +383,25 @@ else
     OPENSSL_INC="-I$DEPS/openssl/include"
     OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
     ok "done (deps/openssl/)"
+}
+
+if [ -d "$DEPS/openssl" ] && [ -f "$DEPS/openssl/include/openssl/ssl.h" ] && ! $FORCE; then
+    OPENSSL_INC="-I$DEPS/openssl/include"
+    OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
+    ok "found locally compiled: deps/openssl/"
+elif find_openssl_system; then
+    ok "found system-wide (headers: ${OPENSSL_INC:-default paths})"
+    if ask_yn "Compile a local version instead? (recommended for reproducibility)"; then
+        compile_openssl
+    fi
+else
+    warn "OpenSSL not found — required for AES-256-GCM encryption"
+    if ask_yn "Compile OpenSSL locally? (takes a few minutes)"; then
+        compile_openssl
+    else
+        err "OpenSSL is required — cannot continue without it"
+        exit 1
+    fi
 fi
 
 # ============================================================
