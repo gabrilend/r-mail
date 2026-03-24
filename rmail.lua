@@ -643,11 +643,6 @@ local function send_raw_response(client, status, content_type, body, extra_heade
     client:send(header .. body)
 end
 
--- Identity is established by the encryption layer (trial decryption).
--- We just confirm the body's "from" field matches the decrypted identity.
-local function auth_check(data, contact_name)
-    return (data["from"] or "") == contact_name
-end
 
 local function save_attachments(attachments, sender, inbox_meta)
     if not attachments or #attachments == 0 then return end
@@ -674,8 +669,7 @@ local function save_attachments(attachments, sender, inbox_meta)
     end
 end
 
-local function handle_deliver_message(data)
-    local sender = data["from"]
+local function handle_deliver_message(data, sender)
     local subject = data.subject or "untitled"
     local message_id = data.message_id or uuid()
     local body = data.body
@@ -749,8 +743,7 @@ local function release_zip(chunks, zip_id, compressed_path)
     end
 end
 
-local function handle_delete(data)
-    local sender = data["from"]
+local function handle_delete(data, sender)
     local message_id = data.message_id
     local attachment_id = data.attachment_id
 
@@ -844,8 +837,7 @@ local function handle_delete(data)
     return 404, {error = "message not found"}
 end
 
-local function handle_update_address(data)
-    local sender = data["from"]
+local function handle_update_address(data, sender)
     local new_ip = data.ip or ""
     local new_port = data.port
 
@@ -1106,16 +1098,6 @@ local function http_post_batch(requests)
     return results
 end
 
-local function http_post(host, port, path, data, my_name, token)
-    data["from"] = my_name
-    data.token = token
-    local results = http_post_batch({{
-        host = host, port = port, path = path,
-        payload = json.encode(data),
-        psk_key = token,
-    }})
-    return results[1].ok, results[1].data
-end
 
 local function parse_outbox_file(path)
     local text = read_file(path)
@@ -1335,8 +1317,7 @@ end
 
 -- ---- Receiver side ----
 
-local function handle_attachment_request(data)
-    local sender = data["from"]
+local function handle_attachment_request(data, sender)
     local att_id = data.attachment_id
     local filename = (data.filename or "unknown"):gsub("[\n\r]", "")
     local expected_size = tonumber(data.expected_size) or 0
@@ -1436,7 +1417,6 @@ local function send_consent_responses(my_name)
             requests[#requests + 1] = {
                 host = c.ip, port = c.port, path = "/deliver",
                 payload = json.encode({
-                    ["from"] = my_name, token = c.token,
                     type = "attachment_response",
                     attachment_id = resp.attachment_id,
                     consent = resp.consent,
@@ -1496,7 +1476,6 @@ local function send_attachment_cancellations(my_name)
             requests[#requests + 1] = {
                 host = c.ip, port = c.port, path = "/delete",
                 payload = json.encode({
-                    ["from"] = my_name, token = c.token,
                     message_id = item.entry.message_id,
                 }),
                 psk_key = c.token,
@@ -1522,8 +1501,7 @@ local function send_attachment_cancellations(my_name)
     return true
 end
 
-local function handle_attachment_chunk(data)
-    local sender = data["from"]
+local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
     local total_chunks = tonumber(data.total_chunks)
@@ -1625,8 +1603,7 @@ end
 
 -- ---- Sender side ----
 
-local function handle_attachment_response(data)
-    local sender = data["from"]
+local function handle_attachment_response(data, sender)
     local att_id = data.attachment_id
     local consent = data.consent
     if not att_id then return 400, {error = "missing attachment_id"} end
@@ -1686,7 +1663,6 @@ local function send_next_chunks(my_name)
             local results = http_post_batch({{
                 host = contact.ip, port = contact.port, path = "/deliver",
                 payload = json.encode({
-                    ["from"] = my_name, token = contact.token,
                     type = "attachment_chunk",
                     attachment_id = att_id,
                     message_id = transfer.message_id,
@@ -1733,16 +1709,16 @@ local function send_next_chunks(my_name)
     return did_work
 end
 
-local function handle_deliver(data)
+local function handle_deliver(data, sender)
     local msg_type = data and data.type
     if not msg_type then
         return 400, {error = "missing type field"}
     end
-    if     msg_type == "message"             then return handle_deliver_message(data)
-    elseif msg_type == "attachment_request"  then return handle_attachment_request(data)
-    elseif msg_type == "attachment_response" then return handle_attachment_response(data)
-    elseif msg_type == "attachment_chunk"    then return handle_attachment_chunk(data)
-    elseif msg_type == "chunk_failed"        then return 200, {ok = true}  -- handled via missing list in chunk response
+    if     msg_type == "message"             then return handle_deliver_message(data, sender)
+    elseif msg_type == "attachment_request"  then return handle_attachment_request(data, sender)
+    elseif msg_type == "attachment_response" then return handle_attachment_response(data, sender)
+    elseif msg_type == "attachment_chunk"    then return handle_attachment_chunk(data, sender)
+    elseif msg_type == "chunk_failed"        then return 200, {ok = true}
     else return 400, {error = "unknown type: " .. tostring(msg_type)}
     end
 end
@@ -1973,22 +1949,19 @@ local function sync_outbox(my_name)
                         local transformed = run_hook(ON_SEND, op.recipient, op.subject or op.filename, op.body or "")
                         if transformed and transformed ~= "" then send_body = transformed end
                     end
-                    data = {["from"] = my_name, token = op.contact.token,
-                            type = "message",
+                    data = {type = "message",
                             subject = op.subject, message_id = op.message_id, body = send_body}
                 end
             elseif op.type == "attachment_request" then
                 path = "/deliver"
-                data = {["from"] = my_name, token = op.contact.token,
-                        type = "attachment_request",
+                data = {type = "attachment_request",
                         attachment_id = op.att_id,
                         message_id = op.message_id,
                         filename = op.att_filename,
                         expected_size = op.expected_size}
             else
                 path = "/delete"
-                data = {["from"] = my_name, token = op.contact.token,
-                        message_id = op.message_id}
+                data = {message_id = op.message_id}
             end
             if not op.skip then
                 local j = #requests + 1
@@ -2139,7 +2112,6 @@ local function sync_inbox(my_name)
                 host = op.contact.ip, port = op.contact.port,
                 path = "/delete",
                 payload = json.encode({
-                    ["from"] = my_name, token = op.contact.token,
                     message_id = op.message_id,
                 }),
                 psk_key = op.contact.token,
@@ -2274,7 +2246,6 @@ local function sync_address_notifications(my_name)
             host = op.contact.ip, port = op.contact.port,
             path = "/update-address",
             payload = json.encode({
-                ["from"] = my_name, token = op.contact.token,
                 ip = op.ip, port = op.port, notify = NOTIFY_IP_CHANGE,
             }),
             psk_key = op.contact.token,
@@ -2436,16 +2407,14 @@ local function main()
                     end
                 elseif method == "POST" and body and body ~= "" then
                     local data = json.decode(body)
-                    if not auth_check(data, contact_name) then
-                        send_response(resp, 403, {error = "forbidden"})
-                    elseif path == "/deliver" then
-                        local s, r = handle_deliver(data)
+                    if path == "/deliver" then
+                        local s, r = handle_deliver(data, contact_name)
                         send_response(resp, s, r)
                     elseif path == "/delete" then
-                        local s, r = handle_delete(data)
+                        local s, r = handle_delete(data, contact_name)
                         send_response(resp, s, r)
                     elseif path == "/update-address" then
-                        local s, r = handle_update_address(data)
+                        local s, r = handle_update_address(data, contact_name)
                         send_response(resp, s, r)
                     else
                         send_response(resp, 404, {error = "not found"})

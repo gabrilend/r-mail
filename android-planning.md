@@ -309,8 +309,8 @@ Every rmail daemon needs to support this endpoint (not just Android). The phone 
 **Contacts hash format**
 Parse the contacts file on both sides, serialize canonically (contacts sorted alphabetically by name, fields sorted alphabetically within each contact, standardized key=value format), then hash the serialized form. The contacts file sent over the wire is always the canonical serialization — formatting differences from desktop editing never cause spurious sync cycles.
 
-**Remove `"from"` field from all packets**
-The `"from"` and `token` body fields are redundant — `contact_name` is already established by trial decryption. Remove them from all protocol messages (both daemon-to-daemon and phone-to-daemon). Handlers are updated to receive `contact_name` as a parameter instead of reading `data["from"]`. Parallelizing trial decryption is unnecessary: AES-NI makes each attempt take nanoseconds; 50 contacts resolves in microseconds serially. Token collision (two contacts whose SHA-256(token) match) is a 1-in-2^256 event — not a real concern.
+**Remove `"from"` field from all packets** *(implemented)*
+The `"from"` and `token` body fields are removed from all protocol messages. `contact_name` from trial decryption is passed as a `sender` parameter to all handler functions. The dead `http_post` wrapper and `auth_check` function are also removed.
 
 ---
 
