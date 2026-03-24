@@ -43,7 +43,7 @@ myphone.own   = true
 
 `own = true` means "this is my own device" — it cannot be confused with a contact for another person. Own-device entries have no `ip` or `port` (the phone connects to you, not the reverse). All sync and upload API calls are encrypted with the device token using the custom AES-GCM protocol.
 
-No identity label is sent in cleartext. The server identifies the caller by trial decryption: it tries each known token in turn (own-device entries first, then contacts). The first token whose AES-GCM auth tag validates identifies the caller. An eavesdropper sees only destination IP and port — no names, no handshake labels. See the **Encryption protocol** section at the end for the full spec.
+No identity label is sent in cleartext. The server identifies the caller by trial decryption: it tries each known token in turn until the AES-GCM auth tag validates. An eavesdropper sees only destination IP and port — no names, no handshake labels.
 
 **Multiple phones:** all `own = true` entries access the same sync API and see the same mail directory.
 
@@ -138,7 +138,7 @@ All new code required in `rmail.lua`:
 TLS/LuaSec is removed from rmail.lua entirely. Every connection — daemon-to-daemon and phone-to-daemon — uses the custom AES-GCM protocol. On the Android side, `javax.crypto.Cipher` (built-in) replaces BouncyCastle. On the Lua side, OpenSSL's AES-GCM is called directly (OpenSSL is already a dependency of LuaSec, so it remains available on disk — the change is calling it via FFI rather than the TLS socket abstraction). The trial decryption loop replaces the PSK callback entirely. See the **Encryption protocol** section for the full spec.
 
 **`own = true` contact parsing:**
-Own-device entries store only two fields: `token` and `own = true`. No `ip` or `port`. The contacts parser reads these fields already. Confirm that `load_contacts()` includes them in its returned table so the PSK callback can find them.
+Own-device entries store only two fields: `token` and `own = true`. No `ip` or `port`. The contacts parser reads these fields already. Confirmed: `load_contacts()` returns all entries including `own = true` ones, so the trial decryption loop finds them.
 
 **Deletion logic integration:**
 The phone sends deletions as direct `/delete` requests to its home server (same endpoint used between home servers), rather than bundling them in the sync request. The home server receives the request, recognizes the sender as an `own = true` device, and routes accordingly: removes the file from its inbox, notifies the original sender's daemon (so they can remove the `to:` line from their outbox), and any other attached own devices will receive `remove_inbox` on their next sync.
@@ -295,6 +295,22 @@ Each mailbox has its own:
 - Inbox / outbox / attachments views
 
 A mailbox switcher (drawer or top-bar dropdown) lets the user switch between configured mailboxes. Adding a new mailbox follows the same onboarding flow as the first setup, but by default onboarding only initializes one inbox. Subsequent mailboxes can be created and onboarded afterwards.
+
+---
+
+## Open questions
+
+**`/api/*` endpoint authorization — `own = true` enforcement**
+Trial decryption identifies the caller by name, but the server dispatch doesn't yet explicitly gate the Android-only endpoints on `contacts[contact_name].own == "true"`. A regular contact with a valid token could call `/api/sync`. The dispatch needs an explicit own-device check before serving any `/api/*` path, returning 403 otherwise.
+
+**`/peer-address` endpoint — protocol scope**
+The IP recovery flow calls `GET /peer-address` on *contacts' daemons*, not the user's own. That makes it a protocol-level addition that every rmail daemon needs to support — not just an Android API endpoint. It should be added to rmail.lua's server dispatch for all connections (not just own-device), and documented in `docs/protocol.md`.
+
+**Contacts hash format**
+`contacts_hash` in the sync manifest needs a precise definition. SHA-256 of the raw contacts file bytes is fragile — trivial differences (trailing newline, line endings from desktop vs. phone editor) would cause spurious "upload/fetch" cycles on every sync. Options: normalize before hashing (strip trailing whitespace, enforce `\n` line endings), or hash a canonical serialization of the parsed key-value pairs.
+
+**`"from"` field in Android sync requests**
+Existing protocol endpoints (`/deliver`, `/delete`) include a `"from"` field in the JSON body, which `auth_check` verifies against the encryption-layer identity. The new `/api/*` endpoints already have `contact_name` from trial decryption and don't need a `"from"` field for auth. Decision needed: do Android endpoints send `"from"` anyway for consistency, or use a separate auth path that skips the body field check entirely?
 
 ---
 
