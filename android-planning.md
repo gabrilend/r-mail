@@ -298,19 +298,19 @@ A mailbox switcher (drawer or top-bar dropdown) lets the user switch between con
 
 ---
 
-## Open questions
+## Resolved decisions (formerly open questions)
 
 **`/api/*` endpoint authorization — `own = true` enforcement**
-Trial decryption identifies the caller by name, but the server dispatch doesn't yet explicitly gate the Android-only endpoints on `contacts[contact_name].own == "true"`. A regular contact with a valid token could call `/api/sync`. The dispatch needs an explicit own-device check before serving any `/api/*` path, returning 403 otherwise.
+Add an explicit `contacts[contact_name].own == "true"` check before serving any `/api/*` path, returning 403 otherwise. Defense-in-depth: a contact would still need the correct token to pass decryption, but the explicit check is cheap and prevents misuse if a token is ever shared unintentionally.
 
 **`/peer-address` endpoint — protocol scope**
-The IP recovery flow calls `GET /peer-address` on *contacts' daemons*, not the user's own. That makes it a protocol-level addition that every rmail daemon needs to support — not just an Android API endpoint. It should be added to rmail.lua's server dispatch for all connections (not just own-device), and documented in `docs/protocol.md`.
+Every rmail daemon needs to support this endpoint (not just Android). The phone uses the same per-contact token the home server uses — the contact's daemon can't distinguish "desktop" from "phone" and doesn't need to. Both legitimately hold the same secret. Security model: equivalent to the desktop. Token compromise via stolen phone = same risk as stolen laptop. The endpoint is added to rmail.lua's server dispatch for all authenticated connections and documented in `docs/protocol.md`.
 
 **Contacts hash format**
-`contacts_hash` in the sync manifest needs a precise definition. SHA-256 of the raw contacts file bytes is fragile — trivial differences (trailing newline, line endings from desktop vs. phone editor) would cause spurious "upload/fetch" cycles on every sync. Options: normalize before hashing (strip trailing whitespace, enforce `\n` line endings), or hash a canonical serialization of the parsed key-value pairs.
+Parse the contacts file on both sides, serialize canonically (contacts sorted alphabetically by name, fields sorted alphabetically within each contact, standardized key=value format), then hash the serialized form. The contacts file sent over the wire is always the canonical serialization — formatting differences from desktop editing never cause spurious sync cycles.
 
-**`"from"` field in Android sync requests**
-Existing protocol endpoints (`/deliver`, `/delete`) include a `"from"` field in the JSON body, which `auth_check` verifies against the encryption-layer identity. The new `/api/*` endpoints already have `contact_name` from trial decryption and don't need a `"from"` field for auth. Decision needed: do Android endpoints send `"from"` anyway for consistency, or use a separate auth path that skips the body field check entirely?
+**Remove `"from"` field from all packets**
+The `"from"` and `token` body fields are redundant — `contact_name` is already established by trial decryption. Remove them from all protocol messages (both daemon-to-daemon and phone-to-daemon). Handlers are updated to receive `contact_name` as a parameter instead of reading `data["from"]`. Parallelizing trial decryption is unnecessary: AES-NI makes each attempt take nanoseconds; 50 contacts resolves in microseconds serially. Token collision (two contacts whose SHA-256(token) match) is a 1-in-2^256 event — not a real concern.
 
 ---
 
