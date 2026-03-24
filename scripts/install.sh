@@ -743,6 +743,7 @@ RANDOM_PORT=$(gen_random_port)
 
 echo ""
 echo "Setting up your rmail identity..."
+echo "  (Press Enter to keep the default shown in [brackets])"
 
 DEFAULT_NAME=$(whoami)
 DEFAULT_PORT=$RANDOM_PORT
@@ -879,6 +880,7 @@ CONFIG
 fi
 
 ln -sf "$CONFIG_FILE" "$ROOT/config"
+mkdir -p "$MAIL_DIR"
 ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
 
 # ============================================================
