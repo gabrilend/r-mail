@@ -137,8 +137,9 @@ ask_yn() {
 ask_value() {
     # ask_value "prompt" "default" — prints prompt with default, reads input, echos result
     # If user presses enter without input, returns the default.
-    printf "  %s [%s]: " "$1" "$2"
-    read -r _val
+    # Prompt goes to /dev/tty so it is visible even when stdout is captured via $(...).
+    printf "  %s [%s]: " "$1" "$2" >/dev/tty
+    read -r _val </dev/tty
     if [ -z "$_val" ]; then
         echo "$2"
     else
@@ -190,7 +191,7 @@ find_lua_system() {
     # find any lua binary in PATH (5.1+ or LuaJIT)
     local lua_bin=""
     local lua_ver=""
-    for cmd in lua5.4 lua5.3 lua5.2 lua5.1 luajit lua; do
+    for cmd in lua5.4 luajit lua5.3 lua5.2 lua5.1 lua; do
         local ver
         ver=$($cmd -v 2>&1 || true)
         case "$ver" in
@@ -920,7 +921,7 @@ LUA_BIN=""
 if [ -f "$DEPS/lua/bin/lua" ]; then
     LUA_BIN="$DEPS/lua/bin/lua"
 else
-    for cmd in lua5.4 lua5.3 lua5.2 lua5.1 lua; do
+    for cmd in lua5.4 luajit lua5.3 lua5.2 lua5.1 lua; do
         if command -v "$cmd" >/dev/null 2>&1; then
             LUA_BIN=$(command -v "$cmd")
             break
