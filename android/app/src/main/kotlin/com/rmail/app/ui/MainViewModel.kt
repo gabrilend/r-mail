@@ -13,6 +13,7 @@ import com.rmail.app.sync.SyncManager
 import com.rmail.app.sync.SyncResult
 import com.rmail.app.sync.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -49,6 +50,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (settings.isConfigured) {
             triggerSync()
             SyncWorker.schedule(application, settings.bgSyncIntervalMinutes)
+            startForegroundPolling()
+        }
+    }
+
+    // TODO: re-evaluate sync model — consider push/inotify or longer interval for production
+    private val FOREGROUND_SYNC_INTERVAL_MS = 10_000L
+
+    private fun startForegroundPolling() {
+        viewModelScope.launch {
+            while (true) {
+                delay(FOREGROUND_SYNC_INTERVAL_MS)
+                if (_syncStatus.value != SyncStatus.SYNCING) triggerSync()
+            }
         }
     }
 
@@ -58,6 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerSync() {
+        if (_syncStatus.value == SyncStatus.SYNCING) return
         viewModelScope.launch {
             _syncStatus.value = SyncStatus.SYNCING
             _syncError.value = null

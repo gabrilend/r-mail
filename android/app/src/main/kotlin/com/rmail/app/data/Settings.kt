@@ -14,7 +14,7 @@ class Settings(context: Context) {
         set(v) = prefs.edit { putString("server_host", v) }
 
     var serverPort: Int
-        get() = prefs.getInt("server_port", 8787)
+        get() = prefs.getInt("server_port", 8025)
         set(v) = prefs.edit { putInt("server_port", v) }
 
     var deviceToken: String
@@ -27,7 +27,7 @@ class Settings(context: Context) {
         set(v) = prefs.edit { putInt("bg_color", v) }
 
     var fgColor: Int
-        get() = prefs.getInt("fg_color", 0xFFDAA520.toInt())
+        get() = prefs.getInt("fg_color", 0xFFFFD040.toInt())
         set(v) = prefs.edit { putInt("fg_color", v) }
 
     var swipeToDelete: Boolean

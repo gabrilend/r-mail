@@ -3,6 +3,7 @@ package com.rmail.app.net
 import com.rmail.app.crypto.Crypto
 import com.rmail.app.data.AttachmentInfo
 import com.rmail.app.data.DeletedEntry
+import com.rmail.app.data.InboxEntry
 import com.rmail.app.data.SyncRequest
 import com.rmail.app.data.SyncResponse
 import com.rmail.app.data.UploadStartResult
@@ -124,9 +125,16 @@ class RmailClient(
 
         val obj = JSONObject(respBody.toString(Charsets.UTF_8))
 
-        val fetchInbox = mutableMapOf<String, String>()
-        obj.optJSONObject("fetch_inbox")?.let { fi ->
-            fi.keys().forEach { id -> fetchInbox[id] = fi.getString(id) }
+        val fetchInbox = mutableMapOf<String, InboxEntry>()
+        obj.optJSONArray("fetch_inbox")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val e = arr.getJSONObject(i)
+                val id = e.getString("message_id")
+                fetchInbox[id] = InboxEntry(
+                    filename = e.getString("filename"),
+                    from = e.optString("from", "")
+                )
+            }
         }
 
         val removeInbox = mutableListOf<String>()

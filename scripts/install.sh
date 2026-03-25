@@ -877,6 +877,11 @@ CONFIG
     echo ""
     echo "  your rmail port: $RMAIL_PORT"
     echo "  forward this port on your router to this machine"
+else
+    sed -i "s|^name = .*|name = $RMAIL_NAME|" "$CONFIG_FILE"
+    sed -i "s|^port = .*|port = $RMAIL_PORT|" "$CONFIG_FILE"
+    sed -i "s|^mail = .*|mail = $RMAIL_MAIL|" "$CONFIG_FILE"
+    ok "updated config: $CONFIG_FILE"
 fi
 
 ln -sf "$CONFIG_FILE" "$ROOT/config"
@@ -1083,18 +1088,27 @@ SERVICE
             ;;
         runit)
             SERVICE_FILE="$ROOT/rmail-run"
+            LOG_FILE="$ROOT/rmail-log-run"
             cat > "$SERVICE_FILE" <<SERVICE
 #!/bin/sh
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua 2>&1
+exec 2>&1
+export HOME=$HOME
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua
 SERVICE
             chmod +x "$SERVICE_FILE"
-            ok "generated $SERVICE_FILE"
+            cat > "$LOG_FILE" <<LOGSERVICE
+#!/bin/sh
+exec svlogd -tt /var/log/rmail
+LOGSERVICE
+            chmod +x "$LOG_FILE"
+            ok "generated $SERVICE_FILE and $LOG_FILE"
             echo ""
             echo "  Run these commands to install the service:"
-            echo "    sudo mkdir -p /etc/sv/rmail"
+            echo "    sudo mkdir -p /etc/sv/rmail/log /var/log/rmail"
             echo "    sudo mv $SERVICE_FILE /etc/sv/rmail/run"
+            echo "    sudo mv $LOG_FILE /etc/sv/rmail/log/run"
             echo "    sudo ln -s /etc/sv/rmail /var/service/"
-            echo "  Logs: sv status rmail"
+            echo "  Logs: sudo tail -f /var/log/rmail/current"
             ;;
         openrc)
             SERVICE_FILE="$ROOT/rmail-init"

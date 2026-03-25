@@ -16,7 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.rmail.app.ui.MainViewModel
 
@@ -81,10 +80,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 )
                 OutlinedTextField(
                     value = token,
-                    onValueChange = { token = it },
+                    onValueChange = { token = it.replace("\"", "") },
                     label = { Text("Device token") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    prefix = { Text("\"") },
+                    suffix = { Text("\"") },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -106,7 +107,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 OutlinedTextField(
                     value = bgSyncInterval,
                     onValueChange = { bgSyncInterval = it.filter { c -> c.isDigit() } },
-                    label = { Text("Background sync interval (min, min 15)") },
+                    label = { Text("Background sync interval (min 15)") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth()

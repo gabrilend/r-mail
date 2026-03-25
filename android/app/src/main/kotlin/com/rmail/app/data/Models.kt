@@ -38,7 +38,7 @@ data class DeletedEntry(val messageId: String, val from: String)
 
 // Incoming sync response
 data class SyncResponse(
-    val fetchInbox: Map<String, String>,      // messageId -> filename (new messages to download)
+    val fetchInbox: Map<String, InboxEntry>,  // messageId -> {filename, from} (new messages to download)
     val removeInbox: List<String>,            // messageIds to delete locally
     val fetchOutbox: List<String>,            // filenames to download from server outbox
     val removeOutbox: List<String>,           // filenames to delete locally

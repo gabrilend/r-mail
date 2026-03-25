@@ -22,6 +22,7 @@ import com.rmail.app.ui.SyncStatus
 fun InboxScreen(
     vm: MainViewModel,
     onOpen: (String) -> Unit,
+    onOpenOutbox: (String) -> Unit,
     onCompose: () -> Unit,
     onContacts: () -> Unit,
     onAttachments: () -> Unit,
@@ -117,7 +118,13 @@ fun InboxScreen(
             } else {
                 LazyColumn {
                     items(files, key = { it }) { filename ->
-                        if (vm.settings.swipeToDelete && !showOutbox) {
+                        if (showOutbox) {
+                            SwipeToDismissMessageItem(
+                                filename = filename,
+                                onDelete = { vm.deleteOutboxFile(filename) },
+                                onClick = { onOpenOutbox(filename) }
+                            )
+                        } else if (vm.settings.swipeToDelete) {
                             SwipeToDismissMessageItem(
                                 filename = filename,
                                 onDelete = { vm.deleteInboxMessage(filename) },

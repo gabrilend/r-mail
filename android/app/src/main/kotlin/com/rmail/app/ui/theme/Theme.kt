@@ -6,8 +6,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 val Black = Color(0xFF000000)
-val Goldenrod = Color(0xFFDAA520)
-val GoldenrodDim = Color(0xFF9B7315)
+val Goldenrod = Color(0xFFFFD040)
+val GoldenrodDim = Color(0xFFB89020)
 val DarkSurface = Color(0xFF111111)
 val DimText = Color(0xFF888888)
 

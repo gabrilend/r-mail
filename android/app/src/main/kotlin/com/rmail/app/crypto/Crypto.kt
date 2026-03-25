@@ -69,16 +69,26 @@ object Crypto {
      * Throws IOException on read errors.
      */
     fun decryptFrame(input: InputStream, key: ByteArray): ByteArray? {
-        val lenBuf = input.readNBytes(4)
-        if (lenBuf.size < 4) return null
+        val lenBuf = readExactly(input, 4) ?: return null
         val length = ((lenBuf[0].toInt() and 0xFF) shl 24) or
                      ((lenBuf[1].toInt() and 0xFF) shl 16) or
                      ((lenBuf[2].toInt() and 0xFF) shl 8) or
                      (lenBuf[3].toInt() and 0xFF)
-        if (length < 12 + 16) return null
-        val payload = input.readNBytes(length)
-        if (payload.size < length) return null
+        if (length < 12 + 16 || length > 16 * 1024 * 1024) return null
+        val payload = readExactly(input, length) ?: return null
         return decrypt(payload, key)
+    }
+
+    /** Read exactly n bytes from a stream, returning null on EOF. Works on API 26+. */
+    private fun readExactly(input: InputStream, n: Int): ByteArray? {
+        val buf = ByteArray(n)
+        var offset = 0
+        while (offset < n) {
+            val read = input.read(buf, offset, n - offset)
+            if (read < 0) return null
+            offset += read
+        }
+        return buf
     }
 
     /** SHA-256 hex string — used for contacts hash. */

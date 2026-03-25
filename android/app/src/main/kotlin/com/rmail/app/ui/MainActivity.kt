@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
                         InboxScreen(
                             vm = vm,
                             onOpen = { filename -> navController.navigate("read/$filename") },
+                            onOpenOutbox = { filename -> navController.navigate("outbox-read/$filename") },
                             onCompose = { navController.navigate("compose") },
                             onContacts = { navController.navigate("contacts") },
                             onAttachments = { navController.navigate("attachments") },
@@ -95,6 +96,18 @@ class MainActivity : ComponentActivity() {
                             onForward = { forwardDraft ->
                                 navController.navigate("compose?draft=${Uri.encode(forwardDraft)}")
                             }
+                        )
+                    }
+
+                    composable("outbox-read/{filename}") { back ->
+                        val filename = back.arguments?.getString("filename") ?: return@composable
+                        ReadScreen(
+                            filename = filename,
+                            vm = vm,
+                            isOutbox = true,
+                            onBack = { navController.popBackStack() },
+                            onReply = {},
+                            onForward = {}
                         )
                     }
 

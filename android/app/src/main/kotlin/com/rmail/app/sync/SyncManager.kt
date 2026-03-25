@@ -74,19 +74,11 @@ class SyncManager(
                 }
             }
 
-            // Remove outbox files the server says are done
-            resp.removeOutbox.forEach { filename ->
-                store.deleteOutbox(filename)
-                newState.outbox.remove(filename)
-            }
-
             // Download new inbox files
-            resp.fetchInbox.forEach { (id, filename) ->
-                val data = client.downloadFile("inbox", filename)
-                store.writeInbox(filename, data)
-                // Infer "from" from message content
-                val from = parseFrom(data.toString(Charsets.UTF_8))
-                newState.inbox[id] = InboxEntry(filename, from)
+            resp.fetchInbox.forEach { (id, entry) ->
+                val data = client.downloadFile("inbox", entry.filename)
+                store.writeInbox(entry.filename, data)
+                newState.inbox[id] = entry
                 newCount++
             }
 
@@ -98,10 +90,20 @@ class SyncManager(
             }
 
             // Upload new outbox files created on the phone
+            val newOutboxSet = newOutbox.toSet()
             newOutbox.forEach { filename ->
                 val content = store.readOutbox(filename).toByteArray(Charsets.UTF_8)
                 client.uploadOutboxFile(filename, content)
                 newState.outbox.add(filename)
+            }
+
+            // Remove outbox files the server says are done.
+            // Skip files we just uploaded — server didn't know about them yet this cycle.
+            resp.removeOutbox.forEach { filename ->
+                if (filename !in newOutboxSet) {
+                    store.deleteOutbox(filename)
+                    newState.outbox.remove(filename)
+                }
             }
 
             // Sync contacts — phone wins if local changes exist since last sync
@@ -132,7 +134,7 @@ class SyncManager(
             // ── 5. Notify if new messages arrived ─────────────────────────
 
             if (newCount > 0) {
-                postNotification(newCount, resp.fetchInbox.values.firstOrNull())
+                postNotification(newCount, resp.fetchInbox.values.firstOrNull()?.filename)
                 return@withContext SyncResult.NewMessages(newCount)
             }
 
@@ -157,11 +159,6 @@ class SyncManager(
         val deleted = inState - onDisk        // deleted on phone since last sync
         return Pair(newFiles.toList(), deleted.toList())
     }
-
-    private fun parseFrom(content: String): String =
-        content.lines()
-            .firstOrNull { it.startsWith("from:") }
-            ?.removePrefix("from:")?.trim() ?: ""
 
     private fun postNotification(count: Int, firstFilename: String?) {
         val detail = settings.notificationDetail

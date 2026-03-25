@@ -6,7 +6,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -51,16 +52,6 @@ fun ComposeScreen(
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = {
-                            // Save as draft in outbox
-                            val filename = vm.newOutboxFilename()
-                            vm.saveOutboxFile(filename, content)
-                            onCancel()
-                        }
-                    ) {
-                        Icon(Icons.Default.Save, contentDescription = "Save draft")
-                    }
                     IconButton(
                         onClick = {
                             isSending = true

@@ -718,7 +718,6 @@ local function handle_deliver_message(data, sender)
     inbox_state[filename] = {
         ["from"] = sender,
         message_id = message_id,
-        subject = subject,
     }
     save_attachments(attachments, sender, inbox_state[filename])
     save_state("inbox.json", inbox_state)
@@ -1021,7 +1020,8 @@ local function http_read_encrypted_response(e)
             local ok2, dec = pcall(json.decode, resp_body)
             if ok2 then e.data = dec or {} end
         end
-        e.ok = (status == 200)
+        e.ok     = (status == 200)
+        e.status = status
     end
     e.phase = "done"
     e.conn:close()
@@ -2114,7 +2114,7 @@ local function sync_outbox(my_name)
             if op.skip then
                 -- already handled in Phase 2
             elseif op.type == "notify_removal" then
-                if results[i].ok then
+                if results[i].ok or results[i].status == 404 then
                     if state[op.filename] then
                         state[op.filename].recipients[op.recipient] = nil
                         remove_recipient_from_file(OUTBOX .. "/" .. op.filename, op.recipient)
@@ -2152,7 +2152,7 @@ local function sync_outbox(my_name)
                     log("failed to send attachment request to %s (will retry)", op.recipient)
                 end
             elseif op.type == "notify_deletion" then
-                if results[i].ok then
+                if results[i].ok or results[i].status == 404 then
                     if state[op.filename] and state[op.filename].recipients then
                         state[op.filename].recipients[op.recipient] = nil
                     end
@@ -2247,7 +2247,7 @@ local function sync_inbox(my_name)
         end
         local results = http_post_batch(requests)
         for i, op in ipairs(ops) do
-            if results[i].ok then
+            if results[i].ok or results[i].status == 404 then
                 state[op.filename] = nil
                 log("notified %s of inbox deletion: %s", op.sender, op.filename)
                 did_work = true
@@ -2273,11 +2273,11 @@ local function fetch_public_ip(service)
     conn:settimeout(5)
     local ok, err = conn:connect(service.host, 80)
     if not ok then conn:close(); return nil end
-    conn:send("GET " .. service.path .. " HTTP/1.1\r\n" ..
+    conn:send("GET " .. service.path .. " HTTP/1.0\r\n" ..
         "Host: " .. service.host .. "\r\nConnection: close\r\n\r\n")
 
     local status_line = conn:receive("*l")
-    if not status_line then conn:close(); return nil end
+    if not status_line or not status_line:find(" 200 ") then conn:close(); return nil end
 
     while true do
         local line = conn:receive("*l")
@@ -2287,7 +2287,8 @@ local function fetch_public_ip(service)
     local ip = conn:receive("*l")
     conn:close()
     if ip then ip = ip:match("^%s*(.-)%s*$") end
-    return ip
+    if ip and ip:match("^%d+%.%d+%.%d+%.%d+$") then return ip end
+    return nil
 end
 
 local function check_public_ip()
@@ -2314,6 +2315,8 @@ local function detect_ip_change(my_name, port)
 
     local stored_ip = read_file(STATE .. "/public_ip")
     if stored_ip then stored_ip = stored_ip:match("^%s*(.-)%s*$") end
+    -- Discard stored value if it's not a valid IP (e.g. stale HTML from old bug)
+    if stored_ip and not stored_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_ip = nil end
 
     if stored_ip == new_ip then return end
 
@@ -2740,8 +2743,8 @@ local function main()
     -- check for IP change on startup
     pcall(detect_ip_change, my_name, port)
 
-    local interval = 300
-    local MIN_INTERVAL = 60
+    local interval = 10   -- TODO: increase for production (was 300, min was 60)
+    local MIN_INTERVAL = 10
     local last_sync = socket.gettime()
 
     while true do

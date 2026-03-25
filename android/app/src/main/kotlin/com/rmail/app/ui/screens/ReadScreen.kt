@@ -19,11 +19,14 @@ import com.rmail.app.ui.MainViewModel
 fun ReadScreen(
     filename: String,
     vm: MainViewModel,
+    isOutbox: Boolean = false,
     onBack: () -> Unit,
     onReply: (String) -> Unit,
     onForward: (String) -> Unit
 ) {
-    val message = remember(filename) { vm.loadMessage(filename) }
+    val message = remember(filename) {
+        if (isOutbox) vm.loadOutboxMessage(filename) else vm.loadMessage(filename)
+    }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -35,11 +38,11 @@ fun ReadScreen(
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Delete message?") },
-            text = { Text("This will delete the message from your inbox and notify the sender.") },
+            title = { Text(if (isOutbox) "Cancel send?" else "Delete message?") },
+            text = { Text(if (isOutbox) "Remove this message from your outbox?" else "This will delete the message from your inbox and notify the sender.") },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.deleteInboxMessage(filename)
+                    if (isOutbox) vm.deleteOutboxFile(filename) else vm.deleteInboxMessage(filename)
                     showDeleteDialog = false
                     onBack()
                 }) { Text("Delete") }
@@ -60,10 +63,10 @@ fun ReadScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        onReply(buildReply(message))
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Reply")
+                    if (!isOutbox) {
+                        IconButton(onClick = { onReply(buildReply(message)) }) {
+                            Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Reply")
+                        }
                     }
                     Box {
                         IconButton(onClick = { menuExpanded = true }) {
@@ -73,13 +76,15 @@ fun ReadScreen(
                             expanded = menuExpanded,
                             onDismissRequest = { menuExpanded = false }
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("Forward") },
-                                onClick = {
-                                    menuExpanded = false
-                                    onForward(buildForward(message))
-                                }
-                            )
+                            if (!isOutbox) {
+                                DropdownMenuItem(
+                                    text = { Text("Forward") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onForward(buildForward(message))
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Delete") },
                                 onClick = {
