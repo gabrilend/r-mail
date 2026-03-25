@@ -1914,7 +1914,8 @@ local function sync_outbox(my_name)
                 current_set[e.name] = true
                 local amap = {}
                 for _, fp in ipairs(e.attachments) do
-                    amap[fp:match("([^/]+)$")] = fp
+                    local fname = fp:match("([^/]+)$")
+                    if fname then amap[fname] = fp end
                 end
                 current_attach[e.name] = amap
             end
