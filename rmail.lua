@@ -2749,6 +2749,7 @@ local function main()
 
     local interval = 10   -- TODO: increase for production (was 300, min was 60)
     local MIN_INTERVAL = 10
+    local MAX_INTERVAL = 30  -- TODO: increase for production (e.g. 3600)
     local last_sync = socket.gettime()
 
     while true do
@@ -2922,7 +2923,7 @@ local function main()
                     interval = math.max(MIN_INTERVAL, interval - 240)
                     log("had work, interval -> %ds", interval)
                 else
-                    interval = interval + 360
+                    interval = math.min(interval + 360, MAX_INTERVAL)
                     log("idle, interval -> %ds", interval)
                 end
             end)
