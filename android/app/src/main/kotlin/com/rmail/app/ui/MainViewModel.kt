@@ -45,6 +45,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _attachments = MutableStateFlow<List<AttachmentInfo>>(emptyList())
     val attachments: StateFlow<List<AttachmentInfo>> = _attachments
 
+    private val _myAddress = MutableStateFlow<String?>(null)
+    val myAddress: StateFlow<String?> = _myAddress
+
+    private val _daemonName = MutableStateFlow<String?>(null)
+    val daemonName: StateFlow<String?> = _daemonName
+
+    private val _serverLanIp = MutableStateFlow<String?>(null)
+
     init {
         // Defer to after the current composition completes (ViewModel is lazily created during
         // setContent, so Dispatchers.Main.immediate would run inline and block the first frame)
@@ -62,12 +70,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // TODO: re-evaluate sync model — consider push/inotify or longer interval for production
     private val FOREGROUND_SYNC_INTERVAL_MS = 10_000L
+    private var lastSyncTime = 0L
 
     private fun startForegroundPolling() {
         viewModelScope.launch {
             while (true) {
-                delay(FOREGROUND_SYNC_INTERVAL_MS)
-                if (_syncStatus.value != SyncStatus.SYNCING) triggerSync()
+                delay(1_000)
+                val elapsed = System.currentTimeMillis() - lastSyncTime
+                if (elapsed >= FOREGROUND_SYNC_INTERVAL_MS &&
+                    _syncStatus.value != SyncStatus.SYNCING) {
+                    triggerSync()
+                }
             }
         }
     }
@@ -82,11 +95,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _syncStatus.value = SyncStatus.SYNCING
             _syncError.value = null
-            val manager = SyncManager(getApplication(), settings, store)
+            lastSyncTime = System.currentTimeMillis()
+            val manager = SyncManager(getApplication(), settings, store, _serverLanIp.value)
             when (val result = manager.sync()) {
                 is SyncResult.Success, is SyncResult.NewMessages -> {
                     _syncStatus.value = SyncStatus.IDLE
                     refreshLocal()
+                    if (_myAddress.value == null) fetchMyAddress()
                 }
                 is SyncResult.Error -> {
                     _syncStatus.value = SyncStatus.ERROR
@@ -137,6 +152,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return "$ts.txt"
     }
 
+    fun getContactNames(): List<String> = store.parseContactNames()
+
     fun readContacts(): String = store.readContacts()
 
     fun saveContacts(content: String) {
@@ -169,39 +186,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun getMyAddress(onResult: (String?) -> Unit) {
+    private fun fetchMyAddress() {
         viewModelScope.launch {
-            if (!settings.isConfigured) { onResult(null); return@launch }
+            if (!settings.isConfigured) return@launch
             try {
                 val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
-                val addr = withContext(Dispatchers.IO) { client.getMyAddress() }
-                onResult(if (addr != null) "${addr.first}:${addr.second}" else null)
-            } catch (_: Exception) {
-                onResult(null)
-            }
+                val info = withContext(Dispatchers.IO) { client.getMyAddress() }
+                if (info != null) {
+                    _myAddress.value = "${info.ip}:${info.port}"
+                    if (info.name.isNotBlank()) _daemonName.value = info.name
+                    if (info.lanIp.isNotBlank()) _serverLanIp.value = info.lanIp
+                }
+            } catch (_: Exception) {}
         }
     }
 
     /**
-     * Upload a local file from a content URI and return its server path for the attach: line.
+     * Upload attachments in the background, updating the outbox file as each one completes.
+     * The outbox file is already saved with local URIs; this replaces them with server paths.
      */
-    fun uploadAttachmentUri(uri: Uri, onResult: (String?) -> Unit) {
+    fun uploadAttachmentsInBackground(outboxFilename: String, uris: List<Uri>) {
+        if (!settings.isConfigured || uris.isEmpty()) return
         viewModelScope.launch {
-            if (!settings.isConfigured) { onResult(null); return@launch }
-            try {
-                val filename = resolveFilename(uri) ?: "attachment"
-                val data = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.readBytes()
-                } ?: run { onResult(null); return@launch }
-
-                val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
-                val serverPath = withContext(Dispatchers.IO) {
-                    RmailClient.uploadFile(client, filename, data)
-                }
-                onResult(serverPath)
-            } catch (_: Exception) {
-                onResult(null)
+            val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+            for (uri in uris) {
+                val uriStr = uri.toString()
+                if (!uriStr.startsWith("content://") && !uriStr.startsWith("file://")) continue
+                try {
+                    val filename = resolveFilename(uri) ?: "attachment"
+                    val data = withContext(Dispatchers.IO) {
+                        getApplication<Application>().contentResolver.openInputStream(uri)?.readBytes()
+                    } ?: continue
+                    val serverPath = withContext(Dispatchers.IO) {
+                        RmailClient.uploadFile(client, filename, data)
+                    } ?: continue
+                    // Replace the local URI with the server path in the outbox file
+                    withContext(Dispatchers.IO) {
+                        val file = java.io.File(store.outbox, outboxFilename)
+                        if (file.exists()) {
+                            val text = file.readText()
+                            file.writeText(text.replace(uriStr, serverPath))
+                        }
+                    }
+                } catch (_: Exception) {}
             }
+            refreshLocal()
         }
     }
 

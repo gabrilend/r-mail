@@ -51,8 +51,9 @@ class RmailClient(
         val header = sb.toString().toByteArray(Charsets.UTF_8)
         val request = header + body
 
-        Socket(host, port).use { sock ->
-            sock.soTimeout = 30_000
+        Socket().use { sock ->
+            sock.connect(java.net.InetSocketAddress(host, port), 5_000)
+            sock.soTimeout = 10_000
             val out = sock.getOutputStream()
             val inp = sock.getInputStream()
 
@@ -217,15 +218,20 @@ class RmailClient(
         return body
     }
 
+    data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String)
+
     /**
-     * GET /api/myaddress — returns the daemon's public IP and port
+     * GET /api/myaddress — returns the daemon's public IP, port, name, and LAN IP
      */
-    fun getMyAddress(): Pair<String, Int>? {
+    fun getMyAddress(): AddressInfo? {
         return try {
             val (status, body) = get("/api/myaddress")
             if (status != 200) return null
             val obj = JSONObject(body.toString(Charsets.UTF_8))
-            Pair(obj.getString("ip"), obj.getInt("port"))
+            AddressInfo(
+                obj.getString("ip"), obj.getInt("port"),
+                obj.optString("name", ""), obj.optString("lan_ip", "")
+            )
         } catch (_: Exception) {
             null
         }

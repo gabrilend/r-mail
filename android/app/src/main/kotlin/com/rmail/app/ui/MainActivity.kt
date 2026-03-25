@@ -139,7 +139,11 @@ class MainActivity : ComponentActivity() {
                     composable("contacts") {
                         ContactsScreen(
                             vm = vm,
-                            onBack = { navController.popBackStack() }
+                            onBack = { navController.popBackStack() },
+                            onCompose = { draft ->
+                                navController.popBackStack()
+                                navController.navigate("compose?draft=${Uri.encode(draft)}")
+                            }
                         )
                     }
 

@@ -26,14 +26,26 @@ sealed class SyncResult {
 class SyncManager(
     private val context: Context,
     private val settings: Settings,
-    private val store: MailStore
+    private val store: MailStore,
+    private val serverLanIp: String? = null
 ) {
 
     suspend fun sync(): SyncResult = withContext(Dispatchers.IO) {
         if (!settings.isConfigured) return@withContext SyncResult.Error("Not configured")
 
         try {
-            val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+            // Try LAN IP first (fast, same network), fall back to configured host
+            val host = if (serverLanIp != null) {
+                try {
+                    val sock = java.net.Socket()
+                    sock.connect(java.net.InetSocketAddress(serverLanIp, settings.serverPort), 1_000)
+                    sock.close()
+                    serverLanIp
+                } catch (_: Exception) {
+                    settings.serverHost
+                }
+            } else settings.serverHost
+            val client = RmailClient(host, settings.serverPort, settings.deviceToken)
             val state = store.readSyncState()
 
             // ── 1. Compute local diff ──────────────────────────────────────
@@ -106,8 +118,8 @@ class SyncManager(
                 }
             }
 
-            // Sync contacts — phone wins if local changes exist since last sync
-            if (resp.contacts == "fetch") {
+            // Sync contacts — server includes full text when hashes differ, null when same
+            if (resp.contacts != null) {
                 val currentHash = store.contactsHash()
                 val lastHash = state.contactsHash
                 val phoneHasChanges = currentHash != null && currentHash != lastHash && lastHash != null
@@ -119,13 +131,11 @@ class SyncManager(
                         newState.contactsHash = currentHash
                     }
                 } else {
-                    // No local changes — accept server's version
-                    val serverContacts = client.getContacts()
-                    store.writeContacts(serverContacts)
+                    // No local changes — accept server's version (already in the response)
+                    store.writeContacts(resp.contacts)
                     newState.contactsHash = store.contactsHash()
                 }
             }
-            // resp.contacts == null → hashes match, nothing to do
 
             // ── 4. Persist updated state ───────────────────────────────────
 

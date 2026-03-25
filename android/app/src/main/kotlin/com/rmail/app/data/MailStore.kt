@@ -113,15 +113,16 @@ class MailStore(context: Context) {
         if (!contactsFile.exists()) return null
         val text = contactsFile.readText()
 
-        // Parse into a nested map: contactName -> (fieldKey -> rawValue)
+        // Parse into a nested map: contactName -> (fieldKey -> unquotedValue)
+        // Unquote values to match Lua's load_contacts() which strips surrounding quotes
         val contacts = mutableMapOf<String, MutableMap<String, String>>()
         for (line in text.lines()) {
             val trimmed = line.trim()
-            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("--")) continue
+            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("/")) continue
             val eqIdx = trimmed.indexOf('=')
             if (eqIdx < 0) continue
             val dotKey = trimmed.substring(0, eqIdx).trim()
-            val value = trimmed.substring(eqIdx + 1).trim()
+            val value = trimmed.substring(eqIdx + 1).trim().removeSurrounding("\"")
             val dotIdx = dotKey.lastIndexOf('.')
             if (dotIdx < 0) continue
             val name = dotKey.substring(0, dotIdx).trim()
@@ -129,16 +130,45 @@ class MailStore(context: Context) {
             contacts.getOrPut(name) { mutableMapOf() }[key] = value
         }
 
-        // Serialize canonically (sorted names, sorted keys)
+        // Serialize canonically (sorted names, sorted keys, quote non-numeric values)
+        // Must match Lua's serialize_contacts_canonical() exactly
         val lines = mutableListOf<String>()
         for (name in contacts.keys.sorted()) {
             val fields = contacts[name]!!
             for (key in fields.keys.sorted()) {
-                lines.add("$name.$key = ${fields[key]}")
+                val raw = fields[key]!!
+                val v = if (raw.matches(Regex("^\\d+$"))) raw else "\"$raw\""
+                lines.add("$name.$key = $v")
             }
+            lines.add("")  // blank line after each contact group
         }
         val canonical = lines.joinToString("\n")
         return Crypto.sha256Hex(canonical.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * Parse the contacts file and return a sorted list of contact names,
+     * excluding own-device entries (own = true).
+     */
+    fun parseContactNames(): List<String> {
+        if (!contactsFile.exists()) return emptyList()
+        val names = mutableSetOf<String>()
+        val ownDevices = mutableSetOf<String>()
+        for (line in contactsFile.readText().lines()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("//")) continue
+            val eqIdx = trimmed.indexOf('=')
+            if (eqIdx < 0) continue
+            val dotKey = trimmed.substring(0, eqIdx).trim()
+            val value = trimmed.substring(eqIdx + 1).trim().removeSurrounding("\"")
+            val dotIdx = dotKey.indexOf('.')
+            if (dotIdx < 0) continue
+            val name = dotKey.substring(0, dotIdx).trim()
+            val field = dotKey.substring(dotIdx + 1).trim()
+            if (name.isNotEmpty()) names.add(name)
+            if (field == "own" && value == "true") ownDevices.add(name)
+        }
+        return (names - ownDevices).sorted()
     }
 
     // ── Attachments cache ──────────────────────────────────────────────────

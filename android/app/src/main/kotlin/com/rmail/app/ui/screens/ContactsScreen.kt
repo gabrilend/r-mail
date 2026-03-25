@@ -2,6 +2,7 @@ package com.rmail.app.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -14,25 +15,48 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rmail.app.ui.MainViewModel
+import com.rmail.app.ui.SyncStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ContactsScreen(vm: MainViewModel, onBack: () -> Unit) {
+fun ContactsScreen(
+    vm: MainViewModel,
+    onBack: () -> Unit,
+    onCompose: (String) -> Unit
+) {
     var content by remember { mutableStateOf(vm.readContacts()) }
     var modified by remember { mutableStateOf(false) }
-    var myAddress by remember { mutableStateOf<String?>(null) }
-    var showAddressDialog by remember { mutableStateOf(false) }
-    var isFetchingAddress by remember { mutableStateOf(false) }
+    val myAddress by vm.myAddress.collectAsState()
+    val syncStatus by vm.syncStatus.collectAsState()
+    val daemonName by vm.daemonName.collectAsState()
 
-    if (showAddressDialog) {
+    val isConnected = syncStatus != SyncStatus.ERROR && vm.settings.isConfigured
+    var showOfflineDialog by remember { mutableStateOf(false) }
+
+    if (showOfflineDialog) {
         AlertDialog(
-            onDismissRequest = { showAddressDialog = false },
-            title = { Text("My address") },
+            onDismissRequest = { showOfflineDialog = false },
+            title = { Text("Can't edit contacts") },
             text = {
-                Text(myAddress ?: "Fetching from home server...")
+                Text(
+                    "The contacts file can only be edited while connected to your home server.\n\n" +
+                    "To add a contact now, send yourself a message with the details " +
+                    "and update the contacts file from your computer."
+                )
             },
             confirmButton = {
-                TextButton(onClick = { showAddressDialog = false }) { Text("OK") }
+                TextButton(onClick = {
+                    showOfflineDialog = false
+                    val to = daemonName ?: ""
+                    onCompose("to: $to\nsubject: new contact details\n")
+                }) {
+                    Text("New message")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOfflineDialog = false }) {
+                    Text("Close")
+                }
             }
         )
     }
@@ -43,32 +67,19 @@ fun ContactsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 title = { Text("Contacts") },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (modified) vm.saveContacts(content)
+                        if (modified && isConnected) vm.saveContacts(content)
                         onBack()
                     }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
-                    // "My address" button — queries daemon for public IP
-                    if (isFetchingAddress) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp).padding(end = 8.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        IconButton(onClick = {
-                            isFetchingAddress = true
-                            vm.getMyAddress { addr ->
-                                myAddress = addr ?: "Could not reach home server"
-                                isFetchingAddress = false
-                                showAddressDialog = true
-                            }
-                        }) {
-                            Icon(Icons.Default.Info, contentDescription = "My address")
+                    if (!isConnected) {
+                        IconButton(onClick = { showOfflineDialog = true }) {
+                            Icon(Icons.Default.Info, contentDescription = "Offline info")
                         }
                     }
-                    if (modified) {
+                    if (modified && isConnected) {
                         IconButton(onClick = {
                             vm.saveContacts(content)
                             modified = false
@@ -81,33 +92,55 @@ fun ContactsScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (!vm.settings.isConfigured) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            // My address — shown for reference when adding new contacts
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (myAddress != null) "My address: $myAddress"
+                    else if (!vm.settings.isConfigured) "Not configured"
+                    else "Connecting...",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            if (isConnected) {
+                BasicTextField(
+                    value = content,
+                    onValueChange = { content = it; modified = true },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp),
+                    textStyle = TextStyle(
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                )
+            } else {
+                // Read-only: selectable text, no editing
+                SelectionContainer {
                     Text(
-                        "Offline — contacts are read-only until the home server is reachable.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(8.dp)
+                        text = content.ifEmpty { "(no contacts)" },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        style = TextStyle(
+                            color = MaterialTheme.colorScheme.onBackground.copy(
+                                alpha = 0.7f
+                            ),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp
+                        )
                     )
                 }
             }
-
-            BasicTextField(
-                value = content,
-                onValueChange = { content = it; modified = true },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                textStyle = TextStyle(
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp
-                ),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-            )
         }
     }
 }
