@@ -706,6 +706,7 @@ local function handle_deliver_message(data, sender)
         if transformed and transformed ~= "" then body = transformed end
     end
 
+    body = body:gsub("^[\n\r]+", "")
     write_file(target, body)
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
