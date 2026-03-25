@@ -46,11 +46,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val attachments: StateFlow<List<AttachmentInfo>> = _attachments
 
     init {
-        refreshLocal()
-        if (settings.isConfigured) {
-            triggerSync()
-            SyncWorker.schedule(application, settings.bgSyncIntervalMinutes)
-            startForegroundPolling()
+        // Defer to after the current composition completes (ViewModel is lazily created during
+        // setContent, so Dispatchers.Main.immediate would run inline and block the first frame)
+        viewModelScope.launch(Dispatchers.Main) {
+            refreshLocal()
+            if (settings.isConfigured) {
+                triggerSync()
+                withContext(Dispatchers.IO) {
+                    SyncWorker.schedule(application, settings.bgSyncIntervalMinutes)
+                }
+                startForegroundPolling()
+            }
         }
     }
 
@@ -211,7 +217,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onSettingsSaved() {
-        SyncWorker.schedule(getApplication(), settings.bgSyncIntervalMinutes)
-        triggerSync()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                SyncWorker.schedule(getApplication(), settings.bgSyncIntervalMinutes)
+            }
+            triggerSync()
+        }
     }
 }
