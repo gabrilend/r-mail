@@ -2028,6 +2028,14 @@ local function sync_outbox(my_name)
                                     end
                                 end
                             end
+                            -- Body delivered, no more attach: lines in file — all work done.
+                            -- Remove the recipient now; delete the outbox file if they were last.
+                            if #entry.attachments == 0 then
+                                state[name].recipients[rname] = nil
+                                remove_recipient_from_file(OUTBOX .. "/" .. name, rname)
+                                log("delivery complete for %s -> %s", name, rname)
+                                did_work = true
+                            end
                         end
                     end
                 end
