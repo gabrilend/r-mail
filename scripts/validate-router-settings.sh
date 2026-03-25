@@ -59,6 +59,33 @@ echo "$PUBLIC_IP"
 printf "  Port:                   %s\n" "$PORT"
 echo ""
 
+# --- Local port check ---
+LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')
+if [ -z "$LOCAL_IP" ]; then
+    LOCAL_IP=$(ip -4 addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*scope global.*/\1/p' | head -1)
+fi
+if [ -n "$LOCAL_IP" ]; then
+    printf "  Local IP:               %s\n" "$LOCAL_IP"
+    printf "  Checking local port...  "
+    curl -s --max-time 2 "http://$LOCAL_IP:$PORT/" >/dev/null 2>&1
+    LOCAL_EXIT=$?
+    if [ "$LOCAL_EXIT" -eq 28 ]; then
+        fail "timed out"
+        info "Port $PORT is not reachable on $LOCAL_IP."
+        info "Is the port open in your firewall? Is the daemon running?"
+    elif [ "$LOCAL_EXIT" -eq 7 ]; then
+        warn "connection refused"
+        info "Port $PORT on $LOCAL_IP refused the connection."
+        info "Is the rmail daemon running?"
+    else
+        ok "port $PORT is open on $LOCAL_IP"
+    fi
+    echo ""
+else
+    info "Could not determine local IP — skipping local port check."
+    echo ""
+fi
+
 # --- Hairpin NAT test ---
 # rmail uses TLS-PSK, so a plain curl will fail at the TLS layer — but that
 # still means the TCP connection reached the machine, which is all we need.

@@ -1028,6 +1028,9 @@ local function http_read_encrypted_response(e)
     e.conn:close()
 end
 
+-- Hook for LAN IP resolution. Set by main() to enable same-network optimization.
+local resolve_lan_host = nil
+
 local function http_post_batch(requests)
     if #requests == 0 then return {} end
 
@@ -1035,9 +1038,13 @@ local function http_post_batch(requests)
     local lookup = {}
 
     for i, req in ipairs(requests) do
+        local host = req.host
+        if resolve_lan_host then
+            host = resolve_lan_host(req.host, req.port) or host
+        end
         local conn = socket.tcp()
         conn:settimeout(0)
-        conn:connect(req.host, req.port)
+        conn:connect(host, req.port)
         entries[i] = {
             conn = conn, req = req,
             phase = "connecting",
@@ -1854,6 +1861,44 @@ local function handle_deliver(data, sender)
     end
 end
 
+-- self-delivery helpers: handle messages sent to own name without network
+local function self_delete_from_inbox(my_name, message_id)
+    local inbox_state = load_state("inbox.json")
+    for filename, meta in pairs(inbox_state) do
+        if meta.message_id == message_id and meta["from"] == my_name then
+            if file_exists(INBOX .. "/" .. filename) then
+                os.remove(INBOX .. "/" .. filename)
+                log("self-delete from inbox: %s", filename)
+            end
+            if ON_DELETE then run_hook(ON_DELETE, my_name) end
+            delete_inbox_attachments(meta)
+            inbox_state[filename] = nil
+            save_state("inbox.json", inbox_state)
+            return
+        end
+    end
+end
+
+local function self_delete_from_outbox(my_name, message_id)
+    local outbox_state = load_state("outbox.json")
+    for filename, meta in pairs(outbox_state) do
+        if meta.recipients then
+            for recipient, rmeta in pairs(meta.recipients) do
+                if rmeta.message_id == message_id and rmeta.self then
+                    if ON_DELETE then run_hook(ON_DELETE, my_name) end
+                    meta.recipients[recipient] = nil
+                    remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
+                    if not next(meta.recipients) then
+                        outbox_state[filename] = nil
+                    end
+                    save_state("outbox.json", outbox_state)
+                    return
+                end
+            end
+        end
+    end
+end
+
 local function sync_outbox(my_name)
     local contacts = load_contacts()
     local state = load_state("outbox.json")
@@ -1932,7 +1977,11 @@ local function sync_outbox(my_name)
             -- removed recipients (sender deleted a to: line)
             for recipient, rmeta in pairs(state[name].recipients) do
                 if not current_set[recipient] then
-                    if contacts[recipient] then
+                    if rmeta.self then
+                        self_delete_from_inbox(my_name, rmeta.message_id)
+                        state[name].recipients[recipient] = nil
+                        did_work = true
+                    elseif contacts[recipient] then
                         ops[#ops + 1] = {
                             type = "notify_removal", filename = name,
                             recipient = recipient, message_id = rmeta.message_id,
@@ -1950,7 +1999,47 @@ local function sync_outbox(my_name)
                     local rname = entry.name
                     if not state[name].recipients[rname] then
                         -- new recipient: deliver message body only
-                        if contacts[rname] then
+                        if rname == my_name then
+                            -- self-delivery: write directly to own inbox
+                            local inbox_state = load_state("inbox.json")
+                            local msg_id = uuid()
+                            local inbox_name = sanitize_filename(name)
+                            local target = INBOX .. "/" .. inbox_name
+                            if file_exists(target) then
+                                local existing = inbox_state[inbox_name]
+                                if existing and existing["from"] ~= my_name then
+                                    inbox_name = sanitize_filename(name .. "-from-" .. my_name)
+                                    target = INBOX .. "/" .. inbox_name
+                                end
+                            end
+                            local inbox_body = body or ""
+                            if ON_SEND then
+                                local transformed = run_hook(ON_SEND, my_name, name, inbox_body)
+                                if transformed and transformed ~= "" then inbox_body = transformed end
+                            end
+                            if ON_RECEIVE_RAW then
+                                local transformed = run_hook(ON_RECEIVE_RAW, my_name, name, inbox_body)
+                                if transformed and transformed ~= "" then inbox_body = transformed end
+                            end
+                            inbox_body = inbox_body:gsub("^[\n\r]+", "")
+                            write_file(target, inbox_body)
+                            inbox_state[inbox_name] = {
+                                ["from"] = my_name,
+                                message_id = msg_id,
+                            }
+                            save_state("inbox.json", inbox_state)
+                            if ON_RECEIVE then
+                                os.execute(ON_RECEIVE .. " " ..
+                                    shell_quote(my_name) .. " " .. shell_quote(name) .. " " ..
+                                    shell_quote(target) .. " &")
+                            end
+                            state[name].recipients[my_name] = {
+                                message_id = msg_id,
+                                self = true,
+                            }
+                            log("self-delivered: %s -> %s", name, inbox_name)
+                            did_work = true
+                        elseif contacts[rname] then
                             ops[#ops + 1] = {
                                 type = "deliver", filename = name,
                                 recipient = rname, message_id = uuid(),
@@ -2028,14 +2117,10 @@ local function sync_outbox(my_name)
                                     end
                                 end
                             end
-                            -- Body delivered, no more attach: lines in file — all work done.
-                            -- Remove the recipient now; delete the outbox file if they were last.
-                            if #entry.attachments == 0 then
-                                state[name].recipients[rname] = nil
-                                remove_recipient_from_file(OUTBOX .. "/" .. name, rname)
-                                log("delivery complete for %s -> %s", name, rname)
-                                did_work = true
-                            end
+                            -- Recipient stays in state after delivery.
+                            -- Cleanup happens when recipient deletes from
+                            -- inbox (they send /delete) or sender removes
+                            -- the to: line / deletes the outbox file.
                         end
                     end
                 end
@@ -2047,7 +2132,11 @@ local function sync_outbox(my_name)
     for name, meta in pairs(state) do
         if not current[name] and meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
-                if contacts[recipient] then
+                if rmeta.self then
+                    self_delete_from_inbox(my_name, rmeta.message_id)
+                    meta.recipients[recipient] = nil
+                    did_work = true
+                elseif contacts[recipient] then
                     ops[#ops + 1] = {
                         type = "notify_deletion", filename = name,
                         recipient = recipient, message_id = rmeta.message_id,
@@ -2234,7 +2323,12 @@ local function sync_inbox(my_name)
                 did_work = true
             end
             local sender = meta["from"] or ""
-            if contacts[sender] then
+            if sender == my_name then
+                -- self-sent message deleted from inbox: remove from outbox
+                self_delete_from_outbox(my_name, meta.message_id)
+                state[name] = nil
+                did_work = true
+            elseif contacts[sender] then
                 ops[#ops + 1] = {
                     filename = name, sender = sender,
                     message_id = meta.message_id,
@@ -2474,9 +2568,10 @@ local function handle_peer_address(contact_name)
 end
 
 -- GET /api/myaddress — return this daemon's current public IP and configured port.
-local function handle_api_myaddress(port)
+local function handle_api_myaddress(my_name, port)
     local ip = check_public_ip()
-    return 200, {ip = ip or "", port = port}
+    local lan_ip = nat_get_local_ip()
+    return 200, {ip = ip or "", port = port, name = my_name, lan_ip = lan_ip or ""}
 end
 
 -- POST /api/sync — core phone sync endpoint.
@@ -2560,11 +2655,11 @@ local function handle_api_sync(data, caller_name)
         if not server_outbox_set[fname] then remove_outbox[#remove_outbox+1] = fname end
     end
 
-    -- contacts: "fetch" when hashes differ, null when same
-    local contacts_action = nil
+    -- contacts: include full text when hashes differ, omit when same
+    local contacts_text = nil
     local phone_hash = data.contacts_hash
-    if phone_hash and phone_hash ~= canonical_contacts_hash() then
-        contacts_action = "fetch"
+    if not phone_hash or phone_hash ~= canonical_contacts_hash() then
+        contacts_text = serialize_contacts_canonical()
     end
 
     return 200, {
@@ -2572,7 +2667,7 @@ local function handle_api_sync(data, caller_name)
         remove_inbox  = remove_inbox,
         fetch_outbox  = fetch_outbox,
         remove_outbox = remove_outbox,
-        contacts      = contacts_action,
+        contacts      = contacts_text,
     }
 end
 
@@ -2759,6 +2854,53 @@ local function main()
     -- check for IP change on startup
     pcall(detect_ip_change, my_name, port)
 
+    -- check for LAN IP change on startup
+    pcall(function()
+        local new_lan_ip = nat_get_local_ip()
+        if not new_lan_ip then return end
+        local stored_lan_ip = read_file(STATE .. "/lan_ip")
+        if stored_lan_ip then stored_lan_ip = stored_lan_ip:match("^%s*(.-)%s*$") end
+        if stored_lan_ip and not stored_lan_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_lan_ip = nil end
+        write_file(STATE .. "/lan_ip", new_lan_ip)
+        if not stored_lan_ip then
+            log("LAN IP recorded: %s", new_lan_ip)
+            return
+        end
+        if stored_lan_ip == new_lan_ip then return end
+        log("LAN IP changed: %s -> %s", stored_lan_ip, new_lan_ip)
+        if AUTO_PORT_FORWARD then
+            log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP")
+            return
+        end
+        write_file(INBOX .. "/lan-ip-changed", string.format(
+            "Your local IP address changed from %s to %s.\n\n" ..
+            "If you use manual port forwarding, your router is still forwarding port %d\n" ..
+            "to %s. Update your router's port forwarding rule to point to %s instead,\n" ..
+            "or set a DHCP reservation / static IP so this doesn't happen again.",
+            stored_lan_ip, new_lan_ip, port, stored_lan_ip, new_lan_ip))
+    end)
+
+    -- LAN peer cache: contact_name -> LAN IP (learned from incoming connections)
+    local lan_peers = {}
+
+    -- Enable same-network optimization: when a contact's IP matches our public IP,
+    -- use their cached LAN IP instead to avoid hairpin NAT.
+    resolve_lan_host = function(host, target_port)
+        local my_public = read_file(STATE .. "/public_ip")
+        if not my_public then return nil end
+        my_public = my_public:match("^%s*(.-)%s*$")
+        if host ~= my_public then return nil end
+        -- This contact is behind the same router — find their LAN IP
+        local contacts = load_contacts()
+        for name, c in pairs(contacts) do
+            if c.ip == host and tostring(c.port or "") == tostring(target_port) and lan_peers[name] then
+                log("same-network: using LAN IP %s for %s (instead of %s)", lan_peers[name], name, host)
+                return lan_peers[name]
+            end
+        end
+        return nil
+    end
+
     local interval = 10   -- TODO: increase for production (was 300, min was 60)
     local MIN_INTERVAL = 10
     local MAX_INTERVAL = 30  -- TODO: increase for production (e.g. 3600)
@@ -2802,6 +2944,22 @@ local function main()
                 if not plaintext then
                     log("decryption failed: no matching contact key")
                     return
+                end
+
+                -- Cache the peer's LAN IP for same-network optimization.
+                -- Only cache if: the peer sent us a private IP (meaning they're on our LAN)
+                -- AND their configured public IP matches ours (confirming same network).
+                local peer_ip = client:getpeername()
+                if peer_ip and contact_name then
+                    local is_private = peer_ip:match("^192%.168%.") or
+                                       peer_ip:match("^10%.") or peer_ip:match("^172%.")
+                    if is_private then
+                        local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+                        local cc = load_contacts()
+                        if cc[contact_name] and cc[contact_name].ip == my_public then
+                            lan_peers[contact_name] = peer_ip
+                        end
+                    end
                 end
 
                 local method, path, headers, body = parse_request_string(plaintext)
@@ -2849,7 +3007,7 @@ local function main()
                     else
                         local fn
                         if method == "GET" and path == "/api/myaddress" then
-                            local s, r = handle_api_myaddress(port)
+                            local s, r = handle_api_myaddress(my_name, port)
                             send_response(resp, s, r)
                         elseif method == "GET" and path == "/api/contacts" then
                             local s, ct, c = handle_api_get_contacts()
