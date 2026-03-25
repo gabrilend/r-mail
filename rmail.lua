@@ -1335,7 +1335,9 @@ local function handle_attachment_request(data, sender)
     if total and total > 0 then
         pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
     end
-    local consent_file = sanitize_filename(att_id .. "-attachment")
+    local base = filename:gsub("%.[^%.]+$", "")
+    if base == "" then base = filename end
+    local consent_file = sanitize_filename(base .. "-attachment")
     write_file(INBOX .. "/" .. consent_file, string.format(
         "%s wants to send you an attachment.\n\n" ..
         "  File:          %s\n" ..
