@@ -96,14 +96,14 @@ For full details on the attachment workflow, per-recipient targeting, configurat
 - **OpenSSL** — AES-256-GCM encryption
 - **zip / unzip** — file compression for attachment transfer
 
-Run `scripts/install.sh` to compile all dependencies from source into the r-mail directory.
+Run `./scripts/install.sh` to compile all dependencies from source into the r-mail directory.
 
 ## Installation
 
 ```sh
 git clone https://github.com/gabrilend/r-mail.git
 cd r-mail
-scripts/install.sh
+./scripts/install.sh
 ```
 
 `install.sh` compiles all dependencies from source into `libs/`, and generates your config and contacts files. It will ask whether to compile Lua locally or use your system version.
@@ -132,7 +132,7 @@ The generated config file contains a comment above every available key explainin
 
 ### Contacts file
 
-`~/mail/contacts` is a line-oriented file listing the people you communicate with. Lines starting with `//` or `#` are comments.
+`~/mail/contacts` is a line-oriented file listing the people you communicate with. Lines starting with `//` or `#` are comments. Text must be within "quotes" but numbers are okay on their own.
 
 ```
 alice.ip    = 203.0.113.1
@@ -154,9 +154,9 @@ You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores 
 
 Each person runs their daemon on a single port. Unless provided, the install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.
 
-The only thing your contacts need from you is your **router's public IP** and your **port number**. That's what goes in their contacts file. Local/LAN IP addresses are never shared with contacts.
+The only thing your contacts need from you is your **router's public IP** and the **port number** you'd like your router to "route" the messages to. These two numbers are what goes in their contacts file.
 
-You will need your local IP however, when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
+Local/LAN IP addresses are never shared with contacts, but you will need your local IP when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
 
 | Person | Router forward config      | What contacts put in their file |
 |--------|----------------------------|---------------------------------|
@@ -226,7 +226,7 @@ This returns `{"ok":true,"name":"yourname"}` if everything is working. You can a
 Once the firewall is open, run the connectivity check to verify your router settings:
 
 ```sh
-scripts/validate-router-settings.sh
+./scripts/validate-router-settings.sh
 ```
 
 This checks whether your router supports hairpin NAT (needed for contacts on the same router to talk to each other) and whether UPnP is enabled in the router settings (a security concern). It reads your port from the config file automatically.
@@ -240,7 +240,7 @@ This checks whether your router supports hairpin NAT (needed for contacts on the
 
 If you cannot access your router's admin panel (shared housing, restrictive ISP, etc.), rmail can attempt automatic port forwarding.
 
-1. Run `scripts/install.sh` — it offers to compile `upnpc` and `natpmpc` from source.
+1. Run `./scripts/install.sh` — it offers to compile `upnpc` and `natpmpc` from source.
 
 2. Enable in `~/.config/rmail/config`:
 
@@ -278,7 +278,7 @@ The protocol:
 - The AES key is `SHA256(token)` — a 32-byte key derived from the contact's token
 - The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in cleartext — only destination IP and port are visible to an observer.
 
-`rmail_crypto.so` (compiled from source by `scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
+`rmail_crypto.so` (compiled from source by `./scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
 
 ## Dynamic IP
 
@@ -312,11 +312,11 @@ Hooks are a powerful feature — any executable works, in any language. For full
 
 **"dkjson.lua not found"** — make sure `libs/dkjson.lua` exists next to `rmail.lua`. If you moved the script, move the `libs/` directory with it.
 
-**"luasocket not found"** — run `scripts/install.sh` to compile it locally.
+**"luasocket not found"** — run `./scripts/install.sh` to compile it locally.
 
-**"rmail_crypto.so not found"** — run `scripts/install.sh` to compile it from source. OpenSSL headers are required.
+**"rmail_crypto.so not found"** — run `./scripts/install.sh` to compile it from source. OpenSSL headers are required.
 
-**"zip not found" or "unzip not found"** — run `scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
+**"zip not found" or "unzip not found"** — run `./scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
 
 **Messages not sending** — this is almost always a port issue. Check these in order:
 1. Is the recipient's daemon actually running?

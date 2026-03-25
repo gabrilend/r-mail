@@ -1,0 +1,6 @@
+we should add the ability to detect when the DHCP reservation changes.
+If the LAN ip changes, the port might stop being forwarded. Not ideal.
+If we can warn the users "hey your port changed, please re-open the port"
+and also
+"hey you might want to either make a DHCP reservation or a static IP address"
+that would help a lot.
