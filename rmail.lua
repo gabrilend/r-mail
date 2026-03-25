@@ -1215,7 +1215,7 @@ local function encode_attachments(filepaths)
         local raw = read_file_binary(filepath)
         if raw then
             result[#result + 1] = {
-                filename = filepath:match("([^/]+)$"),
+                filename = filepath:gsub("/+$", ""):match("([^/]+)$"),
                 attachment_id = uuid(),
                 data = mime.b64(raw),
             }
@@ -1914,7 +1914,7 @@ local function sync_outbox(my_name)
                 current_set[e.name] = true
                 local amap = {}
                 for _, fp in ipairs(e.attachments) do
-                    local fname = fp:match("([^/]+)$")
+                    local fname = fp:gsub("/+$", ""):match("([^/]+)$")
                     if fname then amap[fname] = fp end
                 end
                 current_attach[e.name] = amap
@@ -1972,7 +1972,7 @@ local function sync_outbox(my_name)
                                 end
                                 if not in_progress then
                                     local att_id = uuid()
-                                    local basename = filepath:match("([^/]+)$") or filepath
+                                    local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
                                     local expected_size = measure_size(filepath) or 0
                                     -- find existing zip for this file (shared across recipients)
                                     local zip_id, zip_path, checksum, total_chunks
