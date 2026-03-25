@@ -36,9 +36,18 @@ fun ComposeScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            // Insert attach: line at end of content (before trailing newlines)
-            val trimmed = content.trimEnd('\n')
-            content = "$trimmed\nattach: $uri\n"
+            // Insert attach: line after the last to:/attach: header line (before blank line + body)
+            val lines = content.lines().toMutableList()
+            val lastHeaderIdx = lines.indexOfLast { l ->
+                val lower = l.trim().lowercase()
+                lower.startsWith("to:") || lower.startsWith("attach:")
+            }
+            if (lastHeaderIdx >= 0) {
+                lines.add(lastHeaderIdx + 1, "attach: $uri")
+            } else {
+                lines.add(0, "attach: $uri")
+            }
+            content = lines.joinToString("\n")
         }
     }
 

@@ -2050,6 +2050,10 @@ local function sync_outbox(my_name)
         end
     end
 
+    -- track which outbox files had ops this cycle (to avoid premature cleanup on delivery failure)
+    local files_with_ops = {}
+    for _, op in ipairs(ops) do files_with_ops[op.filename] = true end
+
     -- Phase 2: encode attachments and build requests
     if #ops > 0 then
         local requests = {}
@@ -2187,9 +2191,9 @@ local function sync_outbox(my_name)
         end
     end
 
-    -- clean up files with no recipients left
+    -- clean up files with no recipients left (skip files that had ops this cycle to allow retry)
     for name in pairs(current) do
-        if state[name] and not next(state[name].recipients) then
+        if state[name] and not next(state[name].recipients) and not files_with_ops[name] then
             os.remove(OUTBOX .. "/" .. name)
             log("cleaned up %s: no recipients left", name)
             state[name] = nil
