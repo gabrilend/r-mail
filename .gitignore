@@ -6,6 +6,16 @@ libs/*
 # local config used for testing
 config
 
+# Generated service/nix files (machine-specific, created by install.sh)
+rmail.nix
+rmail.service
+rmail-run
+rmail-log-run
+rmail-init
+
+# Build temp files
+.build-tmp/
+
 # Android SDK path (machine-specific)
 android/local.properties
 # Android build outputs

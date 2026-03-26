@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 // Update this once the docs are published on GitHub
-private const val SETUP_GUIDE_URL = "https://github.com/TODO/blob/main/docs/android-instructions.md"
+private const val SETUP_GUIDE_URL = "https://github.com/gabrilend/r-mail/blob/main/docs/android-instructions.md"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,7 +48,6 @@ fun SetupScreen(
     var host by remember { mutableStateOf(editConfig?.host ?: "") }
     var port by remember { mutableStateOf(editConfig?.port?.toString() ?: "8025") }
     var token by remember { mutableStateOf(editConfig?.token ?: "") }
-    var displayName by remember { mutableStateOf(editConfig?.name ?: "") }
     var connecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var scanning by remember { mutableStateOf(false) }
@@ -104,15 +103,6 @@ fun SetupScreen(
             }
 
             OutlinedTextField(
-                value = displayName,
-                onValueChange = { displayName = it },
-                label = { Text("Name (optional)") },
-                placeholder = { Text("e.g. Home, Work") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
                 value = host,
                 onValueChange = { host = it; errorMessage = null; scanMessage = null },
                 label = { Text("Home router IP") },
@@ -161,13 +151,28 @@ fun SetupScreen(
                     scanProgress = 0f
                     scanMessage = null
                     scope.launch {
-                        val found = scanForRmailPort(host.trim(), token.trim()) { scanProgress = it }
+                        // Try the entered host first
+                        val found = scanForRmailPort(host.trim(), token.trim()) { scanProgress = it * 0.5f }
                         if (found != null) {
                             port = found.toString()
                             scanMessage = "Found on port $found"
-                        } else {
-                            scanMessage = "No r-mail server found (ports 1024–10000)"
+                            scanning = false
+                            return@launch
                         }
+                        // If not found and we know the gateway, try LAN IPs
+                        if (gateway != null) {
+                            scanMessage = "Trying local network..."
+                            val lanPrefix = gateway!!.substringBeforeLast('.') + "."
+                            val lanFound = scanLanForRmailPort(lanPrefix, token.trim()) { scanProgress = 0.5f + it * 0.5f }
+                            if (lanFound != null) {
+                                host = lanFound.first
+                                port = lanFound.second.toString()
+                                scanMessage = "Found at ${lanFound.first}:${lanFound.second} (local network)"
+                                scanning = false
+                                return@launch
+                            }
+                        }
+                        scanMessage = "No r-mail server found. Make sure your phone is connected to the same WiFi as your home server."
                         scanning = false
                     }
                 },
@@ -257,14 +262,12 @@ fun SetupScreen(
 
                     val config = if (editConfig != null) {
                         editConfig.copy(
-                            name = displayName.trim(),
                             host = host.trim(),
                             port = portInt,
                             token = token.trim()
                         )
                     } else {
                         MailboxConfig(
-                            name = displayName.trim(),
                             host = host.trim(),
                             port = portInt,
                             token = token.trim()
@@ -323,7 +326,7 @@ private suspend fun scanForRmailPort(
     token: String,
     onProgress: (Float) -> Unit
 ): Int? = withContext(Dispatchers.IO) {
-    val ports = (1024..10000).toList()
+    val ports = (1024..65535).toList()
     val total = ports.size
     val semaphore = Semaphore(150)
     val result = AtomicReference<Int?>(null)
@@ -344,11 +347,45 @@ private suspend fun scanForRmailPort(
     result.get()
 }
 
+/**
+ * Scan LAN IPs (x.x.x.1-254) on common rmail ports.
+ * Returns Pair(ip, port) or null.
+ */
+private suspend fun scanLanForRmailPort(
+    lanPrefix: String,
+    token: String,
+    onProgress: (Float) -> Unit
+): Pair<String, Int>? = withContext(Dispatchers.IO) {
+    // Common ports: low range (8000-8100) + install.sh range (50000-65000)
+    val commonPorts = (8000..8100) + (50000..65000)
+    val ips = (1..254).map { "$lanPrefix$it" }
+    val total = ips.size * commonPorts.size
+    val semaphore = Semaphore(200)
+    val result = AtomicReference<Pair<String, Int>?>(null)
+    val scanned = AtomicInteger(0)
+
+    coroutineScope {
+        for (ip in ips) {
+            for (p in commonPorts) {
+                launch {
+                    semaphore.withPermit {
+                        if (result.get() == null && probeRmailPort(ip, p, token)) {
+                            result.compareAndSet(null, Pair(ip, p))
+                        }
+                        onProgress(scanned.incrementAndGet().toFloat() / total)
+                    }
+                }
+            }
+        }
+    }
+    result.get()
+}
+
 private fun probeRmailPort(host: String, port: Int, token: String): Boolean {
     return try {
         val socket = Socket()
-        socket.connect(InetSocketAddress(host, port), 300)
-        socket.soTimeout = 1000
+        socket.connect(InetSocketAddress(host, port), 800)
+        socket.soTimeout = 2000
         val key = Crypto.keyFromToken(token)
         val req = "GET /api/myaddress HTTP/1.0\r\nContent-Length: 0\r\n\r\n".toByteArray()
         socket.getOutputStream().write(Crypto.encryptFrame(req, key))
