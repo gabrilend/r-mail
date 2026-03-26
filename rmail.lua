@@ -1148,6 +1148,11 @@ local function http_read_encrypted_response(e)
         end
         e.ok     = (status == 200)
         e.status = status
+        if not e.ok then
+            log("response from %s:%d status=%s", e.req.host, e.req.port, tostring(status))
+        end
+    else
+        log("no response from %s:%d (connection may have failed)", e.req.host, e.req.port)
     end
     e.phase = "done"
     e.conn:close()
@@ -1168,7 +1173,11 @@ local function http_post_batch(requests)
     for i, req in ipairs(requests) do
         local host = req.host
         if resolve_lan_host then
-            host = resolve_lan_host(req.host, req.port) or host
+            local lan_host = resolve_lan_host(req.host, req.port)
+            if lan_host and lan_host ~= host then
+                log("using LAN IP %s instead of %s", lan_host, host)
+                host = lan_host
+            end
         end
         local conn = socket.tcp()
         conn:settimeout(0)
@@ -1236,7 +1245,7 @@ local function http_post_batch(requests)
             end
             e.conn:close()
         end
-        results[i] = {ok = e.ok, data = e.data}
+        results[i] = {ok = e.ok, status = e.status, data = e.data}
     end
     return results
 end
@@ -1877,15 +1886,16 @@ local function send_next_chunks(my_name)
                 }),
                 psk_key = contact.token,
             }})
+            local resp = results[1].data or {}
             if results[1].ok then
                 -- receiver tells us what's still missing
-                local new_missing = results[1].missing
+                local new_missing = resp.missing
                 if type(new_missing) == "table" then
                     transfer.missing = new_missing
                 end
                 changed = true; did_work = true
                 if #transfer.missing == 0 then break end
-            elseif results[1].cancelled then
+            elseif resp.cancelled then
                 log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
                 cancelled = true; break
             else
