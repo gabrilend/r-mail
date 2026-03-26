@@ -2,11 +2,48 @@
 -- rmail - file-based messaging daemon
 
 -- ============================================================
--- Configuration (loaded from ~/.config/rmail/config)
+-- Configuration
 -- ============================================================
 
-local CONFIG_PATH = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config"
+-- Resolve the mail directory from the command-line argument.
+-- Usage: lua rmail.lua /path/to/mailbox
+local MAIL_ARG = arg and arg[1]
+if not MAIL_ARG or MAIL_ARG == "" then
+    io.stderr:write("usage: rmail.lua <mailbox-directory>\n")
+    io.stderr:write("  e.g. lua rmail.lua ~/mail\n")
+    os.exit(1)
+end
+-- expand ~ to HOME
+MAIL_ARG = MAIL_ARG:gsub("^~", os.getenv("HOME") or "/tmp")
+-- strip trailing slashes
+MAIL_ARG = MAIL_ARG:gsub("/+$", "")
 
+-- Find config file:
+-- 1. Symlink at <mailbox>/config (preferred — survives renames)
+-- 2. Derived path: ~/.config/rmail/config-<path-with-dashes>
+-- 3. Error out
+local function find_config_path(mail_dir)
+    -- try symlink/file in the mailbox directory
+    local symlink_path = mail_dir .. "/config"
+    local f = io.open(symlink_path, "r")
+    if f then f:close(); return symlink_path end
+    -- derive from mail directory path: /home/ritz/mail -> config-home-ritz-mail
+    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
+    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
+    f = io.open(derived, "r")
+    if f then f:close(); return derived end
+    return nil
+end
+
+local CONFIG_PATH = find_config_path(MAIL_ARG)
+if not CONFIG_PATH then
+    io.stderr:write("error: no config file found\n")
+    io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
+    local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
+    io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
+    io.stderr:write("  run scripts/install.sh to create one\n")
+    os.exit(1)
+end
 
 local function load_config()
     local f = io.open(CONFIG_PATH, "r")
@@ -32,7 +69,7 @@ end
 local config = load_config()
 
 -- Consolidated path constants (reduces upvalue count for Lua/LuaJIT 60-upvalue limit)
-local MAIL = config.mail or (os.getenv("HOME") .. "/mail")
+local MAIL = MAIL_ARG
 local paths = {
     inbox       = MAIL .. "/inbox",
     outbox      = MAIL .. "/outbox",
@@ -2702,7 +2739,7 @@ end
 
 -- POST /api/sync — core phone sync endpoint.
 -- Phone sends its current state; server responds with what to fetch/remove.
-local function handle_api_sync(data, caller_name)
+local function handle_api_sync(data, caller_name, my_name)
     local phone_inbox    = data.inbox or {}          -- {message_id -> filename}
     local deleted_inbox  = data.deleted_inbox or {}  -- [{message_id, from}]
     local phone_outbox   = data.outbox or {}         -- ["filename", ...]
@@ -2789,11 +2826,13 @@ local function handle_api_sync(data, caller_name)
     end
 
     return 200, {
-        fetch_inbox   = fetch_inbox,
-        remove_inbox  = remove_inbox,
-        fetch_outbox  = fetch_outbox,
-        remove_outbox = remove_outbox,
-        contacts      = contacts_text,
+        fetch_inbox    = fetch_inbox,
+        remove_inbox   = remove_inbox,
+        fetch_outbox   = fetch_outbox,
+        remove_outbox  = remove_outbox,
+        contacts       = contacts_text,
+        mailbox_name   = my_name,
+        mailbox_path   = MAIL,
     }
 end
 
@@ -3334,7 +3373,7 @@ local function main()
                             send_response(resp, s, r)
                         elseif method == "POST" and path == "/api/sync" then
                             local data = json.decode(body or "{}") or {}
-                            local s, r = handle_api_sync(data, contact_name)
+                            local s, r = handle_api_sync(data, contact_name, my_name)
                             send_response(resp, s, r)
                         elseif method == "GET" and path:match("^/api/file/inbox/(.+)$") then
                             fn = path:match("^/api/file/inbox/(.+)$")

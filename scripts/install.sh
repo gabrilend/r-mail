@@ -165,7 +165,191 @@ download() {
 }
 
 # ============================================================
-# 1. C compiler
+# 1. Configuration (ask first, before dependency checks)
+# ============================================================
+
+echo ""
+echo "Setting up your rmail identity..."
+echo "  (Press Enter to keep the default shown in [brackets])"
+
+CONFIG_DIR="${HOME}/.config/rmail"
+mkdir -p "$CONFIG_DIR"
+
+gen_random_port() {
+    while true; do
+        RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
+        PORT=$(( (RAW % 15001) + 50000 ))
+        case "$PORT" in
+            50000|51413|54321|55553|60000) continue ;;
+            *) echo "$PORT"; return ;;
+        esac
+    done
+}
+
+# Mail directory first — everything derives from this
+DEFAULT_MAIL="${HOME}/mail"
+
+# Check for any existing config to pre-fill from (try the old location too)
+_find_existing_config() {
+    # try old-style config first for migration
+    if [ -f "${HOME}/.config/rmail/config" ]; then
+        echo "${HOME}/.config/rmail/config"
+        return
+    fi
+    # try any config-* file in the config dir
+    for f in "$CONFIG_DIR"/config-*; do
+        if [ -f "$f" ]; then echo "$f"; return; fi
+    done
+}
+EXISTING_CONFIG=$(_find_existing_config)
+
+
+RMAIL_MAIL=$(ask_value "Mail directory" "$DEFAULT_MAIL")
+RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
+RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed 's|/*$||')  # strip trailing slashes
+MAIL_DIR="$RMAIL_MAIL"
+
+# Derive config filename from mail path: /home/ritz/mail -> config-home-ritz-mail
+CONFIG_SLUG=$(echo "$RMAIL_MAIL" | sed 's|^/||; s|/|-|g')
+CONFIG_FILE="$CONFIG_DIR/config-$CONFIG_SLUG"
+
+# If migrating from old config, use it as the source for defaults
+if [ -n "$EXISTING_CONFIG" ] && [ "$EXISTING_CONFIG" != "$CONFIG_FILE" ]; then
+    # Pre-fill from existing config
+    _existing_name=$(read_config_value "$EXISTING_CONFIG" "name")
+    _existing_port=$(read_config_value "$EXISTING_CONFIG" "port")
+elif [ -f "$CONFIG_FILE" ]; then
+    _existing_name=$(read_config_value "$CONFIG_FILE" "name")
+    _existing_port=$(read_config_value "$CONFIG_FILE" "port")
+fi
+
+DEFAULT_NAME=$(whoami)
+DEFAULT_PORT=$(gen_random_port)
+[ -n "${_existing_name:-}" ] && DEFAULT_NAME="$_existing_name"
+[ -n "${_existing_port:-}" ] && DEFAULT_PORT="$_existing_port"
+
+# prompt for name
+while true; do
+    RMAIL_NAME=$(ask_value "Your name (shown to contacts)" "$DEFAULT_NAME")
+    if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+        break
+    fi
+    warn "Name must contain only letters, numbers, hyphens, and underscores."
+done
+
+# prompt for port
+while true; do
+    RMAIL_PORT=$(ask_value "Port to listen on" "$DEFAULT_PORT")
+    if echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' && [ "$RMAIL_PORT" -ge 1 ] && [ "$RMAIL_PORT" -le 65535 ]; then
+        break
+    fi
+    warn "Port must be a number between 1 and 65535."
+done
+
+# Write or update config file
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Creating config file..."
+    cat > "$CONFIG_FILE" <<CONFIG
+# rmail configuration
+# see README.md for full documentation
+
+# ---- identity ----
+
+# your name as it appears to contacts (must match your key in the contacts file)
+name = $RMAIL_NAME
+
+# port rmail listens on for incoming messages
+port = $RMAIL_PORT
+
+# extra lua module path — searched before the bundled libs/ directory.
+# use this if you installed luasocket/luasec/dkjson somewhere non-standard.
+# libs = /path/to/lua-libs
+
+# ---- networking ----
+
+# on startup, rmail checks your public IP using multiple services.
+# if a change is detected and confirmed, all contacts are notified
+# and their contacts file is updated automatically.
+notify_ip_change = true
+
+# ---- NAT / port forwarding ----
+
+# attempt automatic port forwarding via UPnP or NAT-PMP on startup.
+# WARNING: these protocols are insecure — any device on your LAN can open ports
+# on your router without authentication. malware commonly exploits this.
+# prefer manual port forwarding through your router's admin panel.
+# requires upnpc and/or natpmpc — run scripts/install.sh to compile them.
+# auto_port_forward = false
+
+# ---- hooks ----
+# hooks let you run scripts in response to message events.
+
+# on_receive_raw: runs before a received message is written to inbox/.
+# \$1 is the raw message body. stdout REPLACES the body that gets saved.
+# use for content filtering or transformation.
+# on_receive_raw = /path/to/script.sh
+
+# on_receive: runs after a message is written to inbox/.
+# \$1 is the path to the saved inbox file.
+# on_receive = /path/to/script.sh
+
+# on_package: runs after an attachment is saved.
+# \$1 is the path to the saved attachment.
+# on_package = /path/to/script.sh
+
+# on_send: runs once per recipient before a message is sent.
+# \$1 is the message body, \$2 is the recipient name.
+# stdout REPLACES the body sent to that recipient.
+# use for per-recipient transformation.
+# on_send = /path/to/script.sh
+
+# on_delete: runs when a message is deleted. \$1 is the name of the other
+# party (sender if inbox, recipient if outbox).
+# on_delete = /path/to/script.sh
+CONFIG
+    ok "created config: $CONFIG_FILE"
+else
+    sed -i "s|^name = .*|name = $RMAIL_NAME|" "$CONFIG_FILE"
+    sed -i "s|^port = .*|port = $RMAIL_PORT|" "$CONFIG_FILE"
+    ok "updated config: $CONFIG_FILE"
+fi
+
+# Create mailbox directories and config symlink
+mkdir -p "$MAIL_DIR/inbox" "$MAIL_DIR/outbox" "$MAIL_DIR/attachments" "$MAIL_DIR/.state"
+ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
+ln -sf "$CONFIG_FILE" "$ROOT/config"
+
+echo ""
+echo "  your rmail port: $RMAIL_PORT"
+echo "  config: $CONFIG_FILE"
+echo "  mailbox: $MAIL_DIR"
+echo "  forward port $RMAIL_PORT on your router to this machine"
+echo ""
+
+# Contacts file
+CONTACTS_FILE="$MAIL_DIR/contacts"
+if [ ! -f "$CONTACTS_FILE" ]; then
+    cat > "$CONTACTS_FILE" <<CONTACTS
+// rmail contacts
+// Lines starting with // or # are comments.
+//
+// Add a contact like this:
+//
+//   alice.ip    = 203.0.113.1
+//   alice.port  = 54321
+//   alice.token = "your-shared-secret"
+//
+// Both sides must use the same token.
+CONTACTS
+    ok "created contacts file: $CONTACTS_FILE"
+else
+    info "contacts file already exists, keeping it"
+fi
+
+echo ""
+
+# ============================================================
+# 2. C compiler
 # ============================================================
 
 echo "Checking for C compiler..."
@@ -720,205 +904,9 @@ if [ -d "$BUILD" ]; then
     rm -rf "$BUILD"
 fi
 
+# (config and contacts setup moved to section 1, before dependency checks)
 # ============================================================
-# 10. Initial setup (config file)
-# ============================================================
-
-echo ""
-CONFIG_DIR="${HOME}/.config/rmail"
-CONFIG_FILE="$CONFIG_DIR/config"
-
-# generate random port in 50000-65000 (used in config and contacts)
-gen_random_port() {
-    while true; do
-        RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
-        PORT=$(( (RAW % 15001) + 50000 ))
-        case "$PORT" in
-            50000|51413|54321|55553|60000) continue ;;
-            *) echo "$PORT"; return ;;
-        esac
-    done
-}
-RANDOM_PORT=$(gen_random_port)
-
-echo ""
-echo "Setting up your rmail identity..."
-echo "  (Press Enter to keep the default shown in [brackets])"
-
-DEFAULT_NAME=$(whoami)
-DEFAULT_PORT=$RANDOM_PORT
-DEFAULT_MAIL="${HOME}/mail"
-
-if [ -f "$CONFIG_FILE" ]; then
-    _existing_name=$(read_config_value "$CONFIG_FILE" "name")
-    _existing_port=$(read_config_value "$CONFIG_FILE" "port")
-    _existing_mail=$(read_config_value "$CONFIG_FILE" "mail")
-    [ -n "$_existing_name" ] && DEFAULT_NAME="$_existing_name"
-    [ -n "$_existing_port" ] && DEFAULT_PORT="$_existing_port"
-    [ -n "$_existing_mail" ] && DEFAULT_MAIL="$_existing_mail"
-fi
-
-# prompt for name (validate: non-empty, no spaces or special chars)
-while true; do
-    RMAIL_NAME=$(ask_value "Your name (shown to contacts)" "$DEFAULT_NAME")
-    if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
-        break
-    fi
-    warn "Name must contain only letters, numbers, hyphens, and underscores."
-done
-
-# prompt for port (validate: 1–65535)
-while true; do
-    RMAIL_PORT=$(ask_value "Port to listen on" "$DEFAULT_PORT")
-    if echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' && [ "$RMAIL_PORT" -ge 1 ] && [ "$RMAIL_PORT" -le 65535 ]; then
-        break
-    fi
-    warn "Port must be a number between 1 and 65535."
-done
-
-# prompt for mail directory (expand tilde)
-RMAIL_MAIL=$(ask_value "Mail directory" "$DEFAULT_MAIL")
-RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
-
-MAIL_DIR="$RMAIL_MAIL"
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Setting up config file..."
-    mkdir -p "$CONFIG_DIR"
-    cat > "$CONFIG_FILE" <<CONFIG
-# rmail configuration
-#
-# Key                      Default                Description
-# -----------------------------------------------------------------------
-# name                     (required)             your identity
-# port                     (required)             port the daemon listens on
-# mail                     ~/mail                 root mail directory
-# attachments              ~/mail/attachments     where received files are saved
-# attachment_pending_dir   /tmp                   in-progress chunk storage
-# attachment_chunk_size    5242880 (5 MB)         bytes per chunk
-# auto_port_forward        false                  enable UPnP/NAT-PMP
-# notify_ip_change         true                   notify contacts on IP change
-# on_receive_raw           —                      hook: path to executable
-# on_receive               —                      hook: path to executable
-# on_send                  —                      hook: path to executable
-# on_delete                —                      hook: path to executable
-# on_package               —                      hook: path to executable
-
-# ---- identity ----
-
-# your name as it appears to contacts (must match your key in the contacts file)
-name = $RMAIL_NAME
-
-# port rmail listens on for incoming messages
-port = $RMAIL_PORT
-
-# ---- directories ----
-
-# path to your mailbox directory (contains inbox/, outbox/, contacts, .state/)
-mail = $RMAIL_MAIL
-
-# where received attachments are saved (default: ~/mail/attachments)
-# attachments = ${HOME}/mail/attachments
-
-# where in-progress attachment chunks are stored during transfer.
-# set to /tmp to keep partials in RAM (cleared on reboot).
-# default: same as attachments directory
-# attachment_pending_dir = /tmp
-
-# chunk size for attachment transfers in bytes (default: 5 MB)
-# attachment_chunk_size = 5242880
-
-# extra lua module path — searched before the bundled libs/ directory.
-# use this if you installed luasocket/luasec/dkjson somewhere non-standard.
-# libs = /path/to/lua-libs
-
-# ---- networking ----
-
-# on startup, rmail checks your public IP using multiple services.
-# if a change is detected and confirmed, all contacts are notified
-# and their contacts file is updated automatically.
-notify_ip_change = true
-
-# ---- NAT / port forwarding ----
-
-# attempt automatic port forwarding via UPnP or NAT-PMP on startup.
-# WARNING: these protocols are insecure — any device on your LAN can open ports
-# on your router without authentication. malware commonly exploits this.
-# prefer manual port forwarding through your router's admin panel.
-# requires upnpc and/or natpmpc — run scripts/install.sh to compile them.
-# auto_port_forward = false
-
-# ---- hooks ----
-# hooks let you run scripts in response to message events.
-# see docs/scripting-tutorial.md for full documentation and examples.
-
-# on_receive_raw: runs before a received message is written to inbox/.
-# \$1=sender \$2=subject \$3=body. stdout REPLACES the body that gets saved.
-# use for content filtering or transformation. synchronous.
-# on_receive_raw = /path/to/script.sh
-
-# on_receive: runs after a message is written to inbox/.
-# \$1=sender \$2=subject \$3=path to inbox file. runs in background.
-# on_receive = /path/to/script.sh
-
-# on_package: runs after an attachment is fully received and saved.
-# \$1=sender \$2=filename \$3=path to saved file. runs in background.
-# on_package = /path/to/script.sh
-
-# on_send: runs once per recipient before a message is sent.
-# \$1=recipient \$2=subject \$3=body. stdout REPLACES the body for that recipient.
-# use for per-recipient transformation. synchronous.
-# on_send = /path/to/script.sh
-
-# on_delete: runs when a message is deleted. \$1=other party name.
-# on_delete = /path/to/script.sh
-CONFIG
-    ok "created config: $CONFIG_FILE"
-    echo ""
-    echo "  your rmail port: $RMAIL_PORT"
-    echo "  forward this port on your router to this machine"
-else
-    sed -i "s|^name = .*|name = $RMAIL_NAME|" "$CONFIG_FILE"
-    sed -i "s|^port = .*|port = $RMAIL_PORT|" "$CONFIG_FILE"
-    sed -i "s|^mail = .*|mail = $RMAIL_MAIL|" "$CONFIG_FILE"
-    ok "updated config: $CONFIG_FILE"
-fi
-
-ln -sf "$CONFIG_FILE" "$ROOT/config"
-mkdir -p "$MAIL_DIR"
-ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
-
-# ============================================================
-# 11. Initial setup (contacts file)
-# ============================================================
-
-echo ""
-CONTACTS_FILE="$MAIL_DIR/contacts"
-
-if [ ! -f "$CONTACTS_FILE" ]; then
-    echo "Setting up initial contacts file..."
-    mkdir -p "$MAIL_DIR"
-    cat > "$CONTACTS_FILE" <<CONTACTS
-// rmail contacts
-// Lines starting with // or # are comments.
-//
-// Add a contact like this:
-//
-//   alice.ip    = 203.0.113.1
-//   alice.port  = 54321
-//   alice.token = "your-shared-secret"
-//
-// Both sides must use the same token.
-CONTACTS
-
-    ok "created contacts file: $CONTACTS_FILE"
-    echo ""
-else
-    info "contacts file already exists, keeping it"
-fi
-
-# ============================================================
-# 12. Service setup
+# Service setup
 # ============================================================
 
 echo ""
@@ -991,7 +979,7 @@ in {
       Type = "simple";
       User = "$(whoami)";
       Group = "users";
-      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua";
+      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $MAIL_DIR";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -1016,7 +1004,7 @@ in {
       Type = "simple";
       User = "$(whoami)";
       Group = "users";
-      ExecStart = "$LUA_BIN $ROOT/rmail.lua";
+      ExecStart = "$LUA_BIN $ROOT/rmail.lua $MAIL_DIR";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -1045,7 +1033,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$LUA_BIN $ROOT/rmail.lua
+ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
 Restart=on-failure
 RestartSec=5
 
@@ -1070,7 +1058,7 @@ After=network.target
 [Service]
 Type=simple
 User=$(whoami)
-ExecStart=$LUA_BIN $ROOT/rmail.lua
+ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
 Restart=on-failure
 RestartSec=5
 
@@ -1093,7 +1081,7 @@ SERVICE
 #!/bin/sh
 exec 2>&1
 export HOME=$HOME
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $MAIL_DIR
 SERVICE
             chmod +x "$SERVICE_FILE"
             cat > "$LOG_FILE" <<LOGSERVICE
@@ -1117,7 +1105,7 @@ LOGSERVICE
 
 description="rmail messaging daemon"
 command="$LUA_BIN"
-command_args="$ROOT/rmail.lua"
+command_args="$ROOT/rmail.lua $MAIL_DIR"
 command_user="$(whoami)"
 command_background=true
 pidfile="/run/rmail.pid"
