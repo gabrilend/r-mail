@@ -31,26 +31,42 @@ end
 
 local config = load_config()
 
-local MAIL        = config.mail or (os.getenv("HOME") .. "/mail")
-local INBOX       = MAIL .. "/inbox"
-local OUTBOX      = MAIL .. "/outbox"
-local STATE       = MAIL .. "/.state"
-local CONTACTS    = MAIL .. "/contacts"
-local ATTACHMENTS            = config.attachments or (MAIL .. "/attachments")
-local ATTACHMENT_PENDING_DIR = config.attachment_pending_dir or "/tmp"
-local ATTACHMENT_CHUNK_SIZE  = tonumber(config.attachment_chunk_size) or 5242880
-local TRANSFERS_FILE         = MAIL .. "/transfers"
-local UPLOADS_DIR            = ATTACHMENTS .. "/.uploads"
-local ALLOW_PEER_ADDRESS     = config.allow_peer_address_requests ~= false
+-- Consolidated path constants (reduces upvalue count for Lua/LuaJIT 60-upvalue limit)
+local MAIL = config.mail or (os.getenv("HOME") .. "/mail")
+local paths = {
+    inbox       = MAIL .. "/inbox",
+    outbox      = MAIL .. "/outbox",
+    state       = MAIL .. "/.state",
+    contacts    = MAIL .. "/contacts",
+    attachments = config.attachments or (MAIL .. "/attachments"),
+    pending     = config.attachment_pending_dir or "/tmp",
+    transfers   = MAIL .. "/transfers",
+}
+paths.uploads = paths.attachments .. "/.uploads"
 
-local LIBS             = config.libs
-local NOTIFY_IP_CHANGE = config.notify_ip_change ~= false
-local ON_RECEIVE_RAW   = config.on_receive_raw
-local ON_RECEIVE       = config.on_receive
-local ON_PACKAGE       = config.on_package
-local ON_SEND          = config.on_send
-local ON_DELETE        = config.on_delete
-local AUTO_PORT_FORWARD  = config.auto_port_forward == true
+-- Consolidated config flags
+local cfg = {
+    chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
+    allow_peer_addr   = config.allow_peer_address_requests ~= false,
+    libs              = config.libs,
+    notify_ip_change  = config.notify_ip_change ~= false,
+    auto_port_forward = config.auto_port_forward == true,
+}
+
+-- Hook scripts
+local hooks = {
+    on_receive_raw = config.on_receive_raw,
+    on_receive     = config.on_receive,
+    on_package     = config.on_package,
+    on_send        = config.on_send,
+    on_delete      = config.on_delete,
+}
+
+-- Aliases for frequently-used paths (reduces table lookups in hot paths)
+local INBOX    = paths.inbox
+local OUTBOX   = paths.outbox
+local STATE    = paths.state
+local CONTACTS = paths.contacts
 
 -- ============================================================
 
@@ -71,9 +87,9 @@ local DEPS_REGISTRY = {
 
 -- find our own directory for libs/ imports
 local script_dir = arg[0]:match("(.*/)") or "./"
-if LIBS then
-    package.path = LIBS .. "/?.lua;" .. script_dir .. "libs/?.lua;" .. package.path
-    package.cpath = LIBS .. "/?.so;" .. script_dir .. "libs/?.so;" .. package.cpath
+if cfg.libs then
+    package.path = cfg.libs .. "/?.lua;" .. script_dir .. "libs/?.lua;" .. package.path
+    package.cpath = cfg.libs .. "/?.so;" .. script_dir .. "libs/?.so;" .. package.cpath
 else
     package.path = script_dir .. "libs/?.lua;" .. package.path
     package.cpath = script_dir .. "libs/?.so;" .. package.cpath
@@ -385,6 +401,9 @@ end
 -- ============================================================
 
 -- resolve NAT tool paths: check deps/bin/ first, then system PATH
+-- Consolidated NAT/tools module (reduces upvalue count for Lua/LuaJIT 60-upvalue limit)
+local nat = {}
+
 local function nat_find_tool(name)
     local local_path = script_dir .. "deps/bin/" .. name
     if file_exists(local_path) then return local_path end
@@ -397,12 +416,14 @@ local function nat_find_tool(name)
     return nil
 end
 
-local UPNPC   = nat_find_tool("upnpc")
-local NATPMPC = nat_find_tool("natpmpc")
-local ZIP     = nat_find_tool("zip")
-local UNZIP   = nat_find_tool("unzip")
+local tools = {
+    upnpc   = nat_find_tool("upnpc"),
+    natpmpc = nat_find_tool("natpmpc"),
+    zip     = nat_find_tool("zip"),
+    unzip   = nat_find_tool("unzip"),
+}
 
-local function nat_get_local_ip()
+function nat.get_local_ip()
     local handle = io.popen("ip route get 1.1.1.1 2>/dev/null")
     if not handle then return nil end
     local output = handle:read("*a")
@@ -411,7 +432,6 @@ local function nat_get_local_ip()
         local ip = output:match("src%s+(%d+%.%d+%.%d+%.%d+)")
         if ip then return ip end
     end
-    -- fallback: first non-loopback inet address
     handle = io.popen("ip -4 addr show 2>/dev/null")
     if not handle then return nil end
     output = handle:read("*a")
@@ -422,19 +442,19 @@ local function nat_get_local_ip()
     return nil
 end
 
-local function nat_try_upnp_probe()
-    if not UPNPC then return false end
-    local handle = io.popen(shell_quote(UPNPC) .. " -s 2>/dev/null")
+function nat.try_upnp_probe()
+    if not tools.upnpc then return false end
+    local handle = io.popen(shell_quote(tools.upnpc) .. " -s 2>/dev/null")
     if not handle then return false end
     local output = handle:read("*a")
     handle:close()
     return output and output:match("Found valid IGD") ~= nil
 end
 
-local function nat_try_upnp_add(local_ip, port)
+function nat.try_upnp_add(local_ip, port)
     local cmd = string.format(
         "%s -e %s -a %s %d %d TCP 2>&1",
-        shell_quote(UPNPC), shell_quote("rmail"), local_ip, port, port)
+        shell_quote(tools.upnpc), shell_quote("rmail"), local_ip, port, port)
     local handle = io.popen(cmd)
     if not handle then return false end
     local output = handle:read("*a")
@@ -443,21 +463,21 @@ local function nat_try_upnp_add(local_ip, port)
         or output:match("successfully") ~= nil)
 end
 
-local function nat_try_upnp_delete(port)
-    os.execute(string.format("%s -d %d TCP 2>/dev/null", shell_quote(UPNPC), port))
+function nat.try_upnp_delete(port)
+    os.execute(string.format("%s -d %d TCP 2>/dev/null", shell_quote(tools.upnpc), port))
 end
 
-local function nat_try_natpmp_probe()
-    if not NATPMPC then return false end
-    local handle = io.popen(shell_quote(NATPMPC) .. " 2>/dev/null")
+function nat.try_natpmp_probe()
+    if not tools.natpmpc then return false end
+    local handle = io.popen(shell_quote(tools.natpmpc) .. " 2>/dev/null")
     if not handle then return false end
     local output = handle:read("*a")
     handle:close()
     return output and output:match("Public IP") ~= nil
 end
 
-local function nat_try_natpmp_add(port, lifetime)
-    local cmd = string.format("%s -a %d %d tcp %d 2>&1", shell_quote(NATPMPC), port, port, lifetime)
+function nat.try_natpmp_add(port, lifetime)
+    local cmd = string.format("%s -a %d %d tcp %d 2>&1", shell_quote(tools.natpmpc), port, port, lifetime)
     local handle = io.popen(cmd)
     if not handle then return false end
     local output = handle:read("*a")
@@ -465,32 +485,32 @@ local function nat_try_natpmp_add(port, lifetime)
     return output and output:match("Mapped public port") ~= nil
 end
 
-local function nat_try_natpmp_delete(port)
-    os.execute(string.format("%s -a %d %d tcp 0 2>/dev/null", shell_quote(NATPMPC), port, port))
+function nat.try_natpmp_delete(port)
+    os.execute(string.format("%s -a %d %d tcp 0 2>/dev/null", shell_quote(tools.natpmpc), port, port))
 end
 
-local function nat_delete_mapping(port, protocol)
+function nat.delete_mapping(port, protocol)
     if protocol == "upnp" then
-        nat_try_upnp_delete(port)
+        nat.try_upnp_delete(port)
     elseif protocol == "natpmp" then
-        nat_try_natpmp_delete(port)
+        nat.try_natpmp_delete(port)
     end
 end
 
-local function nat_cleanup_old_mapping()
+function nat.cleanup_old_mapping()
     local old = load_state("nat_mapping.json")
     if old and old.protocol and old.port then
         log("cleaning up previous NAT mapping (%s port %d)", old.protocol, old.port)
-        nat_delete_mapping(old.port, old.protocol)
+        nat.delete_mapping(old.port, old.protocol)
     end
 end
 
-local function nat_create_mapping(port)
-    local local_ip = nat_get_local_ip()
+function nat.create_mapping(port)
+    local local_ip = nat.get_local_ip()
 
     -- try UPnP first
-    if UPNPC and local_ip then
-        if nat_try_upnp_add(local_ip, port) then
+    if tools.upnpc and local_ip then
+        if nat.try_upnp_add(local_ip, port) then
             local mapping = {protocol = "upnp", port = port, created_at = os.time()}
             save_state("nat_mapping.json", mapping)
             return mapping
@@ -498,9 +518,9 @@ local function nat_create_mapping(port)
     end
 
     -- try NAT-PMP
-    if NATPMPC then
+    if tools.natpmpc then
         local lifetime = 3600
-        if nat_try_natpmp_add(port, lifetime) then
+        if nat.try_natpmp_add(port, lifetime) then
             local mapping = {protocol = "natpmp", port = port, lifetime = lifetime, created_at = os.time()}
             save_state("nat_mapping.json", mapping)
             return mapping
@@ -510,24 +530,24 @@ local function nat_create_mapping(port)
     return nil
 end
 
-local function nat_security_check(my_name)
+function nat.security_check(my_name)
     local warned = load_state("nat_security_warned.json")
     if type(warned) ~= "table" then warned = {} end
 
     local vulnerabilities = {}
 
     -- probe UPnP
-    if nat_try_upnp_probe() then
+    if nat.try_upnp_probe() then
         local test_port = 60000 + (os.time() % 4000)
-        local local_ip = nat_get_local_ip()
-        if local_ip and nat_try_upnp_add(local_ip, test_port) then
-            nat_try_upnp_delete(test_port)
+        local local_ip = nat.get_local_ip()
+        if local_ip and nat.try_upnp_add(local_ip, test_port) then
+            nat.try_upnp_delete(test_port)
             vulnerabilities[#vulnerabilities + 1] = "UPnP"
         end
     end
 
     -- probe NAT-PMP
-    if nat_try_natpmp_probe() then
+    if nat.try_natpmp_probe() then
         vulnerabilities[#vulnerabilities + 1] = "NAT-PMP"
     end
 
@@ -666,10 +686,10 @@ local function save_attachments(attachments, sender, inbox_meta)
     if not inbox_meta.attachments then inbox_meta.attachments = {} end
     for _, att in ipairs(attachments) do
         local att_filename = sanitize_filename(att.filename)
-        local target = ATTACHMENTS .. "/" .. att_filename
+        local target = paths.attachments .. "/" .. att_filename
         if file_exists(target) and not inbox_meta.attachments[att_filename] then
             att_filename = sanitize_filename(att.filename .. "-from-" .. sender)
-            target = ATTACHMENTS .. "/" .. att_filename
+            target = paths.attachments .. "/" .. att_filename
         end
         local raw = mime.unb64(att.data)
         write_file_binary(target, raw)
@@ -678,8 +698,8 @@ local function save_attachments(attachments, sender, inbox_meta)
             path = target,
         }
         log("attachment saved: %s from %s", att_filename, sender)
-        if ON_PACKAGE then
-            os.execute(ON_PACKAGE .. " " ..
+        if hooks.on_package then
+            os.execute(hooks.on_package .. " " ..
                 shell_quote(sender) .. " " .. shell_quote(att_filename) .. " " ..
                 shell_quote(target) .. " &")
         end
@@ -715,8 +735,8 @@ local function handle_deliver_message(data, sender)
         end
     end
 
-    if ON_RECEIVE_RAW then
-        local transformed = run_hook(ON_RECEIVE_RAW, sender, subject, body or "")
+    if hooks.on_receive_raw then
+        local transformed = run_hook(hooks.on_receive_raw, sender, subject, body or "")
         if transformed and transformed ~= "" then body = transformed end
     end
 
@@ -724,8 +744,8 @@ local function handle_deliver_message(data, sender)
     write_file(target, body)
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
-    if ON_RECEIVE then
-        os.execute(ON_RECEIVE .. " " ..
+    if hooks.on_receive then
+        os.execute(hooks.on_receive .. " " ..
             shell_quote(sender) .. " " .. shell_quote(subject) .. " " ..
             shell_quote(target) .. " &")
     end
@@ -861,7 +881,7 @@ local function handle_delete(data, sender)
     local inbox_state = load_state("inbox.json")
     for filename, meta in pairs(inbox_state) do
         if meta.message_id == message_id and meta["from"] == sender then
-            if ON_DELETE then run_hook(ON_DELETE, sender) end
+            if hooks.on_delete then run_hook(hooks.on_delete, sender) end
             if file_exists(INBOX .. "/" .. filename) then
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
@@ -877,7 +897,7 @@ local function handle_delete(data, sender)
                     local consent_path = INBOX .. "/" .. entry.inbox_file
                     if file_exists(consent_path) then os.remove(consent_path) end
                     os.execute('rm -rf ' .. shell_quote(
-                        ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+                        paths.pending .. "/.pending/" .. att_id))
                     cpending[att_id] = nil
                     cp_changed = true
                     log("cancelled consent for %s from %s (sender deleted)", att_id, sender)
@@ -894,7 +914,7 @@ local function handle_delete(data, sender)
         if meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.message_id == message_id and recipient == sender then
-                    if ON_DELETE then run_hook(ON_DELETE, recipient) end
+                    if hooks.on_delete then run_hook(hooks.on_delete, recipient) end
                     meta.recipients[recipient] = nil
                     local remaining = remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     log("removed recipient %s from %s (they deleted)", recipient, filename)
@@ -1326,13 +1346,13 @@ local function sha256_of_bytes(data)
 end
 
 local function compress_attachment(filepath, zip_id)
-    os.execute('mkdir -p ' .. shell_quote(ATTACHMENT_PENDING_DIR))
-    local zip_path = ATTACHMENT_PENDING_DIR .. "/rmail-" .. zip_id .. ".zip"
+    os.execute('mkdir -p ' .. shell_quote(paths.pending))
+    local zip_path = paths.pending .. "/rmail-" .. zip_id .. ".zip"
     local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
     local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
     if is_dir_h then is_dir_h:close() end
     local flag = is_dir and "-rj" or "-j"
-    local ret = os.execute(ZIP .. ' ' .. flag .. ' ' .. shell_quote(zip_path) ..
+    local ret = os.execute(tools.zip .. ' ' .. flag .. ' ' .. shell_quote(zip_path) ..
                            ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
     -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
     if not ret then return nil, nil, nil end
@@ -1385,8 +1405,8 @@ local function handle_attachment_request(data, sender)
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
 
-    os.execute('mkdir -p ' .. shell_quote(ATTACHMENTS))
-    local avail, total = check_disk_space(ATTACHMENTS)
+    os.execute('mkdir -p ' .. shell_quote(paths.attachments))
+    local avail, total = check_disk_space(paths.attachments)
     avail = avail or 0
     local after = math.max(0, avail - expected_size)
     local pct_str = ""
@@ -1454,7 +1474,7 @@ local function check_consent_pending()
         elseif entry.status == "receiving" then
             if not file_exists(INBOX .. "/" .. entry.inbox_file) then
                 os.execute('rm -rf ' .. shell_quote(
-                    ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+                    paths.pending .. "/.pending/" .. att_id))
                 entry.status = "cancel_pending"
                 changed = true
                 log("attachment transfer cancelled by user: %s from %s", att_id, entry["from"])
@@ -1584,7 +1604,7 @@ local function handle_attachment_chunk(data, sender)
         return 200, {ok = false, cancelled = true}
     end
 
-    local pending_dir = ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id
+    local pending_dir = paths.pending .. "/.pending/" .. att_id
     os.execute('mkdir -p ' .. shell_quote(pending_dir))
     local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
 
@@ -1607,7 +1627,7 @@ local function handle_attachment_chunk(data, sender)
         -- Check if user deleted the progress file (cancellation during transfer)
         if not file_exists(INBOX .. "/" .. cpe.inbox_file) then
             os.execute('rm -rf ' .. shell_quote(
-                ATTACHMENT_PENDING_DIR .. "/.pending/" .. att_id))
+                paths.pending .. "/.pending/" .. att_id))
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
             save_state("consent-pending.json", cprog)
@@ -1649,18 +1669,18 @@ local function handle_attachment_chunk(data, sender)
         return 500, {error = "total checksum mismatch"}
     end
 
-    os.execute('mkdir -p ' .. shell_quote(ATTACHMENTS))
-    local ret = os.execute(UNZIP .. ' -o ' .. shell_quote(zip_path) ..
-                           ' -d ' .. shell_quote(ATTACHMENTS) .. ' >/dev/null 2>&1')
+    os.execute('mkdir -p ' .. shell_quote(paths.attachments))
+    local ret = os.execute(tools.unzip .. ' -o ' .. shell_quote(zip_path) ..
+                           ' -d ' .. shell_quote(paths.attachments) .. ' >/dev/null 2>&1')
     -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
     if not ret then
         log("failed to extract %s from %s", filename, sender)
         return 500, {error = "extraction failed"}
     end
 
-    local target = ATTACHMENTS .. "/" .. filename
-    if ON_PACKAGE then
-        os.execute(ON_PACKAGE .. " " .. shell_quote(sender) .. " " ..
+    local target = paths.attachments .. "/" .. filename
+    if hooks.on_package then
+        os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
                    shell_quote(filename) .. " " .. shell_quote(target) .. " &")
     end
 
@@ -1734,7 +1754,7 @@ local function write_transfers_file(att_state)
     end
 
     if #path_order == 0 then
-        if file_exists(TRANSFERS_FILE) then os.remove(TRANSFERS_FILE) end
+        if file_exists(paths.transfers) then os.remove(paths.transfers) end
         return
     end
 
@@ -1755,15 +1775,15 @@ local function write_transfers_file(att_state)
         end
     end
     lines[#lines + 1] = sep
-    write_file(TRANSFERS_FILE, table.concat(lines, "\n") .. "\n")
+    write_file(paths.transfers, table.concat(lines, "\n") .. "\n")
 end
 
 -- Check ~/mail/transfers for user-initiated cancellations.
 -- If a recipient line or entire file section was removed, cancel those
 -- transfers in chunks-outgoing.json and stop sending their chunks.
 local function check_transfers_file_cancellations()
-    if not file_exists(TRANSFERS_FILE) then return end
-    local content = read_file(TRANSFERS_FILE)
+    if not file_exists(paths.transfers) then return end
+    local content = read_file(paths.transfers)
     if not content then return end
 
     local chunks = load_state("chunks-outgoing.json")
@@ -1836,8 +1856,8 @@ local function send_next_chunks(my_name)
         local aborted = false
         local cancelled = false
         for _, chunk_index in ipairs(missing) do
-            f:seek("set", chunk_index * ATTACHMENT_CHUNK_SIZE)
-            local raw = f:read(ATTACHMENT_CHUNK_SIZE)
+            f:seek("set", chunk_index * cfg.chunk_size)
+            local raw = f:read(cfg.chunk_size)
             if not raw then
                 log("chunk read error at %d for %s", chunk_index, att_id)
                 aborted = true; break
@@ -1921,7 +1941,7 @@ local function self_delete_from_inbox(my_name, message_id)
                 os.remove(INBOX .. "/" .. filename)
                 log("self-delete from inbox: %s", filename)
             end
-            if ON_DELETE then run_hook(ON_DELETE, my_name) end
+            if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
             delete_inbox_attachments(meta)
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
@@ -1936,7 +1956,7 @@ local function self_delete_from_outbox(my_name, message_id)
         if meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.message_id == message_id and rmeta.self then
-                    if ON_DELETE then run_hook(ON_DELETE, my_name) end
+                    if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
                     meta.recipients[recipient] = nil
                     remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     if not next(meta.recipients) then
@@ -2064,12 +2084,12 @@ local function sync_outbox(my_name)
                                 end
                             end
                             local inbox_body = body or ""
-                            if ON_SEND then
-                                local transformed = run_hook(ON_SEND, my_name, name, inbox_body)
+                            if hooks.on_send then
+                                local transformed = run_hook(hooks.on_send, my_name, name, inbox_body)
                                 if transformed and transformed ~= "" then inbox_body = transformed end
                             end
-                            if ON_RECEIVE_RAW then
-                                local transformed = run_hook(ON_RECEIVE_RAW, my_name, name, inbox_body)
+                            if hooks.on_receive_raw then
+                                local transformed = run_hook(hooks.on_receive_raw, my_name, name, inbox_body)
                                 if transformed and transformed ~= "" then inbox_body = transformed end
                             end
                             inbox_body = inbox_body:gsub("^[\n\r]+", "")
@@ -2079,8 +2099,8 @@ local function sync_outbox(my_name)
                                 message_id = msg_id,
                             }
                             save_state("inbox.json", inbox_state)
-                            if ON_RECEIVE then
-                                os.execute(ON_RECEIVE .. " " ..
+                            if hooks.on_receive then
+                                os.execute(hooks.on_receive .. " " ..
                                     shell_quote(my_name) .. " " .. shell_quote(name) .. " " ..
                                     shell_quote(target) .. " &")
                             end
@@ -2138,7 +2158,7 @@ local function sync_outbox(my_name)
                                             compress_attachment(filepath, zip_id)
                                         if zip_path then
                                             total_chunks = math.max(1,
-                                                math.ceil(comp_size / ATTACHMENT_CHUNK_SIZE))
+                                                math.ceil(comp_size / cfg.chunk_size))
                                         end
                                     end
                                     if zip_path then
@@ -2229,8 +2249,8 @@ local function sync_outbox(my_name)
                 if not op.skip then
                     path = "/deliver"
                     local send_body = op.body
-                    if ON_SEND then
-                        local transformed = run_hook(ON_SEND, op.recipient, op.subject or op.filename, op.body or "")
+                    if hooks.on_send then
+                        local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
                         if transformed and transformed ~= "" then send_body = transformed end
                     end
                     data = {type = "message",
@@ -2369,7 +2389,7 @@ local function sync_inbox(my_name)
             if not meta.pending_delete then
                 -- first time: clean up local attachments, mark pending
                 delete_inbox_attachments(meta)
-                if ON_DELETE then run_hook(ON_DELETE, meta["from"] or "") end
+                if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true
                 did_work = true
             end
@@ -2538,7 +2558,7 @@ local function sync_address_notifications(my_name)
             host = op.contact.ip, port = op.contact.port,
             path = "/update-address",
             payload = json.encode({
-                ip = op.ip, port = op.port, notify = NOTIFY_IP_CHANGE,
+                ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
             }),
             psk_key = op.contact.token,
         }
@@ -2609,7 +2629,7 @@ end
 -- Used by phones to recover the home server's public IP after a dynamic IP change.
 -- Available to any authenticated contact, not restricted to own-device entries.
 local function handle_peer_address(contact_name)
-    if not ALLOW_PEER_ADDRESS then
+    if not cfg.allow_peer_addr then
         return 403, {error = "peer address requests disabled"}
     end
     local contacts = load_contacts()
@@ -2621,7 +2641,7 @@ end
 -- GET /api/myaddress — return this daemon's current public IP and configured port.
 local function handle_api_myaddress(my_name, port)
     local ip = check_public_ip()
-    local lan_ip = nat_get_local_ip()
+    local lan_ip = nat.get_local_ip()
     return 200, {ip = ip or "", port = port, name = my_name, lan_ip = lan_ip or ""}
 end
 
@@ -2642,7 +2662,7 @@ local function handle_api_sync(data, caller_name)
                     os.remove(INBOX .. "/" .. filename)
                 end
                 delete_inbox_attachments(meta)
-                if ON_DELETE then run_hook(ON_DELETE, meta["from"] or "") end
+                if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true  -- sync_inbox will notify original sender
                 log("phone deleted inbox: %s (from %s)", filename, meta["from"] or "?")
                 break
@@ -2764,8 +2784,8 @@ local function handle_api_list_attachments()
         end
     end
     local result = {}
-    for _, f in ipairs(list_files(ATTACHMENTS)) do
-        local path = ATTACHMENTS .. "/" .. f
+    for _, f in ipairs(list_files(paths.attachments)) do
+        local path = paths.attachments .. "/" .. f
         local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
         local size = h and tonumber(h:read("*a"))
         if h then h:close() end
@@ -2782,7 +2802,7 @@ end
 -- GET /api/attachments/<filename> — download an attachment file to the phone.
 local function handle_api_get_attachment(filename)
     filename = sanitize_filename(filename)
-    local content = read_file_binary(ATTACHMENTS .. "/" .. filename)
+    local content = read_file_binary(paths.attachments .. "/" .. filename)
     if not content then return 404, nil, nil end
     return 200, "application/octet-stream", content
 end
@@ -2797,7 +2817,7 @@ local function handle_api_upload_start(data)
         return 400, {error = "invalid num_chunks"}
     end
     local upload_id  = uuid()
-    local upload_dir = UPLOADS_DIR .. "/" .. upload_id
+    local upload_dir = paths.uploads .. "/" .. upload_id
     os.execute("mkdir -p " .. shell_quote(upload_dir))
     local server_path = upload_dir .. "/" .. filename
     local uploads = load_state("uploads.json")
@@ -2853,19 +2873,19 @@ end
 
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
-               ATTACHMENTS .. '" "' .. ATTACHMENT_PENDING_DIR .. '" "' .. UPLOADS_DIR .. '"')
+               paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
     write_file(STATE .. "/new-mail", "")
 
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n")
         os.exit(1)
     end
-    if not ZIP then
+    if not tools.zip then
         io.stderr:write("error: 'zip' not found — required for attachment transfer\n")
         io.stderr:write("       run: scripts/install.sh\n")
         os.exit(1)
     end
-    if not UNZIP then
+    if not tools.unzip then
         io.stderr:write("error: 'unzip' not found — required for attachment transfer\n")
         io.stderr:write("       run: scripts/install.sh\n")
         os.exit(1)
@@ -2880,16 +2900,16 @@ local function main()
     log("AES-256-GCM encryption enabled")
 
     -- NAT: clean up stale mapping from previous run
-    pcall(nat_cleanup_old_mapping)
+    pcall(nat.cleanup_old_mapping)
 
     -- NAT: security check (always runs on startup)
-    pcall(nat_security_check, my_name)
+    pcall(nat.security_check, my_name)
 
     -- NAT: auto port forwarding (opt-in)
     local nat_mapping = nil
-    if AUTO_PORT_FORWARD then
+    if cfg.auto_port_forward then
         log("attempting automatic port forwarding...")
-        local ok_nat, result = pcall(nat_create_mapping, port)
+        local ok_nat, result = pcall(nat.create_mapping, port)
         if ok_nat and result and result.protocol then
             nat_mapping = result
             log("port %d mapped via %s", port, result.protocol)
@@ -2917,7 +2937,7 @@ local function main()
 
     -- check for LAN IP change on startup
     pcall(function()
-        local new_lan_ip = nat_get_local_ip()
+        local new_lan_ip = nat.get_local_ip()
         if not new_lan_ip then return end
         local stored_lan_ip = read_file(STATE .. "/lan_ip")
         if stored_lan_ip then stored_lan_ip = stored_lan_ip:match("^%s*(.-)%s*$") end
@@ -2929,7 +2949,7 @@ local function main()
         end
         if stored_lan_ip == new_lan_ip then return end
         log("LAN IP changed: %s -> %s", stored_lan_ip, new_lan_ip)
-        if AUTO_PORT_FORWARD then
+        if cfg.auto_port_forward then
             log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP")
             return
         end
@@ -3292,7 +3312,7 @@ local function main()
         if nat_mapping then
             local nat_renew_interval = 1800
             if now - (nat_mapping.last_renewed or nat_mapping.created_at) >= nat_renew_interval then
-                local ok_r, res = pcall(nat_create_mapping, port)
+                local ok_r, res = pcall(nat.create_mapping, port)
                 if ok_r and res then
                     log("renewed NAT mapping via %s", res.protocol)
                 end
