@@ -63,6 +63,10 @@ and install it over USB.
 
 - A computer with **Git** and **Java 17+** installed (the Android build tool
   needs Java).
+
+-- you can install these dependencies by running the install script with the --android-deps flag.
+   todo...
+
 - An **Android phone** with USB debugging enabled.
 - A **USB cable** to connect the phone to the computer.
 

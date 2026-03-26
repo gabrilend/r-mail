@@ -34,7 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class AttachmentEntry(
+private data class ComposeAttachmentEntry(
     val uri: Uri,
     val displayName: String,
     val mimeType: String?
@@ -128,7 +128,7 @@ fun ComposeScreen(
             addAll(parsed.recipients.ifEmpty { listOf("") })
         }
     }
-    val attachments = remember { mutableStateListOf<AttachmentEntry>() }
+    val attachments = remember { mutableStateListOf<ComposeAttachmentEntry>() }
     var subject by remember { mutableStateOf(parsed.subject) }
     var body by remember { mutableStateOf(parsed.body) }
     val daemonName by vm.daemonName.collectAsState()
@@ -147,7 +147,7 @@ fun ComposeScreen(
             val uri = Uri.parse(uriStr)
             val name = resolveDisplayName(context, uri) ?: uriStr.substringAfterLast('/')
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
-            attachments.add(AttachmentEntry(uri, name, mime))
+            attachments.add(ComposeAttachmentEntry(uri, name, mime))
         }
     }
 
@@ -158,7 +158,7 @@ fun ComposeScreen(
         if (uri != null) {
             val name = resolveDisplayName(context, uri) ?: uri.lastPathSegment ?: "attachment"
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
-            attachments.add(AttachmentEntry(uri, name, mime))
+            attachments.add(ComposeAttachmentEntry(uri, name, mime))
         }
     }
 
@@ -259,7 +259,12 @@ fun ComposeScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 2.dp)
                 ) {
-                    AttachmentPreview(entry, modifier = Modifier.weight(1f))
+                    Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                        Text(entry.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                        Text(entry.mimeType?.substringAfter('/') ?: "file",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     IconButton(onClick = { attachments.removeAt(index) }) {
                         Icon(Icons.Default.Remove, contentDescription = "Remove")
                     }

@@ -63,30 +63,15 @@ class MainActivity : ComponentActivity() {
                     composable("setup") {
                         SetupScreen(vm = vm) { mailboxId ->
                             vm.selectMailbox(mailboxId)
-                            // Check for pending share intent
-                            if (pendingAttachLines != null) {
-                                initialComposeDraft = buildDraft(pendingAttachLines!!)
-                                pendingAttachLines = null
-                                navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}") {
-                                    popUpTo("mailboxList")
-                                }
-                            } else {
-                                navController.navigate("inbox") {
-                                    popUpTo("mailboxList")
-                                }
+                            navController.navigate("inbox") {
+                                popUpTo("mailboxList")
                             }
                         }
                     }
 
-                    // ── Inbox (with tabs) ───────────────────────────────────
+                    // ── Inbox (unified screen with bottom bar) ──────────
                     composable("inbox?showOutbox={showOutbox}") { back ->
                         val showOutbox = back.arguments?.getString("showOutbox") == "true"
-                        val pending = pendingAttachLines
-                        if (pending != null) {
-                            pendingAttachLines = null
-                            initialComposeDraft = buildDraft(pending)
-                            navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}")
-                        }
                         InboxScreen(
                             vm = vm,
                             initialShowOutbox = showOutbox,
@@ -98,20 +83,12 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpen = { navController.navigate("read/$it") },
                             onOpenOutbox = { navController.navigate("outbox-read/$it") },
-                            onCompose = { navController.navigate("compose") },
-                            onContacts = { navController.navigate("contacts") },
-                            onAttachments = {},  // now a tab, not a separate screen
-                            onSettings = { navController.navigate("settings") }
+                            onCompose = {}, onContacts = {},
+                            onAttachments = {}, onSettings = {}
                         )
                     }
 
                     composable("inbox") {
-                        val pending = pendingAttachLines
-                        if (pending != null) {
-                            pendingAttachLines = null
-                            initialComposeDraft = buildDraft(pending)
-                            navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}")
-                        }
                         InboxScreen(
                             vm = vm,
                             onBack = {
@@ -122,10 +99,8 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpen = { navController.navigate("read/$it") },
                             onOpenOutbox = { navController.navigate("outbox-read/$it") },
-                            onCompose = { navController.navigate("compose") },
-                            onContacts = { navController.navigate("contacts") },
-                            onAttachments = {},
-                            onSettings = { navController.navigate("settings") }
+                            onCompose = {}, onContacts = {},
+                            onAttachments = {}, onSettings = {}
                         )
                     }
 
@@ -135,8 +110,7 @@ class MainActivity : ComponentActivity() {
                         ReadScreen(
                             filename = filename, vm = vm,
                             onBack = { navController.popBackStack() },
-                            onReply = { navController.navigate("compose?draft=${Uri.encode(it)}") },
-                            onForward = { navController.navigate("compose?draft=${Uri.encode(it)}") }
+                            onReply = {}, onForward = {}
                         )
                     }
 
@@ -147,51 +121,6 @@ class MainActivity : ComponentActivity() {
                             onBack = { navController.popBackStack() },
                             onReply = {}, onForward = {}
                         )
-                    }
-
-                    // ── Compose ─────────────────────────────────────────────
-                    composable("compose?draft={draft}") { back ->
-                        val draft = back.arguments?.getString("draft")?.let { Uri.decode(it) } ?: ""
-                        ComposeScreen(
-                            vm = vm, initialContent = draft,
-                            onCancel = { navController.popBackStack() },
-                            onSent = {
-                                navController.navigate("inbox?showOutbox=true") {
-                                    popUpTo("inbox") { inclusive = true }
-                                }
-                                vm.triggerSync()
-                            }
-                        )
-                    }
-
-                    composable("compose") {
-                        ComposeScreen(
-                            vm = vm, initialContent = "",
-                            onCancel = { navController.popBackStack() },
-                            onSent = {
-                                navController.navigate("inbox?showOutbox=true") {
-                                    popUpTo("inbox") { inclusive = true }
-                                }
-                                vm.triggerSync()
-                            }
-                        )
-                    }
-
-                    // ── Contacts ────────────────────────────────────────────
-                    composable("contacts") {
-                        ContactsScreen(
-                            vm = vm,
-                            onBack = { navController.popBackStack() },
-                            onCompose = { draft ->
-                                navController.popBackStack()
-                                navController.navigate("compose?draft=${Uri.encode(draft)}")
-                            }
-                        )
-                    }
-
-                    // ── Settings ────────────────────────────────────────────
-                    composable("settings") {
-                        SettingsScreen(vm = vm, onBack = { navController.popBackStack() })
                     }
                 }
             }

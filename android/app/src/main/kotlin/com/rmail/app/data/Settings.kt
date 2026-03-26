@@ -20,4 +20,9 @@ class Settings(context: Context) {
     var fgColor: Int
         get() = prefs.getInt("fg_color", 0xFFFFD040.toInt())
         set(v) = prefs.edit { putInt("fg_color", v) }
+
+    // Accent/secondary color for changed text, highlights, etc.
+    var accentColor: Int
+        get() = prefs.getInt("accent_color", 0xFF00E5FF.toInt())  // cyan
+        set(v) = prefs.edit { putInt("accent_color", v) }
 }
