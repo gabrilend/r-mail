@@ -424,7 +424,23 @@ local tools = {
 }
 
 function nat.get_local_ip()
-    local handle = io.popen("ip route get 1.1.1.1 2>/dev/null")
+    -- Try common paths for 'ip' command (NixOS, standard Linux, etc.)
+    local ip_paths = {
+        "/run/current-system/sw/bin/ip",  -- NixOS
+        "/usr/sbin/ip",
+        "/sbin/ip",
+        "/usr/bin/ip",
+        "/bin/ip",
+        "ip",  -- fallback to PATH
+    }
+    local ip_cmd = nil
+    for _, path in ipairs(ip_paths) do
+        local f = io.open(path, "r")
+        if f then f:close(); ip_cmd = path; break end
+    end
+    if not ip_cmd then ip_cmd = "ip" end  -- hope it's in PATH
+
+    local handle = io.popen(ip_cmd .. " route get 1.1.1.1 2>/dev/null")
     if not handle then return nil end
     local output = handle:read("*a")
     handle:close()
@@ -432,7 +448,7 @@ function nat.get_local_ip()
         local ip = output:match("src%s+(%d+%.%d+%.%d+%.%d+)")
         if ip then return ip end
     end
-    handle = io.popen("ip -4 addr show 2>/dev/null")
+    handle = io.popen(ip_cmd .. " -4 addr show 2>/dev/null")
     if not handle then return nil end
     output = handle:read("*a")
     handle:close()
@@ -3072,7 +3088,11 @@ local function main()
 
                         -- Send response back to their actual LAN IP
                         local my_lan_ip = nat.get_local_ip()
-                        local resp_payload = "RMAIL-HERE " .. my_name .. " " .. (my_lan_ip or sender_ip)
+                        if not my_lan_ip then
+                            log("LAN discovery: cannot determine local IP, not responding")
+                            return
+                        end
+                        local resp_payload = "RMAIL-HERE " .. my_name .. " " .. my_lan_ip
                         local resp_key = derive_key(c.token)
                         local resp_encrypted = encrypt_packet(resp_key, resp_payload)
                         if resp_encrypted then
