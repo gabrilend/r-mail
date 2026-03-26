@@ -746,6 +746,75 @@ local function release_zip(chunks, zip_id, compressed_path)
     end
 end
 
+-- {{{ remove_recipient_from_file
+-- Remove a recipient's to: line from an outbox file.
+-- Also removes orphan attach: lines that no longer have a to: above them.
+-- Returns the count of remaining recipients (0 if file was deleted).
+local function remove_recipient_from_file(filepath, recipient)
+    local text = read_file(filepath)
+    if not text then return 0 end
+
+    -- parse header lines
+    local header_lines = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:") then
+            header_lines[#header_lines + 1] = line
+            pos = line_end + 1
+        else
+            break
+        end
+    end
+    local body = text:sub(pos)
+
+    -- remove the matching to: line
+    local kept = {}
+    for _, line in ipairs(header_lines) do
+        if line:lower():match("^to:") then
+            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if r ~= recipient then
+                kept[#kept + 1] = line
+            end
+        else
+            kept[#kept + 1] = line
+        end
+    end
+
+    -- remove orphan attach: lines (no to: above them)
+    local cleaned = {}
+    local has_to = false
+    for _, line in ipairs(kept) do
+        if line:lower():match("^to:") then
+            has_to = true
+            cleaned[#cleaned + 1] = line
+        elseif has_to then
+            cleaned[#cleaned + 1] = line
+        end
+    end
+
+    -- count remaining recipients
+    local count = 0
+    for _, line in ipairs(cleaned) do
+        if line:lower():match("^to:") then count = count + 1 end
+    end
+
+    if count == 0 then
+        os.remove(filepath)
+        return 0
+    end
+
+    local header = ""
+    for _, line in ipairs(cleaned) do
+        header = header .. line .. "\n"
+    end
+    write_file(filepath, header .. body)
+    return count
+end
+-- }}}
+
 local function handle_delete(data, sender)
     local message_id = data.message_id
     local attachment_id = data.attachment_id
@@ -1153,69 +1222,6 @@ local function parse_outbox_file(path)
     return entries, text:sub(pos)
 end
 
-local function remove_recipient_from_file(filepath, recipient)
-    local text = read_file(filepath)
-    if not text then return 0 end
-
-    -- parse header lines
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
-
-    -- remove the matching to: line
-    local kept = {}
-    for _, line in ipairs(header_lines) do
-        if line:lower():match("^to:") then
-            local r = line:match("^[Tt][Oo]:%s*(.-)%s*$")
-            if r ~= recipient then
-                kept[#kept + 1] = line
-            end
-        else
-            kept[#kept + 1] = line
-        end
-    end
-
-    -- remove orphan attach: lines (no to: above them)
-    local cleaned = {}
-    local has_to = false
-    for _, line in ipairs(kept) do
-        if line:lower():match("^to:") then
-            has_to = true
-            cleaned[#cleaned + 1] = line
-        elseif has_to then
-            cleaned[#cleaned + 1] = line
-        end
-    end
-
-    -- count remaining recipients
-    local count = 0
-    for _, line in ipairs(cleaned) do
-        if line:lower():match("^to:") then count = count + 1 end
-    end
-
-    if count == 0 then
-        os.remove(filepath)
-        return 0
-    end
-
-    local header = ""
-    for _, line in ipairs(cleaned) do
-        header = header .. line .. "\n"
-    end
-    write_file(filepath, header .. body)
-    return count
-end
 
 local function encode_attachments(filepaths)
     local result = {}
@@ -1285,7 +1291,8 @@ local function compress_attachment(filepath, zip_id)
     local flag = is_dir and "-rj" or "-j"
     local ret = os.execute(ZIP .. ' ' .. flag .. ' ' .. shell_quote(zip_path) ..
                            ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
-    if ret ~= 0 then return nil, nil, nil end
+    -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
+    if not ret then return nil, nil, nil end
     local checksum = sha256_file(zip_path)
     local size_h = io.popen('wc -c < ' .. shell_quote(zip_path) .. ' 2>/dev/null')
     local comp_size = size_h and tonumber(size_h:read("*a"))
@@ -1602,7 +1609,8 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(ATTACHMENTS))
     local ret = os.execute(UNZIP .. ' -o ' .. shell_quote(zip_path) ..
                            ' -d ' .. shell_quote(ATTACHMENTS) .. ' >/dev/null 2>&1')
-    if ret ~= 0 then
+    -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
+    if not ret then
         log("failed to extract %s from %s", filename, sender)
         return 500, {error = "extraction failed"}
     end
