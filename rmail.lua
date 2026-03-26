@@ -3013,11 +3013,15 @@ local function main()
     end
 
     -- Send encrypted discovery request to same-network contacts.
-    -- Uses multicast so all rmail instances on the LAN receive it.
+    -- Tries multicast first, then falls back to subnet scan (for routers that block multicast).
     -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
     local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
         local my_lan_ip = nat.get_local_ip()
         if not my_lan_ip then return end
+
+        -- Parse subnet base (assumes /24 - most home networks)
+        local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
+        local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
 
         for name, c in pairs(contacts) do
             if c.ip == my_public_ip and c.token and c.port then
@@ -3025,12 +3029,25 @@ local function main()
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
+                    -- Method 1: Multicast (preferred, may be blocked)
                     local udp = socket.udp()
-                    -- Set multicast TTL to 1 (stay on local network)
                     udp:setoption("ip-multicast-ttl", 1)
                     udp:sendto(encrypted, MULTICAST_ADDR, c.port)
                     udp:close()
-                    log("LAN discovery: sent to %s:%d (looking for %s)", MULTICAST_ADDR, c.port, name)
+
+                    -- Method 2: Subnet scan fallback (254 packets, but reliable)
+                    if subnet_base then
+                        for i = 1, 254 do
+                            if i ~= my_last_octet then
+                                local target_ip = subnet_base .. i
+                                local udp2 = socket.udp()
+                                udp2:sendto(encrypted, target_ip, c.port)
+                                udp2:close()
+                            end
+                        end
+                    end
+
+                    log("LAN discovery: multicast + subnet scan for %s (port %d)", name, c.port)
                 end
             end
         end
@@ -3112,11 +3129,26 @@ local function main()
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
+                    -- Multicast
                     local udp = socket.udp()
                     udp:setoption("ip-multicast-ttl", 1)
                     udp:sendto(encrypted, MULTICAST_ADDR, c.port)
                     udp:close()
-                    log("LAN discovery: sent to %s on connection failure (looking for %s)", MULTICAST_ADDR, name)
+
+                    -- Subnet scan fallback
+                    local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
+                    local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
+                    if subnet_base then
+                        for i = 1, 254 do
+                            if i ~= my_last_octet then
+                                local udp2 = socket.udp()
+                                udp2:sendto(encrypted, subnet_base .. i, c.port)
+                                udp2:close()
+                            end
+                        end
+                    end
+
+                    log("LAN discovery: multicast + subnet scan on connection failure (looking for %s)", name)
                 end
                 return
             end
