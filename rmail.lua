@@ -2929,7 +2929,6 @@ end
 local function main()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
                paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
-    write_file(STATE .. "/new-mail", "")
 
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n")
