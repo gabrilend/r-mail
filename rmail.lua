@@ -1013,8 +1013,12 @@ end
 local function send_encrypted(sock, key, plaintext)
     local nonce      = crypto.random_bytes(12)
     local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
-    if not ciphertext then return false end
+    if not ciphertext then
+        log("send_encrypted: encryption failed")
+        return false
+    end
     local data       = uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
+    log("send_encrypted: sending %d bytes", #data)
     -- Send all data, handling partial sends (important for large payloads)
     sock:settimeout(30)  -- allow time for large transfers
     local sent = 0
@@ -1025,9 +1029,11 @@ local function send_encrypted(sock, key, plaintext)
         elseif partial and partial > 0 then
             sent = sent + partial
         else
+            log("send_encrypted: send failed at %d/%d bytes: %s", sent, #data, tostring(err))
             return false  -- send failed
         end
     end
+    log("send_encrypted: sent %d bytes successfully", sent)
     return true
 end
 
@@ -1154,14 +1160,29 @@ local function http_encrypt_and_send(e)
     local key   = derive_key(e.req.psk_key)
     local nonce = crypto.random_bytes(12)
     local ct    = crypto.aes_gcm_encrypt(key, nonce, req_str)
-    local frame = nonce .. ct
-    local sent  = e.conn:send(uint32_be(#frame) .. frame)
-    if sent then
-        e.phase = "sent"
-    else
+    if not ct then
         e.phase = "done"
         e.conn:close()
+        return
     end
+    local data = uint32_be(#nonce + #ct) .. nonce .. ct
+    -- Send all data, handling partial sends (critical for large payloads like chunks)
+    e.conn:settimeout(30)
+    local sent = 0
+    while sent < #data do
+        local bytes, err, partial = e.conn:send(data, sent + 1)
+        if bytes then
+            sent = sent + bytes
+        elseif partial and partial > 0 then
+            sent = sent + partial
+        else
+            log("http send failed at %d/%d bytes: %s", sent, #data, tostring(err))
+            e.phase = "done"
+            e.conn:close()
+            return
+        end
+    end
+    e.phase = "sent"
 end
 
 -- Read and decrypt the length-prefixed response, then parse the HTTP status/body.
