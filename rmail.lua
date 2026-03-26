@@ -2990,12 +2990,23 @@ local function main()
     end
 
     -- {{{ UDP LAN Discovery
+    -- Calculate directed broadcast address from local IP (assumes /24 subnet).
+    -- e.g., 192.168.0.5 -> 192.168.0.255
+    local function get_broadcast_addr(local_ip)
+        local a, b, c = local_ip:match("^(%d+)%.(%d+)%.(%d+)%.")
+        if a and b and c then
+            return a .. "." .. b .. "." .. c .. ".255"
+        end
+        return "255.255.255.255"  -- fallback
+    end
+
     -- Send encrypted discovery request to same-network contacts.
-    -- Broadcasts to 255.255.255.255:<contact_port> for each contact whose IP matches our public IP.
+    -- Uses directed broadcast (e.g., 192.168.0.255) since 255.255.255.255 often doesn't work.
     -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
     local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
         local my_lan_ip = nat.get_local_ip()
         if not my_lan_ip then return end
+        local broadcast_addr = get_broadcast_addr(my_lan_ip)
         for name, c in pairs(contacts) do
             if c.ip == my_public_ip and c.token and c.port then
                 local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
@@ -3004,9 +3015,9 @@ local function main()
                 if encrypted then
                     local udp = socket.udp()
                     udp:setoption("broadcast", true)
-                    udp:sendto(encrypted, "255.255.255.255", c.port)
+                    udp:sendto(encrypted, broadcast_addr, c.port)
                     udp:close()
-                    log("LAN discovery: sent to port %d (looking for %s)", c.port, name)
+                    log("LAN discovery: sent to %s:%d (looking for %s)", broadcast_addr, c.port, name)
                 end
             end
         end
@@ -3088,11 +3099,12 @@ local function main()
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
+                    local broadcast_addr = get_broadcast_addr(my_lan_ip)
                     local udp = socket.udp()
                     udp:setoption("broadcast", true)
-                    udp:sendto(encrypted, "255.255.255.255", c.port)
+                    udp:sendto(encrypted, broadcast_addr, c.port)
                     udp:close()
-                    log("LAN discovery: sent on connection failure (looking for %s)", name)
+                    log("LAN discovery: sent to %s on connection failure (looking for %s)", broadcast_addr, name)
                 end
                 return
             end
