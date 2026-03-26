@@ -2981,9 +2981,13 @@ local function main()
         -- This contact is behind the same router — find their LAN IP
         local contacts = load_contacts()
         for name, c in pairs(contacts) do
-            if c.ip == host and tostring(c.port or "") == tostring(target_port) and lan.peers[name] then
-                log("same-network: using LAN IP %s for %s (instead of %s)", lan.peers[name], name, host)
-                return lan.peers[name]
+            if c.ip == host and tostring(c.port or "") == tostring(target_port) then
+                -- Check for manually configured lan_ip first, then cached discovery
+                local lan_ip = c.lan_ip or lan.peers[name]
+                if lan_ip then
+                    log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
+                    return lan_ip
+                end
             end
         end
         return nil
@@ -3000,24 +3004,52 @@ local function main()
         return "255.255.255.255"  -- fallback
     end
 
+    -- Get active LAN hosts from ARP cache (devices we've communicated with recently)
+    local function get_arp_hosts()
+        local hosts = {}
+        local handle = io.popen("ip neigh show 2>/dev/null | grep -v FAILED")
+        if handle then
+            for line in handle:lines() do
+                local ip = line:match("^(%d+%.%d+%.%d+%.%d+)")
+                if ip then hosts[#hosts + 1] = ip end
+            end
+            handle:close()
+        end
+        return hosts
+    end
+
     -- Send encrypted discovery request to same-network contacts.
-    -- Uses directed broadcast (e.g., 192.168.0.255) since 255.255.255.255 often doesn't work.
+    -- Tries multiple methods: directed broadcast, and unicast to ARP-cached hosts.
     -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
     local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
         local my_lan_ip = nat.get_local_ip()
         if not my_lan_ip then return end
         local broadcast_addr = get_broadcast_addr(my_lan_ip)
+        local arp_hosts = get_arp_hosts()
+
         for name, c in pairs(contacts) do
             if c.ip == my_public_ip and c.token and c.port then
                 local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
+                    -- Try directed broadcast
                     local udp = socket.udp()
                     udp:setoption("broadcast", true)
                     udp:sendto(encrypted, broadcast_addr, c.port)
                     udp:close()
-                    log("LAN discovery: sent to %s:%d (looking for %s)", broadcast_addr, c.port, name)
+
+                    -- Also try unicast to each ARP-cached host
+                    for _, host_ip in ipairs(arp_hosts) do
+                        if host_ip ~= my_lan_ip then
+                            local udp2 = socket.udp()
+                            udp2:sendto(encrypted, host_ip, c.port)
+                            udp2:close()
+                        end
+                    end
+
+                    log("LAN discovery: sent to %s + %d ARP hosts (looking for %s)",
+                        broadcast_addr, #arp_hosts, name)
                 end
             end
         end
