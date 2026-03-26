@@ -1136,6 +1136,9 @@ end
 -- Hook for LAN IP resolution. Set by main() to enable same-network optimization.
 local resolve_lan_host = nil
 
+-- Hook for connection timeout. Set by main() to trigger LAN discovery on failure.
+local on_connection_timeout = nil
+
 local function http_post_batch(requests)
     if #requests == 0 then return {} end
 
@@ -1207,6 +1210,10 @@ local function http_post_batch(requests)
     for i, e in ipairs(entries) do
         if e.phase ~= "done" then
             log("timeout connecting to %s:%d", e.req.host, e.req.port)
+            -- Trigger LAN discovery for same-network contacts on connection failure
+            if on_connection_timeout then
+                pcall(on_connection_timeout, e.req.host, e.req.port)
+            end
             e.conn:close()
         end
         results[i] = {ok = e.ok, data = e.data}
@@ -3021,7 +3028,41 @@ local function main()
     end
     -- }}}
 
-    -- Send LAN discovery on startup
+    -- Track which contacts have had discovery sent this sync cycle (rule #2: once per failure)
+    local discovery_sent_this_cycle = {}
+
+    -- {{{ on_connection_timeout
+    -- Callback for connection failures: trigger LAN discovery for same-network contacts.
+    -- Only sends once per contact per sync cycle to avoid spamming.
+    on_connection_timeout = function(host, target_port)
+        local my_public = read_file(STATE .. "/public_ip")
+        if not my_public then return end
+        my_public = my_public:match("^%s*(.-)%s*$")
+        if host ~= my_public then return end  -- not a same-network contact
+
+        local contacts = load_contacts()
+        for name, c in pairs(contacts) do
+            if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
+                if discovery_sent_this_cycle[name] then return end  -- already sent this cycle
+                discovery_sent_this_cycle[name] = true
+
+                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. port
+                local key = derive_key(c.token)
+                local encrypted = encrypt_packet(key, payload)
+                if encrypted then
+                    local udp = socket.udp()
+                    udp:setoption("broadcast", true)
+                    udp:sendto(encrypted, "255.255.255.255", c.port)
+                    udp:close()
+                    log("LAN discovery: sent on connection failure (looking for %s)", name)
+                end
+                return
+            end
+        end
+    end
+    -- }}}
+
+    -- Send LAN discovery on startup (rule #1)
     pcall(function()
         local my_public = read_file(STATE .. "/public_ip")
         if my_public then
@@ -3225,6 +3266,8 @@ local function main()
             log("manual sync triggered")
         end
         if now - last_sync >= interval then
+            -- Clear per-cycle discovery tracking (rule #2: send once per sync cycle)
+            discovery_sent_this_cycle = {}
             local ok, err = pcall(function()
                 check_transfers_file_cancellations()
                 local w1 = sync_outbox(my_name)

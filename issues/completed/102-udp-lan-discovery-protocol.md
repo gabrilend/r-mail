@@ -137,9 +137,15 @@ Added UDP LAN discovery protocol to rmail.lua:
 4. **Integration**:
    - Startup discovery sent when daemon starts (line ~3024)
    - UDP polling in main loop (line ~3232)
+   - Connection-failure discovery triggered when TCP timeout occurs for same-network contact
+
+5. **Trigger rules**:
+   - Rule 1: On daemon startup - send discovery to all same-network contacts
+   - Rule 2: On connection failure - send discovery once per failed contact (tracked via `discovery_sent` table)
+   - Rule 3: On receiving discovery - always respond and cache their LAN IP
 
 When a peer receives a discovery request, it caches the sender's LAN IP and sends a response. When a peer receives a response, it caches the responder's LAN IP. Both peers can then use `resolve_lan_host()` to connect via LAN IPs instead of public IPs.
 
 ## Status
 
-**FIXED** - Pending commit
+**FIXED** - Committed
