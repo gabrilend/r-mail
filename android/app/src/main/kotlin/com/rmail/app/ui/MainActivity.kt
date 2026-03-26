@@ -65,6 +65,27 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    composable("inbox?showOutbox={showOutbox}") { back ->
+                        val showOutbox = back.arguments?.getString("showOutbox") == "true"
+                        // Check for pending share intent after first configure
+                        val pending = pendingAttachLines
+                        if (pending != null) {
+                            pendingAttachLines = null
+                            initialComposeDraft = buildDraft(pending)
+                            navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}")
+                        }
+                        InboxScreen(
+                            vm = vm,
+                            initialShowOutbox = showOutbox,
+                            onOpen = { filename -> navController.navigate("read/$filename") },
+                            onOpenOutbox = { filename -> navController.navigate("outbox-read/$filename") },
+                            onCompose = { navController.navigate("compose") },
+                            onContacts = { navController.navigate("contacts") },
+                            onAttachments = { navController.navigate("attachments") },
+                            onSettings = { navController.navigate("settings") }
+                        )
+                    }
+
                     composable("inbox") {
                         // Check for pending share intent after first configure
                         val pending = pendingAttachLines
@@ -118,7 +139,9 @@ class MainActivity : ComponentActivity() {
                             initialContent = draft,
                             onCancel = { navController.popBackStack() },
                             onSent = {
-                                navController.popBackStack()
+                                navController.navigate("inbox?showOutbox=true") {
+                                    popUpTo("inbox") { inclusive = true }
+                                }
                                 vm.triggerSync()
                             }
                         )
@@ -130,7 +153,9 @@ class MainActivity : ComponentActivity() {
                             initialContent = "",
                             onCancel = { navController.popBackStack() },
                             onSent = {
-                                navController.popBackStack()
+                                navController.navigate("inbox?showOutbox=true") {
+                                    popUpTo("inbox") { inclusive = true }
+                                }
                                 vm.triggerSync()
                             }
                         )

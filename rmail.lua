@@ -3078,6 +3078,12 @@ local function main()
         end
 
         local now = socket.gettime()
+        local trigger = STATE .. "/sync-now"
+        if file_exists(trigger) then
+            os.remove(trigger)
+            last_sync = 0  -- force sync immediately
+            log("manual sync triggered")
+        end
         if now - last_sync >= interval then
             local ok, err = pcall(function()
                 check_transfers_file_cancellations()

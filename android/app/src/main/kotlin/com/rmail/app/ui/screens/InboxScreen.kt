@@ -21,6 +21,7 @@ import com.rmail.app.ui.SyncStatus
 @Composable
 fun InboxScreen(
     vm: MainViewModel,
+    initialShowOutbox: Boolean = false,
     onOpen: (String) -> Unit,
     onOpenOutbox: (String) -> Unit,
     onCompose: () -> Unit,
@@ -31,7 +32,7 @@ fun InboxScreen(
     val inboxFiles by vm.inboxFiles.collectAsState()
     val syncStatus by vm.syncStatus.collectAsState()
     val syncError by vm.syncError.collectAsState()
-    var showOutbox by remember { mutableStateOf(false) }
+    var showOutbox by remember { mutableStateOf(initialShowOutbox) }
     val outboxFiles by vm.outboxFiles.collectAsState()
     var menuExpanded by remember { mutableStateOf(false) }
 
