@@ -87,8 +87,8 @@ else
 fi
 
 # --- Hairpin NAT test ---
-# rmail uses TLS-PSK, so a plain curl will fail at the TLS layer — but that
-# still means the TCP connection reached the machine, which is all we need.
+# rmail uses AES-256-GCM encryption, so a plain curl will get a garbled
+# response — but that still means the TCP connection reached the machine.
 # Only curl exit code 28 (timeout) means the packet was dropped by the router.
 printf "  Testing hairpin NAT...  "
 curl -s --max-time 2 "http://$PUBLIC_IP:$PORT/" >/dev/null 2>&1

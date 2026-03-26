@@ -97,7 +97,7 @@ It handles the SSDP discovery, XML parsing, and SOAP calls internally. Available
 
 UPnP IGD has **no authentication**. Any device on the LAN can add or remove port mappings. The design philosophy was "devices on your home network are trusted." This made sense in 2001 when UPnP was designed — your LAN was a few computers you owned.
 
-It does not make sense in 2024 when your LAN includes: your phone, your spouse's phone, your kids' tablets, smart TVs, IoT lightbulbs, a robot vacuum, a smart speaker, and whatever malware any of them might be running.
+It does not make sense in 2026 when your LAN includes: your phone, your spouse's phone, your kids' tablets, smart TVs, IoT lightbulbs, a robot vacuum, a smart speaker, and whatever malware any of them might be running.
 
 Any compromised device on your network can:
 - Open any port on your router, exposing internal services to the internet
