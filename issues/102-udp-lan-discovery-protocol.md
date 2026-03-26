@@ -116,3 +116,30 @@ Uses the same encryption format as TCP messages for consistency.
 - This feature was designed during debugging of same-LAN connectivity issues where hairpin NAT was not working
 - The alternative (manual `lan_ip` field in contacts) was rejected as too cumbersome
 - UDP was chosen because it supports broadcast without needing to know peer IPs
+
+## Fix Applied
+
+Added UDP LAN discovery protocol to rmail.lua:
+
+1. **UDP socket setup** (line ~2898):
+   - Created UDP socket bound to same port as TCP
+   - Non-blocking mode for polling
+
+2. **Encryption helpers** (lines ~999-1019):
+   - `encrypt_packet(key, plaintext)` - encrypts data for UDP datagrams
+   - `decrypt_packet(key, packet)` - decrypts UDP datagrams
+
+3. **Discovery functions** (lines ~2954-3020):
+   - `send_lan_discovery()` - broadcasts RMAIL-DISCOVER to same-network contacts
+   - `handle_udp_discovery()` - processes incoming discovery requests/responses
+   - `poll_udp_discovery()` - non-blocking poll for UDP packets
+
+4. **Integration**:
+   - Startup discovery sent when daemon starts (line ~3024)
+   - UDP polling in main loop (line ~3232)
+
+When a peer receives a discovery request, it caches the sender's LAN IP and sends a response. When a peer receives a response, it caches the responder's LAN IP. Both peers can then use `resolve_lan_host()` to connect via LAN IPs instead of public IPs.
+
+## Status
+
+**FIXED** - Pending commit

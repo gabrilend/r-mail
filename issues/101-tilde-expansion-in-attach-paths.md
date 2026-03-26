@@ -57,3 +57,11 @@ This matches user expectations from shell behavior and reduces friction when com
 
 - This issue was discovered while debugging attachment consent files not appearing on recipient machines
 - The root cause was a Lua 5.4 compatibility bug (os.execute return value), but tilde paths also fail independently
+
+## Fix Applied
+
+Added `expand_tilde()` helper function at line ~172 and called it in `parse_outbox_file()` at line ~1226.
+
+## Status
+
+**FIXED** - Pending commit

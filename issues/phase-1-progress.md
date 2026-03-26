@@ -13,13 +13,13 @@ Phase 1 focuses on reliability and usability improvements for LAN-based communic
 | ID | Description | Status |
 |----|-------------|--------|
 | 100 | Lua 5.4 os.execute compatibility | Fixed (pending commit) |
-| 101 | Tilde expansion in attach: paths | Open |
-| 102 | UDP LAN discovery protocol | Open |
+| 101 | Tilde expansion in attach: paths | Fixed (pending commit) |
+| 102 | UDP LAN discovery protocol | Fixed (pending commit) |
 | 103 | Function ordering: remove_recipient_from_file | Fixed (pending commit) |
 
 ## Completed
 
-(none yet)
+All Phase 1 issues are fixed and pending commit.
 
 ## Notes
 

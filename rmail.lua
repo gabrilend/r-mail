@@ -166,6 +166,20 @@ local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+-- {{{ expand_tilde
+-- Expand ~ at the start of a path to the user's home directory.
+-- ~/foo becomes /home/user/foo. Paths not starting with ~ are unchanged.
+local function expand_tilde(path)
+    if path:sub(1, 1) == "~" then
+        local home = os.getenv("HOME")
+        if home then
+            return home .. path:sub(2)
+        end
+    end
+    return path
+end
+-- }}}
+
 local function run_hook(script, data, ...)
     local args = shell_quote(data)
     for _, extra in ipairs({...}) do
@@ -982,6 +996,28 @@ local function recv_encrypted(sock, key)
     return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
 end
 
+-- {{{ encrypt_packet
+-- Encrypt a raw packet for UDP/datagram use (no length prefix).
+-- Returns nonce..ciphertext, or nil on error.
+local function encrypt_packet(key, plaintext)
+    local nonce = crypto.random_bytes(12)
+    local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
+    if not ciphertext then return nil end
+    return nonce .. ciphertext
+end
+-- }}}
+
+-- {{{ decrypt_packet
+-- Decrypt a raw packet (nonce..ciphertext+tag).
+-- Returns plaintext or nil on error/auth failure.
+local function decrypt_packet(key, packet)
+    if #packet < 28 then return nil end  -- 12 nonce + 16 tag minimum
+    local nonce = packet:sub(1, 12)
+    local ciphertext = packet:sub(13)
+    return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
+end
+-- }}}
+
 -- Try to decrypt a raw packet (nonce..ciphertext+tag) against every known
 -- contact token. Returns (plaintext, contact_name) or (nil, nil).
 local function trial_decrypt(packet)
@@ -1209,7 +1245,7 @@ local function parse_outbox_file(path)
                     if header_lines[j]:lower():match("^attach:") then
                         local fp = header_lines[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
                         if fp and fp ~= "" then
-                            attachments[#attachments + 1] = fp
+                            attachments[#attachments + 1] = expand_tilde(fp)
                         end
                     end
                 end
@@ -2857,7 +2893,13 @@ local function main()
 
     local server = assert(socket.bind("0.0.0.0", port))
     server:settimeout(1)
-    log("listening on :%d", port)
+
+    -- UDP socket for LAN discovery (same port as TCP)
+    local udp_server = socket.udp()
+    assert(udp_server:setsockname("0.0.0.0", port))
+    udp_server:settimeout(0)  -- non-blocking
+
+    log("listening on :%d (TCP + UDP)", port)
 
     -- check for IP change on startup
     pcall(detect_ip_change, my_name, port)
@@ -2908,6 +2950,86 @@ local function main()
         end
         return nil
     end
+
+    -- {{{ UDP LAN Discovery
+    -- Send encrypted discovery request to same-network contacts.
+    -- Broadcasts to 255.255.255.255:<contact_port> for each contact whose IP matches our public IP.
+    local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
+        for name, c in pairs(contacts) do
+            if c.ip == my_public_ip and c.token and c.port then
+                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port
+                local key = derive_key(c.token)
+                local encrypted = encrypt_packet(key, payload)
+                if encrypted then
+                    local udp = socket.udp()
+                    udp:setoption("broadcast", true)
+                    udp:sendto(encrypted, "255.255.255.255", c.port)
+                    udp:close()
+                    log("LAN discovery: sent to port %d (looking for %s)", c.port, name)
+                end
+            end
+        end
+    end
+
+    -- Handle incoming UDP packet: try to decrypt with each contact's key.
+    -- If successful, it's either a discovery request or response.
+    local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
+        -- Try to decrypt with each contact's key
+        for name, c in pairs(contacts) do
+            if c.token then
+                local key = derive_key(c.token)
+                local plaintext = decrypt_packet(key, data)
+                if plaintext then
+                    -- Successful decryption - this packet is from 'name'
+                    local disc_name, disc_port = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)")
+                    if disc_name then
+                        -- It's a discovery request - cache their LAN IP and respond
+                        lan_peers[disc_name] = sender_ip
+                        log("LAN discovery: %s is at %s (received request)", disc_name, sender_ip)
+
+                        -- Send response back
+                        local resp_payload = "RMAIL-HERE " .. my_name
+                        local resp_key = derive_key(c.token)
+                        local resp_encrypted = encrypt_packet(resp_key, resp_payload)
+                        if resp_encrypted then
+                            local udp = socket.udp()
+                            udp:sendto(resp_encrypted, sender_ip, tonumber(disc_port))
+                            udp:close()
+                        end
+                        return
+                    end
+
+                    local here_name = plaintext:match("^RMAIL%-HERE%s+(%S+)")
+                    if here_name then
+                        -- It's a discovery response - cache their LAN IP
+                        lan_peers[here_name] = sender_ip
+                        log("LAN discovery: %s is at %s (received response)", here_name, sender_ip)
+                        return
+                    end
+                end
+            end
+        end
+    end
+
+    -- Check for and handle UDP packets (non-blocking)
+    local function poll_udp_discovery(udp, contacts, my_name, my_port, my_public_ip)
+        while true do
+            local data, sender_ip, sender_port = udp:receivefrom()
+            if not data then break end
+            pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
+        end
+    end
+    -- }}}
+
+    -- Send LAN discovery on startup
+    pcall(function()
+        local my_public = read_file(STATE .. "/public_ip")
+        if my_public then
+            my_public = my_public:match("^%s*(.-)%s*$")
+            local contacts = load_contacts()
+            send_lan_discovery(contacts, my_name, port, my_public)
+        end
+    end)
 
     local interval = 10   -- TODO: increase for production (was 300, min was 60)
     local MIN_INTERVAL = 10
@@ -3084,6 +3206,16 @@ local function main()
             if not ok then log("request error: %s", tostring(err)) end
             client:close()
         end
+
+        -- Poll for UDP discovery packets (non-blocking)
+        pcall(function()
+            local my_public = read_file(STATE .. "/public_ip")
+            if my_public then
+                my_public = my_public:match("^%s*(.-)%s*$")
+                local contacts = load_contacts()
+                poll_udp_discovery(udp_server, contacts, my_name, port, my_public)
+            end
+        end)
 
         local now = socket.gettime()
         local trigger = STATE .. "/sync-now"
