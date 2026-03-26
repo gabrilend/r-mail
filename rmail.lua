@@ -2992,10 +2992,13 @@ local function main()
     -- {{{ UDP LAN Discovery
     -- Send encrypted discovery request to same-network contacts.
     -- Broadcasts to 255.255.255.255:<contact_port> for each contact whose IP matches our public IP.
+    -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
     local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
+        local my_lan_ip = nat.get_local_ip()
+        if not my_lan_ip then return end
         for name, c in pairs(contacts) do
             if c.ip == my_public_ip and c.token and c.port then
-                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port
+                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
@@ -3011,6 +3014,7 @@ local function main()
 
     -- Handle incoming UDP packet: try to decrypt with each contact's key.
     -- If successful, it's either a discovery request or response.
+    -- Uses LAN IP from payload (not UDP source) because routers may rewrite source address.
     local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
         -- Try to decrypt with each contact's key
         for name, c in pairs(contacts) do
@@ -3019,29 +3023,30 @@ local function main()
                 local plaintext = decrypt_packet(key, data)
                 if plaintext then
                     -- Successful decryption - this packet is from 'name'
-                    local disc_name, disc_port = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)")
-                    if disc_name then
-                        -- It's a discovery request - cache their LAN IP and respond
-                        lan.peers[disc_name] = sender_ip
-                        log("LAN discovery: %s is at %s (received request)", disc_name, sender_ip)
+                    local disc_name, disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)%s+(%S+)")
+                    if disc_name and disc_lan_ip then
+                        -- It's a discovery request - cache their LAN IP (from payload, not UDP source)
+                        lan.peers[disc_name] = disc_lan_ip
+                        log("LAN discovery: %s is at %s (received request)", disc_name, disc_lan_ip)
 
-                        -- Send response back
-                        local resp_payload = "RMAIL-HERE " .. my_name
+                        -- Send response back to their actual LAN IP
+                        local my_lan_ip = nat.get_local_ip()
+                        local resp_payload = "RMAIL-HERE " .. my_name .. " " .. (my_lan_ip or sender_ip)
                         local resp_key = derive_key(c.token)
                         local resp_encrypted = encrypt_packet(resp_key, resp_payload)
                         if resp_encrypted then
                             local udp = socket.udp()
-                            udp:sendto(resp_encrypted, sender_ip, tonumber(disc_port))
+                            udp:sendto(resp_encrypted, disc_lan_ip, tonumber(disc_port))
                             udp:close()
                         end
                         return
                     end
 
-                    local here_name = plaintext:match("^RMAIL%-HERE%s+(%S+)")
-                    if here_name then
-                        -- It's a discovery response - cache their LAN IP
-                        lan.peers[here_name] = sender_ip
-                        log("LAN discovery: %s is at %s (received response)", here_name, sender_ip)
+                    local here_name, here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)%s+(%S+)")
+                    if here_name and here_lan_ip then
+                        -- It's a discovery response - cache their LAN IP (from payload)
+                        lan.peers[here_name] = here_lan_ip
+                        log("LAN discovery: %s is at %s (received response)", here_name, here_lan_ip)
                         return
                     end
                 end
@@ -3068,13 +3073,16 @@ local function main()
         my_public = my_public:match("^%s*(.-)%s*$")
         if host ~= my_public then return end  -- not a same-network contact
 
+        local my_lan_ip = nat.get_local_ip()
+        if not my_lan_ip then return end
+
         local contacts = load_contacts()
         for name, c in pairs(contacts) do
             if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
                 if lan.discovery_sent[name] then return end  -- already sent this cycle
                 lan.discovery_sent[name] = true
 
-                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. port
+                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. port .. " " .. my_lan_ip
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then

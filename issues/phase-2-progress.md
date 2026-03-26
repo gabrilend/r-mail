@@ -15,10 +15,13 @@ Phase 2 focuses on shared device support, multi-device mailbox access, and codeb
 |----|-------------|--------|
 | 200 | Shared device sync access | Open |
 | 201 | Modularize rmail.lua codebase | Open |
+| 202 | Fix chunk response parsing | Fixed |
+| 203 | LAN discovery router IP rewrite | Fixed |
 
 ## Completed
 
-(none yet)
+- **202**: Fixed chunk response parsing - added status to http_post_batch results, fixed data access in send_next_chunks
+- **203**: Fixed LAN discovery when router rewrites UDP source address - include sender's LAN IP in encrypted payload
 
 ## Notes
 
