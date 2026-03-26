@@ -97,7 +97,53 @@ class MailStore(context: Context, mailboxId: String) {
         if (contactsFile.exists()) contactsFile.readText() else ""
 
     fun writeContacts(content: String) {
-        contactsFile.writeText(content)
+        contactsFile.writeText(alignContactsEquals(content))
+    }
+
+    /**
+     * Pretty-print contacts: align equals signs per contact group.
+     * Groups are separated by blank lines. Within each group, the = signs
+     * align to the longest "name.field" prefix.
+     */
+    private fun alignContactsEquals(content: String): String {
+        val result = StringBuilder()
+        val group = mutableListOf<String>()
+
+        fun flushGroup() {
+            if (group.isEmpty()) return
+            // Find the longest left-hand side (before =)
+            val maxLhs = group.maxOf { line ->
+                val eq = line.indexOf('=')
+                if (eq > 0) line.substring(0, eq).trimEnd().length else 0
+            }
+            for (line in group) {
+                val eq = line.indexOf('=')
+                if (eq > 0 && maxLhs > 0) {
+                    val lhs = line.substring(0, eq).trimEnd()
+                    val rhs = line.substring(eq + 1).trimStart()
+                    result.appendLine("${lhs.padEnd(maxLhs)} = $rhs")
+                } else {
+                    result.appendLine(line)
+                }
+            }
+            group.clear()
+        }
+
+        for (line in content.lines()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                flushGroup()
+                result.appendLine()
+            } else if (trimmed.startsWith("#") || trimmed.startsWith("/")) {
+                flushGroup()
+                result.appendLine(line)
+            } else {
+                group.add(line)
+            }
+        }
+        flushGroup()
+        // Remove trailing blank lines
+        return result.toString().trimEnd() + "\n"
     }
 
     /**

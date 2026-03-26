@@ -9,12 +9,17 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -29,6 +34,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
@@ -124,10 +131,15 @@ fun InboxScreen(
     // Contacts state
     var contactsContent by remember { mutableStateOf(vm.readContacts()) }
     val savedContacts = remember { mutableStateOf(vm.readContacts()) }
-    var contactsModified by remember { mutableStateOf(false) }
+    val contactsModified by remember(contactsContent, savedContacts.value) {
+        mutableStateOf(contactsContent != savedContacts.value)
+    }
 
     // Settings modified tracking
     var settingsModified by remember { mutableStateOf(false) }
+
+    // Contact editor state
+    var showContactEditor by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
 
@@ -143,8 +155,22 @@ fun InboxScreen(
     }
 
     val isKeyboardOpen = rememberKeyboardOpen()
+    val focusManager = LocalFocusManager.current
+
+    // Clear focus (hides cursor) whenever keyboard closes
+    LaunchedEffect(isKeyboardOpen) {
+        if (!isKeyboardOpen) focusManager.clearFocus()
+    }
 
     LaunchedEffect(Unit) { vm.refreshLocal() }
+    // Re-read contacts from disk when switching to contacts panel (picks up sync changes)
+    LaunchedEffect(currentPanel) {
+        if (currentPanel == Panel.CONTACTS && !contactsModified) {
+            val fresh = vm.readContacts()
+            contactsContent = fresh
+            savedContacts.value = fresh
+        }
+    }
     LaunchedEffect(currentPanel) {
         if (currentPanel == Panel.FILES) vm.loadAttachmentList()
     }
@@ -153,8 +179,15 @@ fun InboxScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Mailboxes")
+                    IconButton(onClick = {
+                        if (showContactEditor) {
+                            showContactEditor = false
+                        } else {
+                            onBack()
+                        }
+                    }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = if (showContactEditor) "Back to contacts" else "Mailboxes")
                     }
                 },
                 title = {
@@ -163,16 +196,55 @@ fun InboxScreen(
                     Text(config?.name?.ifBlank { null } ?: config?.host ?: "Mailbox")
                 },
                 actions = {
-                    when (syncStatus) {
-                        SyncStatus.SYNCING -> CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp).padding(end = 8.dp),
-                            strokeWidth = 2.dp
-                        )
-                        SyncStatus.ERROR -> IconButton(onClick = { vm.triggerSync() }) {
-                            Icon(Icons.Default.Warning, contentDescription = "Sync error")
+                    // Only show refresh on data panels (inbox, outbox, files)
+                    val showRefresh = currentPanel in listOf(Panel.INBOX, Panel.OUTBOX, Panel.FILES, Panel.CONTACTS)
+                        && !showContactEditor
+                    if (showRefresh) {
+                        when (syncStatus) {
+                            SyncStatus.SYNCING -> CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp).padding(end = 8.dp),
+                                strokeWidth = 2.dp
+                            )
+                            SyncStatus.ERROR -> IconButton(onClick = { vm.triggerSync() }) {
+                                Icon(Icons.Default.Warning, contentDescription = "Sync error")
+                            }
+                            SyncStatus.IDLE -> IconButton(onClick = { vm.triggerSync() }) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            }
                         }
-                        SyncStatus.IDLE -> IconButton(onClick = { vm.triggerSync() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                    }
+                    // Contacts: + button opens structured contact editor (not shown in editor)
+                    if (currentPanel == Panel.CONTACTS && !showContactEditor) {
+                        IconButton(onClick = { showContactEditor = true }) {
+                            Icon(Icons.Default.Add, contentDescription = "Add contact")
+                        }
+                    }
+                    // Outbox: + button as shortcut to Write panel.
+                    // This intentional redundancy exists because users instinctively
+                    // look to the top-right to compose, even though the Write tab
+                    // in the bottom bar does the same thing.
+                    if (currentPanel == Panel.OUTBOX) {
+                        IconButton(onClick = { currentPanel = Panel.WRITE }) {
+                            Icon(Icons.Default.Add, contentDescription = "Write new message")
+                        }
+                    }
+                    // Files: + button opens file picker pre-addressed to this mailbox.
+                    // Sends user through the compose workflow to reinforce the message
+                    // passing paradigm — they can review, edit, or redirect before sending.
+                    if (currentPanel == Panel.FILES) {
+                        IconButton(onClick = {
+                            val activeId = vm.activeMailboxId.value
+                            val config = activeId?.let { vm.registry.get(it) }
+                            val name = config?.name ?: ""
+                            draftRecipients = listOf(name)
+                            draftAttachments.clear()
+                            draftSubject = ""
+                            draftBody = ""
+                            currentPanel = Panel.WRITE
+                            // Immediately open the file picker
+                            filePicker.launch("*/*")
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = "Upload file")
                         }
                     }
                     if (currentPanel == Panel.WRITE) {
@@ -269,11 +341,10 @@ fun InboxScreen(
                     syncStatus != SyncStatus.ERROR && vm.isActiveConfigured
                 if (showContactsActions) {
                     ActionBar(
-                        onClear = { contactsContent = savedContacts.value; contactsModified = false },
+                        onClear = { contactsContent = savedContacts.value },
                         onSave = {
                             vm.saveContacts(contactsContent)
                             savedContacts.value = contactsContent
-                            contactsModified = false
                         }
                     )
                 }
@@ -291,12 +362,26 @@ fun InboxScreen(
                 Panel.OUTBOX -> MessageList(outboxFiles, "Outbox is empty", true,
                     { vm.deleteOutboxFile(it) }, { onOpenOutbox(it) })
                 Panel.FILES -> AttachmentList(vm, attachments)
-                Panel.CONTACTS -> ContactsPanel(
-                    vm = vm,
-                    content = contactsContent,
-                    savedContent = savedContacts.value,
-                    onContentChange = { contactsContent = it; contactsModified = true }
-                )
+                Panel.CONTACTS -> if (showContactEditor) {
+                    ContactEditorPanel(
+                        existingContacts = contactsContent,
+                        accentColor = Color(vm.globalSettings.accentColor.toLong() and 0xFFFFFFFFL),
+                        onSave = { newEntry ->
+                            // Append new contact to contacts content (shown in accent until file is saved)
+                            val separator = if (contactsContent.endsWith("\n") || contactsContent.isEmpty()) "" else "\n"
+                            contactsContent = contactsContent + separator + "\n" + newEntry
+                            showContactEditor = false
+                        },
+                        onCancel = { showContactEditor = false }
+                    )
+                } else {
+                    ContactsPanel(
+                        vm = vm,
+                        content = contactsContent,
+                        savedContent = savedContacts.value,
+                        onContentChange = { contactsContent = it }
+                    )
+                }
                 Panel.SETTINGS -> SettingsPanel(vm,
                     onModified = { settingsModified = true },
                     onSaved = { settingsModified = false })
@@ -445,6 +530,323 @@ private fun ContactsPanel(
                         fontSize = 13.sp, lineHeight = 19.sp
                     )
                 )
+            }
+        }
+    }
+}
+
+// ── Contact editor panel ─────────────────────────────────────────────────────
+
+@Composable
+private fun ContactEditorPanel(
+    existingContacts: String,
+    accentColor: Color,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var contactName by remember { mutableStateOf("") }
+    var ipOctets by remember { mutableStateOf(listOf("", "", "", "")) }
+    var port by remember { mutableStateOf("") }
+    var token by remember { mutableStateOf("") }
+    var customFields by remember { mutableStateOf(listOf<Pair<String, String>>()) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Parse existing contact names for duplicate detection
+    val existingNames = remember(existingContacts) {
+        existingContacts.lines()
+            .mapNotNull { line ->
+                val dotIdx = line.indexOf('.')
+                val eqIdx = line.indexOf('=')
+                if (dotIdx > 0 && eqIdx > dotIdx) line.substring(0, dotIdx).trim() else null
+            }
+            .toSet()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Header with cancel/save
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onCancel) {
+                Text("Cancel", color = accentColor)
+            }
+            Text("New contact", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = {
+                // Validate
+                val name = contactName.trim()
+                if (name.isEmpty()) { errorMessage = "Name is required"; return@TextButton }
+                if (!name.matches(Regex("^[a-zA-Z0-9_-]+$"))) {
+                    errorMessage = "Name: letters, numbers, hyphens, underscores only"
+                    return@TextButton
+                }
+                if (name in existingNames) {
+                    errorMessage = "Contact '$name' already exists"
+                    return@TextButton
+                }
+                val ip = ipOctets.joinToString(".")
+                if (ipOctets.any { it.isEmpty() }) { errorMessage = "IP address is required"; return@TextButton }
+                if (port.isEmpty()) { errorMessage = "Port is required"; return@TextButton }
+                if (token.isEmpty()) { errorMessage = "Token is required"; return@TextButton }
+
+                // Build aligned contact entry — find longest field name for padding
+                val allFields = mutableListOf(
+                    "ip" to ip,
+                    "port" to port,
+                    "token" to "\"$token\""
+                )
+                for ((fn, fv) in customFields) {
+                    if (fn.isNotBlank() && fv.isNotBlank()) {
+                        allFields.add(fn to "\"$fv\"")
+                    }
+                }
+                val maxFieldLen = allFields.maxOf { it.first.length }
+                val lines = allFields.map { (field, value) ->
+                    val padded = field.padEnd(maxFieldLen)
+                    "$name.$padded = $value"
+                }
+                onSave(lines.joinToString("\n"))
+            }) { Text("Save", color = accentColor) }
+        }
+
+        if (errorMessage != null) {
+            Text(errorMessage!!, color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall)
+        }
+
+        // Contact name
+        Text("Name", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        BasicTextField(
+            value = contactName,
+            onValueChange = { contactName = it.filter { c -> c.isLetterOrDigit() || c == '-' || c == '_' }; errorMessage = null },
+            singleLine = true,
+            textStyle = TextStyle(fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (contactName.isEmpty()) Text("e.g. alice",
+                        style = TextStyle(fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)))
+                    inner()
+                }
+            }
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+        // IP address — 4 octet fields with auto-advance
+        Text("IP address", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        IpAddressField(octets = ipOctets, onOctetsChange = { ipOctets = it; errorMessage = null })
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+        // Port
+        Text("Port", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        BasicTextField(
+            value = port,
+            onValueChange = { port = it.filter { c -> c.isDigit() }.take(5); errorMessage = null },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = TextStyle(fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (port.isEmpty()) Text("e.g. 8025",
+                        style = TextStyle(fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)))
+                    inner()
+                }
+            }
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+        // Token
+        Text("Token", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("\"", style = TextStyle(fontSize = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant))
+            BasicTextField(
+                value = token,
+                onValueChange = { token = it.replace("\"", ""); errorMessage = null },
+                singleLine = true,
+                textStyle = TextStyle(fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier.weight(1f).padding(vertical = 4.dp),
+                decorationBox = { inner ->
+                    Box {
+                        if (token.isEmpty()) Text("e.g. apple-boat-racecar",
+                            style = TextStyle(fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)))
+                        inner()
+                    }
+                }
+            )
+            Text("\"", style = TextStyle(fontSize = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant))
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+        // Custom fields — each entry is a name+value pair sharing one +/- button
+        Text("Custom fields", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        customFields.forEachIndexed { index, (fieldName, fieldValue) ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                // Field name and value stacked
+                Column(modifier = Modifier.weight(1f)) {
+                    BasicTextField(
+                        value = fieldName,
+                        onValueChange = { v ->
+                            val new = customFields.toMutableList()
+                            new[index] = v.filter { c -> c.isLetterOrDigit() || c == '_' || c == '-' } to fieldValue
+                            customFields = new
+                        },
+                        singleLine = true,
+                        textStyle = TextStyle(fontSize = 14.sp, color = accentColor),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        decorationBox = { inner ->
+                            Box {
+                                if (fieldName.isEmpty()) Text("field name",
+                                    style = TextStyle(fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)))
+                                inner()
+                            }
+                        }
+                    )
+                    BasicTextField(
+                        value = fieldValue,
+                        onValueChange = { v ->
+                            val new = customFields.toMutableList()
+                            new[index] = fieldName to v
+                            customFields = new
+                        },
+                        singleLine = true,
+                        textStyle = TextStyle(fontSize = 14.sp, color = MaterialTheme.colorScheme.onBackground),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        decorationBox = { inner ->
+                            Box {
+                                if (fieldValue.isEmpty()) Text("value",
+                                    style = TextStyle(fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)))
+                                inner()
+                            }
+                        }
+                    )
+                }
+                // Single - button removes both the name and value
+                IconButton(onClick = {
+                    customFields = customFields.filterIndexed { i, _ -> i != index }
+                }) {
+                    Icon(Icons.Default.Remove, contentDescription = "Remove field")
+                }
+            }
+            if (index < customFields.lastIndex) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+            }
+        }
+
+        // + button adds a new empty name+value pair
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                if (customFields.isEmpty()) "None" else "Add another",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = {
+                customFields = customFields + ("" to "")
+            }) {
+                Icon(Icons.Default.Add, contentDescription = "Add custom field")
+            }
+        }
+    }
+}
+
+// ── IP address field (4 octets with auto-advance) ───────────────────────────
+
+@Composable
+private fun IpAddressField(
+    octets: List<String>,
+    onOctetsChange: (List<String>) -> Unit
+) {
+    val focusRequesters = remember { List(4) { androidx.compose.ui.focus.FocusRequester() } }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        for (i in 0..3) {
+            BasicTextField(
+                value = octets[i],
+                onValueChange = { v ->
+                    val filtered = v.filter { it.isDigit() }.take(3)
+                    val new = octets.toMutableList()
+                    new[i] = filtered
+                    onOctetsChange(new)
+                    if (filtered.length == 3 && i < 3) {
+                        focusRequesters[i + 1].requestFocus()
+                    }
+                    if ('.' in v && i < 3) {
+                        focusRequesters[i + 1].requestFocus()
+                    }
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = if (i < 3) ImeAction.Next else ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(
+                    onNext = { if (i < 3) focusRequesters[i + 1].requestFocus() }
+                ),
+                textStyle = TextStyle(fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier
+                    .weight(1f)
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                        RoundedCornerShape(4.dp)
+                    )
+                    .padding(vertical = 8.dp, horizontal = 4.dp)
+                    .focusRequester(focusRequesters[i]),
+                decorationBox = { inner ->
+                    Box(contentAlignment = Alignment.Center) {
+                        if (octets[i].isEmpty()) Text(
+                            when (i) { 0 -> "192"; 1 -> "168"; 2 -> "0"; else -> "1" },
+                            style = TextStyle(fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        )
+                        inner()
+                    }
+                }
+            )
+            if (i < 3) {
+                Text(".", style = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant))
             }
         }
     }
@@ -747,36 +1149,96 @@ private fun sanitizeFilename(name: String): String {
 // ── Contacts diff visual transformation ─────────────────────────────────────
 
 /**
- * Per-character diff: compares current text against saved text character by character.
- * Characters that differ from the saved version are shown in the accent color + bold.
+ * Per-line, per-word diff. Each line is compared against its corresponding saved
+ * line by splitting into whitespace-delimited tokens. Only words that differ are
+ * highlighted. If the line itself is entirely new (no saved counterpart), the
+ * whole line is highlighted.
  * Uses FontWeight.W600 (semibold) to avoid changing line spacing.
  */
 private class ContactsDiffTransformation(
     private val saved: String,
     private val accentColor: Color
 ) : VisualTransformation {
+    private val savedLines = saved.lines()
+    private val accentStyle = SpanStyle(color = accentColor, fontWeight = FontWeight.W600)
+
     override fun filter(text: AnnotatedString): TransformedText {
         val current = text.text
+        val currentLines = current.lines()
         val annotated = buildAnnotatedString {
             append(current)
-            // Find ranges that differ from saved
-            val minLen = minOf(current.length, saved.length)
-            var i = 0
-            while (i < current.length) {
-                if (i >= saved.length || current[i] != saved[i]) {
-                    // Find the end of this changed range
-                    var end = i + 1
-                    while (end < current.length && (end >= saved.length || current[end] != saved[end])) {
-                        end++
+            var offset = 0
+            for (lineIdx in currentLines.indices) {
+                val curLine = currentLines[lineIdx]
+                val savLine = savedLines.getOrNull(lineIdx)
+                if (curLine != savLine) {
+                    if (savLine == null) {
+                        if (curLine.isNotEmpty()) addStyle(accentStyle, offset, offset + curLine.length)
+                    } else {
+                        val curWords = tokenize(curLine)
+                        val savWords = tokenize(savLine)
+                        // Find which current words are NOT in the longest common subsequence
+                        val matched = lcsMatchedIndices(curWords.map { it.first }, savWords.map { it.first })
+                        for (i in curWords.indices) {
+                            if (i !in matched) {
+                                val (_, start, end) = curWords[i]
+                                addStyle(accentStyle, offset + start, offset + end)
+                            }
+                        }
                     }
-                    addStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.W600), i, end)
-                    i = end
-                } else {
-                    i++
                 }
+                offset += curLine.length + 1
             }
         }
         return TransformedText(annotated, OffsetMapping.Identity)
+    }
+
+    /**
+     * Returns the set of indices in `current` that are part of the longest
+     * common subsequence with `saved`. Words at these indices are unchanged.
+     */
+    private fun lcsMatchedIndices(current: List<String>, saved: List<String>): Set<Int> {
+        val m = current.size
+        val n = saved.size
+        // Build LCS table
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in m - 1 downTo 0) {
+            for (j in n - 1 downTo 0) {
+                dp[i][j] = if (current[i] == saved[j]) dp[i + 1][j + 1] + 1
+                           else maxOf(dp[i + 1][j], dp[i][j + 1])
+            }
+        }
+        // Backtrack to find which current indices are matched
+        val matched = mutableSetOf<Int>()
+        var i = 0; var j = 0
+        while (i < m && j < n) {
+            if (current[i] == saved[j]) {
+                matched.add(i)
+                i++; j++
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                i++
+            } else {
+                j++
+            }
+        }
+        return matched
+    }
+
+    private fun isSeparator(c: Char) = c.isWhitespace() || c == '.' || c == '-' || c == '_'
+
+    /** Split a line into (word, startIndex, endIndex) triples, treating
+     *  whitespace, dots, dashes, and underscores as word boundaries. */
+    private fun tokenize(line: String): List<Triple<String, Int, Int>> {
+        val tokens = mutableListOf<Triple<String, Int, Int>>()
+        var i = 0
+        while (i < line.length) {
+            while (i < line.length && isSeparator(line[i])) i++
+            if (i >= line.length) break
+            val start = i
+            while (i < line.length && !isSeparator(line[i])) i++
+            tokens.add(Triple(line.substring(start, i), start, i))
+        }
+        return tokens
     }
 }
 
