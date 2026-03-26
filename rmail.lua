@@ -2901,10 +2901,14 @@ local function main()
     local server = assert(socket.bind("0.0.0.0", port))
     server:settimeout(1)
 
-    -- UDP socket for LAN discovery (same port as TCP)
-    local udp_server = socket.udp()
-    assert(udp_server:setsockname("0.0.0.0", port))
-    udp_server:settimeout(0)  -- non-blocking
+    -- LAN discovery state (consolidated to reduce upvalue count for Lua 5.4)
+    local lan = {
+        udp = socket.udp(),  -- UDP socket for discovery
+        peers = {},          -- contact_name -> LAN IP cache
+        discovery_sent = {}, -- contacts already sent discovery this cycle
+    }
+    assert(lan.udp:setsockname("0.0.0.0", port))
+    lan.udp:settimeout(0)  -- non-blocking
 
     log("listening on :%d (TCP + UDP)", port)
 
@@ -2937,9 +2941,6 @@ local function main()
             stored_lan_ip, new_lan_ip, port, stored_lan_ip, new_lan_ip))
     end)
 
-    -- LAN peer cache: contact_name -> LAN IP (learned from incoming connections)
-    local lan_peers = {}
-
     -- Enable same-network optimization: when a contact's IP matches our public IP,
     -- use their cached LAN IP instead to avoid hairpin NAT.
     resolve_lan_host = function(host, target_port)
@@ -2950,9 +2951,9 @@ local function main()
         -- This contact is behind the same router — find their LAN IP
         local contacts = load_contacts()
         for name, c in pairs(contacts) do
-            if c.ip == host and tostring(c.port or "") == tostring(target_port) and lan_peers[name] then
-                log("same-network: using LAN IP %s for %s (instead of %s)", lan_peers[name], name, host)
-                return lan_peers[name]
+            if c.ip == host and tostring(c.port or "") == tostring(target_port) and lan.peers[name] then
+                log("same-network: using LAN IP %s for %s (instead of %s)", lan.peers[name], name, host)
+                return lan.peers[name]
             end
         end
         return nil
@@ -2991,7 +2992,7 @@ local function main()
                     local disc_name, disc_port = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)")
                     if disc_name then
                         -- It's a discovery request - cache their LAN IP and respond
-                        lan_peers[disc_name] = sender_ip
+                        lan.peers[disc_name] = sender_ip
                         log("LAN discovery: %s is at %s (received request)", disc_name, sender_ip)
 
                         -- Send response back
@@ -3009,7 +3010,7 @@ local function main()
                     local here_name = plaintext:match("^RMAIL%-HERE%s+(%S+)")
                     if here_name then
                         -- It's a discovery response - cache their LAN IP
-                        lan_peers[here_name] = sender_ip
+                        lan.peers[here_name] = sender_ip
                         log("LAN discovery: %s is at %s (received response)", here_name, sender_ip)
                         return
                     end
@@ -3028,12 +3029,9 @@ local function main()
     end
     -- }}}
 
-    -- Track which contacts have had discovery sent this sync cycle (rule #2: once per failure)
-    local discovery_sent_this_cycle = {}
-
     -- {{{ on_connection_timeout
     -- Callback for connection failures: trigger LAN discovery for same-network contacts.
-    -- Only sends once per contact per sync cycle to avoid spamming.
+    -- Only sends once per contact per sync cycle to avoid spamming (tracked in lan.discovery_sent).
     on_connection_timeout = function(host, target_port)
         local my_public = read_file(STATE .. "/public_ip")
         if not my_public then return end
@@ -3043,8 +3041,8 @@ local function main()
         local contacts = load_contacts()
         for name, c in pairs(contacts) do
             if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
-                if discovery_sent_this_cycle[name] then return end  -- already sent this cycle
-                discovery_sent_this_cycle[name] = true
+                if lan.discovery_sent[name] then return end  -- already sent this cycle
+                lan.discovery_sent[name] = true
 
                 local payload = "RMAIL-DISCOVER " .. my_name .. " " .. port
                 local key = derive_key(c.token)
@@ -3128,7 +3126,7 @@ local function main()
                         local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
                         local cc = load_contacts()
                         if cc[contact_name] and cc[contact_name].ip == my_public then
-                            lan_peers[contact_name] = peer_ip
+                            lan.peers[contact_name] = peer_ip
                         end
                     end
                 end
@@ -3254,7 +3252,7 @@ local function main()
             if my_public then
                 my_public = my_public:match("^%s*(.-)%s*$")
                 local contacts = load_contacts()
-                poll_udp_discovery(udp_server, contacts, my_name, port, my_public)
+                poll_udp_discovery(lan.udp, contacts, my_name, port, my_public)
             end
         end)
 
@@ -3267,7 +3265,7 @@ local function main()
         end
         if now - last_sync >= interval then
             -- Clear per-cycle discovery tracking (rule #2: send once per sync cycle)
-            discovery_sent_this_cycle = {}
+            lan.discovery_sent = {}
             local ok, err = pcall(function()
                 check_transfers_file_cancellations()
                 local w1 = sync_outbox(my_name)
