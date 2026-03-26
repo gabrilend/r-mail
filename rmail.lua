@@ -1013,8 +1013,22 @@ end
 local function send_encrypted(sock, key, plaintext)
     local nonce      = crypto.random_bytes(12)
     local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
-    local payload    = nonce .. ciphertext
-    sock:send(uint32_be(#payload) .. payload)
+    if not ciphertext then return false end
+    local data       = uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
+    -- Send all data, handling partial sends (important for large payloads)
+    sock:settimeout(30)  -- allow time for large transfers
+    local sent = 0
+    while sent < #data do
+        local bytes, err, partial = sock:send(data, sent + 1)
+        if bytes then
+            sent = sent + bytes
+        elseif partial and partial > 0 then
+            sent = sent + partial
+        else
+            return false  -- send failed
+        end
+    end
+    return true
 end
 
 -- Receive and decrypt a length-prefixed encrypted packet.
