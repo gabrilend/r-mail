@@ -2994,38 +2994,30 @@ local function main()
     end
 
     -- {{{ UDP LAN Discovery
-    -- Calculate directed broadcast address from local IP (assumes /24 subnet).
-    -- e.g., 192.168.0.5 -> 192.168.0.255
-    local function get_broadcast_addr(local_ip)
-        local a, b, c = local_ip:match("^(%d+)%.(%d+)%.(%d+)%.")
-        if a and b and c then
-            return a .. "." .. b .. "." .. c .. ".255"
-        end
-        return "255.255.255.255"  -- fallback
-    end
+    -- rmail multicast group address (239.x.x.x is organization-local scope)
+    -- 239.192.82.77 = 239.192.R.M (R=82, M=77 for "RM" = rmail)
+    local MULTICAST_ADDR = "239.192.82.77"
 
-    -- Get active LAN hosts from ARP cache (devices we've communicated with recently)
-    local function get_arp_hosts()
-        local hosts = {}
-        local handle = io.popen("ip neigh show 2>/dev/null | grep -v FAILED")
-        if handle then
-            for line in handle:lines() do
-                local ip = line:match("^(%d+%.%d+%.%d+%.%d+)")
-                if ip then hosts[#hosts + 1] = ip end
-            end
-            handle:close()
+    -- Join the rmail multicast group so we receive discovery from other instances
+    local function join_multicast_group(udp_socket)
+        local ok, err = udp_socket:setoption("ip-add-membership", {
+            multiaddr = MULTICAST_ADDR,
+            interface = "0.0.0.0"
+        })
+        if ok then
+            log("joined multicast group %s", MULTICAST_ADDR)
+        else
+            log("failed to join multicast group: %s", tostring(err))
         end
-        return hosts
+        return ok
     end
 
     -- Send encrypted discovery request to same-network contacts.
-    -- Tries multiple methods: directed broadcast, and unicast to ARP-cached hosts.
+    -- Uses multicast so all rmail instances on the LAN receive it.
     -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
     local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
         local my_lan_ip = nat.get_local_ip()
         if not my_lan_ip then return end
-        local broadcast_addr = get_broadcast_addr(my_lan_ip)
-        local arp_hosts = get_arp_hosts()
 
         for name, c in pairs(contacts) do
             if c.ip == my_public_ip and c.token and c.port then
@@ -3033,23 +3025,12 @@ local function main()
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
-                    -- Try directed broadcast
                     local udp = socket.udp()
-                    udp:setoption("broadcast", true)
-                    udp:sendto(encrypted, broadcast_addr, c.port)
+                    -- Set multicast TTL to 1 (stay on local network)
+                    udp:setoption("ip-multicast-ttl", 1)
+                    udp:sendto(encrypted, MULTICAST_ADDR, c.port)
                     udp:close()
-
-                    -- Also try unicast to each ARP-cached host
-                    for _, host_ip in ipairs(arp_hosts) do
-                        if host_ip ~= my_lan_ip then
-                            local udp2 = socket.udp()
-                            udp2:sendto(encrypted, host_ip, c.port)
-                            udp2:close()
-                        end
-                    end
-
-                    log("LAN discovery: sent to %s + %d ARP hosts (looking for %s)",
-                        broadcast_addr, #arp_hosts, name)
+                    log("LAN discovery: sent to %s:%d (looking for %s)", MULTICAST_ADDR, c.port, name)
                 end
             end
         end
@@ -3131,18 +3112,20 @@ local function main()
                 local key = derive_key(c.token)
                 local encrypted = encrypt_packet(key, payload)
                 if encrypted then
-                    local broadcast_addr = get_broadcast_addr(my_lan_ip)
                     local udp = socket.udp()
-                    udp:setoption("broadcast", true)
-                    udp:sendto(encrypted, broadcast_addr, c.port)
+                    udp:setoption("ip-multicast-ttl", 1)
+                    udp:sendto(encrypted, MULTICAST_ADDR, c.port)
                     udp:close()
-                    log("LAN discovery: sent to %s on connection failure (looking for %s)", broadcast_addr, name)
+                    log("LAN discovery: sent to %s on connection failure (looking for %s)", MULTICAST_ADDR, name)
                 end
                 return
             end
         end
     end
     -- }}}
+
+    -- Join multicast group for LAN discovery
+    join_multicast_group(lan.udp)
 
     -- Send LAN discovery on startup (rule #1)
     pcall(function()
