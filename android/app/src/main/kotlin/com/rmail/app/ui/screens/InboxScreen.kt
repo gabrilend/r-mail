@@ -62,13 +62,9 @@ fun InboxScreen(
                     }
                 },
                 title = {
-                    Text(
-                        when (currentTab) {
-                            Tab.INBOX -> "Inbox"
-                            Tab.OUTBOX -> "Outbox"
-                            Tab.ATTACHMENTS -> "Attachments"
-                        }
-                    )
+                    val activeId by vm.activeMailboxId.collectAsState()
+                    val config = activeId?.let { vm.registry.get(it) }
+                    Text(config?.name?.ifBlank { null } ?: config?.host ?: "Mailbox")
                 },
                 actions = {
                     // Sync indicator
