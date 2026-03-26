@@ -42,7 +42,9 @@ data class SyncResponse(
     val removeInbox: List<String>,            // messageIds to delete locally
     val fetchOutbox: List<String>,            // filenames to download from server outbox
     val removeOutbox: List<String>,           // filenames to delete locally
-    val contacts: String?                     // "fetch", "upload", or null
+    val contacts: String?,                    // full contacts text, or null if hashes match
+    val mailboxName: String?,                 // daemon's config name
+    val mailboxPath: String?                  // mailbox directory path on server
 )
 
 data class AttachmentInfo(

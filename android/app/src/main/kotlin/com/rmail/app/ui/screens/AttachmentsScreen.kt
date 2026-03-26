@@ -62,7 +62,7 @@ fun AttachmentsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     AttachmentItem(
                         info = info,
                         isDownloading = downloadingFile == info.filename,
-                        isCached = vm.store.isAttachmentCached(info.filename),
+                        isCached = vm.store?.isAttachmentCached(info.filename) ?: false,
                         onDownload = {
                             downloadingFile = info.filename
                             vm.downloadAttachment(info) { file ->
@@ -71,7 +71,7 @@ fun AttachmentsScreen(vm: MainViewModel, onBack: () -> Unit) {
                             }
                         },
                         onOpen = {
-                            val file = vm.store.cachedAttachmentFile(info.filename)
+                            val file = vm.store?.cachedAttachmentFile(info.filename) ?: return@AttachmentItem
                             if (file.exists()) shareFile(context, file)
                         }
                     )

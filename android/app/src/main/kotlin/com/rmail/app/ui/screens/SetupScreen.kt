@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rmail.app.crypto.Crypto
+import com.rmail.app.data.MailboxConfig
 import com.rmail.app.ui.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -38,11 +39,16 @@ private const val SETUP_GUIDE_URL = "https://github.com/TODO/blob/main/docs/andr
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SetupScreen(vm: MainViewModel, onSetupComplete: () -> Unit) {
+fun SetupScreen(
+    vm: MainViewModel,
+    editConfig: MailboxConfig? = null,
+    onSetupComplete: (String) -> Unit
+) {
     val context = LocalContext.current
-    var host by remember { mutableStateOf(vm.settings.serverHost) }
-    var port by remember { mutableStateOf(vm.settings.serverPort.toString()) }
-    var token by remember { mutableStateOf(vm.settings.deviceToken) }
+    var host by remember { mutableStateOf(editConfig?.host ?: "") }
+    var port by remember { mutableStateOf(editConfig?.port?.toString() ?: "8025") }
+    var token by remember { mutableStateOf(editConfig?.token ?: "") }
+    var displayName by remember { mutableStateOf(editConfig?.name ?: "") }
     var connecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var scanning by remember { mutableStateOf(false) }
@@ -96,6 +102,15 @@ fun SetupScreen(vm: MainViewModel, onSetupComplete: () -> Unit) {
                     Text("Setup guide →", style = MaterialTheme.typography.labelMedium)
                 }
             }
+
+            OutlinedTextField(
+                value = displayName,
+                onValueChange = { displayName = it },
+                label = { Text("Name (optional)") },
+                placeholder = { Text("e.g. Home, Work") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             OutlinedTextField(
                 value = host,
@@ -237,15 +252,30 @@ fun SetupScreen(vm: MainViewModel, onSetupComplete: () -> Unit) {
                     if (portInt == null) { errorMessage = "Enter a valid port number"; return@Button }
                     if (token.isBlank()) { errorMessage = "Device token is required"; return@Button }
 
-                    vm.settings.serverHost = host.trim()
-                    vm.settings.serverPort = portInt
-                    vm.settings.deviceToken = token.trim()
                     connecting = true
                     errorMessage = null
 
-                    vm.triggerSync()
+                    val config = if (editConfig != null) {
+                        editConfig.copy(
+                            name = displayName.trim(),
+                            host = host.trim(),
+                            port = portInt,
+                            token = token.trim()
+                        )
+                    } else {
+                        MailboxConfig(
+                            name = displayName.trim(),
+                            host = host.trim(),
+                            port = portInt,
+                            token = token.trim()
+                        )
+                    }
+
+                    if (editConfig != null) vm.updateMailbox(config)
+                    else vm.addMailbox(config)
+
                     connecting = false
-                    onSetupComplete()
+                    onSetupComplete(config.id)
                 },
                 enabled = !connecting && !scanning,
                 modifier = Modifier.fillMaxWidth()

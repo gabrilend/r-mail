@@ -3,11 +3,9 @@ package com.rmail.app.ui
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.os.Parcelable
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -15,10 +13,10 @@ import androidx.compose.runtime.setValue
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.rmail.app.ui.screens.AttachmentsScreen
 import com.rmail.app.ui.screens.ComposeScreen
 import com.rmail.app.ui.screens.ContactsScreen
 import com.rmail.app.ui.screens.InboxScreen
+import com.rmail.app.ui.screens.MailboxListScreen
 import com.rmail.app.ui.screens.ReadScreen
 import com.rmail.app.ui.screens.SettingsScreen
 import com.rmail.app.ui.screens.SetupScreen
@@ -29,7 +27,6 @@ class MainActivity : ComponentActivity() {
 
     private val vm: MainViewModel by viewModels()
 
-    // Attach lines from an incoming share intent, held until navigation is ready
     private var pendingAttachLines: List<String>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,37 +34,53 @@ class MainActivity : ComponentActivity() {
         pendingAttachLines = parseShareIntent(intent)
 
         setContent {
-            val bgColor = Color(vm.settings.bgColor.toLong() and 0xFFFFFFFFL)
-            val fgColor = Color(vm.settings.fgColor.toLong() and 0xFFFFFFFFL)
+            val bgColor = Color(vm.globalSettings.bgColor.toLong() and 0xFFFFFFFFL)
+            val fgColor = Color(vm.globalSettings.fgColor.toLong() and 0xFFFFFFFFL)
             RmailTheme(bgColor = bgColor, fgColor = fgColor) {
                 val navController = rememberNavController()
-                val isConfigured = vm.settings.isConfigured
                 var initialComposeDraft by remember {
                     mutableStateOf(pendingAttachLines?.let { buildDraft(it) } ?: "")
                 }
 
-                val startDest = if (isConfigured) "inbox" else "setup"
+                val hasMailboxes = vm.mailboxes.value.isNotEmpty()
+                val startDest = if (hasMailboxes) "mailboxList" else "setup"
 
                 NavHost(navController = navController, startDestination = startDest) {
 
+                    // ── Mailbox list (entry point) ──────────────────────────
+                    composable("mailboxList") {
+                        MailboxListScreen(
+                            vm = vm,
+                            onSelect = { id ->
+                                vm.selectMailbox(id)
+                                navController.navigate("inbox")
+                            },
+                            onAdd = { navController.navigate("setup") }
+                        )
+                    }
+
+                    // ── Setup / add mailbox ─────────────────────────────────
                     composable("setup") {
-                        SetupScreen(vm = vm) {
-                            // After setup completes, check for pending share intent
+                        SetupScreen(vm = vm) { mailboxId ->
+                            vm.selectMailbox(mailboxId)
+                            // Check for pending share intent
                             if (pendingAttachLines != null) {
                                 initialComposeDraft = buildDraft(pendingAttachLines!!)
                                 pendingAttachLines = null
-                                navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}")
+                                navController.navigate("compose?draft=${Uri.encode(initialComposeDraft)}") {
+                                    popUpTo("mailboxList")
+                                }
                             } else {
                                 navController.navigate("inbox") {
-                                    popUpTo("setup") { inclusive = true }
+                                    popUpTo("mailboxList")
                                 }
                             }
                         }
                     }
 
+                    // ── Inbox (with tabs) ───────────────────────────────────
                     composable("inbox?showOutbox={showOutbox}") { back ->
                         val showOutbox = back.arguments?.getString("showOutbox") == "true"
-                        // Check for pending share intent after first configure
                         val pending = pendingAttachLines
                         if (pending != null) {
                             pendingAttachLines = null
@@ -77,17 +90,22 @@ class MainActivity : ComponentActivity() {
                         InboxScreen(
                             vm = vm,
                             initialShowOutbox = showOutbox,
-                            onOpen = { filename -> navController.navigate("read/$filename") },
-                            onOpenOutbox = { filename -> navController.navigate("outbox-read/$filename") },
+                            onBack = {
+                                vm.deselectMailbox()
+                                navController.navigate("mailboxList") {
+                                    popUpTo("mailboxList") { inclusive = true }
+                                }
+                            },
+                            onOpen = { navController.navigate("read/$it") },
+                            onOpenOutbox = { navController.navigate("outbox-read/$it") },
                             onCompose = { navController.navigate("compose") },
                             onContacts = { navController.navigate("contacts") },
-                            onAttachments = { navController.navigate("attachments") },
+                            onAttachments = {},  // now a tab, not a separate screen
                             onSettings = { navController.navigate("settings") }
                         )
                     }
 
                     composable("inbox") {
-                        // Check for pending share intent after first configure
                         val pending = pendingAttachLines
                         if (pending != null) {
                             pendingAttachLines = null
@@ -96,47 +114,46 @@ class MainActivity : ComponentActivity() {
                         }
                         InboxScreen(
                             vm = vm,
-                            onOpen = { filename -> navController.navigate("read/$filename") },
-                            onOpenOutbox = { filename -> navController.navigate("outbox-read/$filename") },
+                            onBack = {
+                                vm.deselectMailbox()
+                                navController.navigate("mailboxList") {
+                                    popUpTo("mailboxList") { inclusive = true }
+                                }
+                            },
+                            onOpen = { navController.navigate("read/$it") },
+                            onOpenOutbox = { navController.navigate("outbox-read/$it") },
                             onCompose = { navController.navigate("compose") },
                             onContacts = { navController.navigate("contacts") },
-                            onAttachments = { navController.navigate("attachments") },
+                            onAttachments = {},
                             onSettings = { navController.navigate("settings") }
                         )
                     }
 
+                    // ── Read message ────────────────────────────────────────
                     composable("read/{filename}") { back ->
                         val filename = back.arguments?.getString("filename") ?: return@composable
                         ReadScreen(
-                            filename = filename,
-                            vm = vm,
+                            filename = filename, vm = vm,
                             onBack = { navController.popBackStack() },
-                            onReply = { replyDraft ->
-                                navController.navigate("compose?draft=${Uri.encode(replyDraft)}")
-                            },
-                            onForward = { forwardDraft ->
-                                navController.navigate("compose?draft=${Uri.encode(forwardDraft)}")
-                            }
+                            onReply = { navController.navigate("compose?draft=${Uri.encode(it)}") },
+                            onForward = { navController.navigate("compose?draft=${Uri.encode(it)}") }
                         )
                     }
 
                     composable("outbox-read/{filename}") { back ->
                         val filename = back.arguments?.getString("filename") ?: return@composable
                         ReadScreen(
-                            filename = filename,
-                            vm = vm,
-                            isOutbox = true,
+                            filename = filename, vm = vm, isOutbox = true,
                             onBack = { navController.popBackStack() },
-                            onReply = {},
-                            onForward = {}
+                            onReply = {}, onForward = {}
                         )
                     }
 
+                    // ── Compose ─────────────────────────────────────────────
                     composable("compose?draft={draft}") { back ->
                         val draft = back.arguments?.getString("draft")?.let { Uri.decode(it) } ?: ""
                         ComposeScreen(
-                            vm = vm,
-                            initialContent = draft,
+                            vm = vm, initialContent = draft,
                             onCancel = { navController.popBackStack() },
                             onSent = {
                                 navController.navigate("inbox?showOutbox=true") {
@@ -149,8 +166,7 @@ class MainActivity : ComponentActivity() {
 
                     composable("compose") {
                         ComposeScreen(
-                            vm = vm,
-                            initialContent = "",
+                            vm = vm, initialContent = "",
                             onCancel = { navController.popBackStack() },
                             onSent = {
                                 navController.navigate("inbox?showOutbox=true") {
@@ -161,6 +177,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
+                    // ── Contacts ────────────────────────────────────────────
                     composable("contacts") {
                         ContactsScreen(
                             vm = vm,
@@ -172,18 +189,9 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    composable("attachments") {
-                        AttachmentsScreen(
-                            vm = vm,
-                            onBack = { navController.popBackStack() }
-                        )
-                    }
-
+                    // ── Settings ────────────────────────────────────────────
                     composable("settings") {
-                        SettingsScreen(
-                            vm = vm,
-                            onBack = { navController.popBackStack() }
-                        )
+                        SettingsScreen(vm = vm, onBack = { navController.popBackStack() })
                     }
                 }
             }
@@ -192,11 +200,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Handle share intents arriving while the app is already running
         val lines = parseShareIntent(intent)
-        if (lines != null) {
-            pendingAttachLines = lines
-        }
+        if (lines != null) pendingAttachLines = lines
     }
 
     @Suppress("DEPRECATION")
@@ -225,7 +230,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun uriToAttachLine(uri: Uri): String {
-        // Prefer a real filesystem path; fall back to the content URI string
         val path = uri.path ?: uri.toString()
         return "attach: $path"
     }

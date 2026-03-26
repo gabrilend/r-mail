@@ -7,12 +7,15 @@ import androidx.lifecycle.viewModelScope
 import com.rmail.app.data.AttachmentInfo
 import com.rmail.app.data.MailMessage
 import com.rmail.app.data.MailStore
+import com.rmail.app.data.MailboxConfig
+import com.rmail.app.data.MailboxRegistry
 import com.rmail.app.data.Settings
 import com.rmail.app.net.RmailClient
 import com.rmail.app.sync.SyncManager
 import com.rmail.app.sync.SyncResult
 import com.rmail.app.sync.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,8 +30,22 @@ enum class SyncStatus { IDLE, SYNCING, ERROR }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    val settings = Settings(application)
-    val store = MailStore(application)
+    val globalSettings = Settings(application)
+    val registry = MailboxRegistry(application)
+
+    // ── Mailbox list ────────────────────────────────────────────────────────
+
+    private val _mailboxes = MutableStateFlow<List<MailboxConfig>>(emptyList())
+    val mailboxes: StateFlow<List<MailboxConfig>> = _mailboxes
+
+    private val _activeMailboxId = MutableStateFlow<String?>(null)
+    val activeMailboxId: StateFlow<String?> = _activeMailboxId
+
+    // ── Active mailbox state ────────────────────────────────────────────────
+
+    private var activeConfig: MailboxConfig? = null
+    var store: MailStore? = null
+        private set
 
     private val _inboxFiles = MutableStateFlow<List<String>>(emptyList())
     val inboxFiles: StateFlow<List<String>> = _inboxFiles
@@ -51,29 +68,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _daemonName = MutableStateFlow<String?>(null)
     val daemonName: StateFlow<String?> = _daemonName
 
-    private val _serverLanIp = MutableStateFlow<String?>(null)
+    private var serverLanIp: String? = null
 
     init {
-        // Defer to after the current composition completes (ViewModel is lazily created during
-        // setContent, so Dispatchers.Main.immediate would run inline and block the first frame)
-        viewModelScope.launch(Dispatchers.Main) {
-            refreshLocal()
-            if (settings.isConfigured) {
-                triggerSync()
-                withContext(Dispatchers.IO) {
-                    SyncWorker.schedule(application, settings.bgSyncIntervalMinutes)
-                }
-                startForegroundPolling()
-            }
+        // Run migration from old single-mailbox layout
+        registry.migrateFromLegacy()
+        _mailboxes.value = registry.loadAll()
+
+        // Schedule background sync for all mailboxes
+        viewModelScope.launch(Dispatchers.IO) {
+            val minInterval = _mailboxes.value
+                .minOfOrNull { it.bgSyncIntervalMinutes } ?: 15
+            SyncWorker.schedule(application, minInterval)
         }
     }
 
-    // TODO: re-evaluate sync model — consider push/inotify or longer interval for production
+    fun refreshMailboxList() {
+        _mailboxes.value = registry.loadAll()
+    }
+
+    // ── Mailbox selection ───────────────────────────────────────────────────
+
+    private var pollingJob: Job? = null
     private val FOREGROUND_SYNC_INTERVAL_MS = 10_000L
     private var lastSyncTime = 0L
 
+    fun selectMailbox(id: String) {
+        val config = registry.get(id) ?: return
+        activeConfig = config
+        store = MailStore(getApplication(), id)
+        _activeMailboxId.value = id
+        _myAddress.value = null
+        _daemonName.value = null
+        serverLanIp = null
+        _syncError.value = null
+        _syncStatus.value = SyncStatus.IDLE
+        _attachments.value = emptyList()
+        refreshLocal()
+        triggerSync()
+        startForegroundPolling()
+    }
+
+    fun deselectMailbox() {
+        pollingJob?.cancel()
+        pollingJob = null
+        _activeMailboxId.value = null
+        activeConfig = null
+        store = null
+        _inboxFiles.value = emptyList()
+        _outboxFiles.value = emptyList()
+        _attachments.value = emptyList()
+        _myAddress.value = null
+        _daemonName.value = null
+    }
+
     private fun startForegroundPolling() {
-        viewModelScope.launch {
+        pollingJob?.cancel()
+        pollingJob = viewModelScope.launch {
             while (true) {
                 delay(1_000)
                 val elapsed = System.currentTimeMillis() - lastSyncTime
@@ -85,23 +136,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Active mailbox operations ───────────────────────────────────────────
+
     fun refreshLocal() {
-        _inboxFiles.value = store.listInbox()
-        _outboxFiles.value = store.listOutbox()
+        val s = store ?: return
+        _inboxFiles.value = s.listInbox()
+        _outboxFiles.value = s.listOutbox()
     }
 
     fun triggerSync() {
+        val config = activeConfig ?: return
+        val s = store ?: return
         if (_syncStatus.value == SyncStatus.SYNCING) return
         viewModelScope.launch {
             _syncStatus.value = SyncStatus.SYNCING
             _syncError.value = null
             lastSyncTime = System.currentTimeMillis()
-            val manager = SyncManager(getApplication(), settings, store, _serverLanIp.value)
+            val manager = SyncManager(getApplication(), config, s, serverLanIp)
             when (val result = manager.sync()) {
                 is SyncResult.Success, is SyncResult.NewMessages -> {
                     _syncStatus.value = SyncStatus.IDLE
                     refreshLocal()
                     if (_myAddress.value == null) fetchMyAddress()
+                    // Update mailbox name from server if we don't have one
+                    val serverName = when (result) {
+                        is SyncResult.Success -> result.mailboxName
+                        is SyncResult.NewMessages -> result.mailboxName
+                        else -> null
+                    }
+                    val cfg = activeConfig
+                    if (serverName != null && cfg != null && cfg.name.isBlank()) {
+                        updateMailbox(cfg.copy(name = serverName))
+                    }
                 }
                 is SyncResult.Error -> {
                     _syncStatus.value = SyncStatus.ERROR
@@ -112,38 +178,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadMessage(filename: String): MailMessage? {
-        return try {
-            val content = store.readInbox(filename)
-            MailMessage(filename, content)
-        } catch (_: Exception) {
-            null
-        }
+        val s = store ?: return null
+        return try { MailMessage(filename, s.readInbox(filename)) }
+        catch (_: Exception) { null }
     }
 
     fun loadOutboxMessage(filename: String): MailMessage? {
-        return try {
-            val content = store.readOutbox(filename)
-            MailMessage(filename, content)
-        } catch (_: Exception) {
-            null
-        }
+        val s = store ?: return null
+        return try { MailMessage(filename, s.readOutbox(filename)) }
+        catch (_: Exception) { null }
     }
 
     fun deleteInboxMessage(filename: String) {
-        store.deleteInbox(filename)
+        store?.deleteInbox(filename)
         refreshLocal()
-        // Sync will notify the server of the deletion on next cycle
         triggerSync()
     }
 
     fun deleteOutboxFile(filename: String) {
-        store.deleteOutbox(filename)
+        store?.deleteOutbox(filename)
         refreshLocal()
         triggerSync()
     }
 
     fun saveOutboxFile(filename: String, content: String) {
-        store.writeOutbox(filename, content)
+        store?.writeOutbox(filename, content)
         refreshLocal()
     }
 
@@ -152,19 +211,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return "$ts.txt"
     }
 
-    fun getContactNames(): List<String> = store.parseContactNames()
+    fun getContactNames(): List<String> = store?.parseContactNames() ?: emptyList()
 
-    fun readContacts(): String = store.readContacts()
+    fun readContacts(): String = store?.readContacts() ?: ""
 
     fun saveContacts(content: String) {
-        store.writeContacts(content)
+        store?.writeContacts(content)
     }
 
     fun loadAttachmentList() {
+        val config = activeConfig ?: return
         viewModelScope.launch {
-            if (!settings.isConfigured) return@launch
             try {
-                val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+                val client = RmailClient(config.host, config.port, config.token)
                 val list = withContext(Dispatchers.IO) { client.listAttachments() }
                 _attachments.value = list
             } catch (_: Exception) {}
@@ -172,12 +231,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadAttachment(info: AttachmentInfo, onDone: (File?) -> Unit) {
+        val config = activeConfig ?: run { onDone(null); return }
+        val s = store ?: run { onDone(null); return }
         viewModelScope.launch {
-            if (!settings.isConfigured) { onDone(null); return@launch }
             try {
-                val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+                val client = RmailClient(config.host, config.port, config.token)
                 val data = withContext(Dispatchers.IO) { client.downloadAttachment(info.filename) }
-                val file = store.cachedAttachmentFile(info.filename)
+                val file = s.cachedAttachmentFile(info.filename)
                 file.writeBytes(data)
                 onDone(file)
             } catch (_: Exception) {
@@ -187,28 +247,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun fetchMyAddress() {
+        val config = activeConfig ?: return
         viewModelScope.launch {
-            if (!settings.isConfigured) return@launch
             try {
-                val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+                val client = RmailClient(config.host, config.port, config.token)
                 val info = withContext(Dispatchers.IO) { client.getMyAddress() }
                 if (info != null) {
                     _myAddress.value = "${info.ip}:${info.port}"
                     if (info.name.isNotBlank()) _daemonName.value = info.name
-                    if (info.lanIp.isNotBlank()) _serverLanIp.value = info.lanIp
+                    if (info.lanIp.isNotBlank()) serverLanIp = info.lanIp
                 }
             } catch (_: Exception) {}
         }
     }
 
-    /**
-     * Upload attachments in the background, updating the outbox file as each one completes.
-     * The outbox file is already saved with local URIs; this replaces them with server paths.
-     */
     fun uploadAttachmentsInBackground(outboxFilename: String, uris: List<Uri>) {
-        if (!settings.isConfigured || uris.isEmpty()) return
+        val config = activeConfig ?: return
+        val s = store ?: return
+        if (uris.isEmpty()) return
         viewModelScope.launch {
-            val client = RmailClient(settings.serverHost, settings.serverPort, settings.deviceToken)
+            val client = RmailClient(config.host, config.port, config.token)
             for (uri in uris) {
                 val uriStr = uri.toString()
                 if (!uriStr.startsWith("content://") && !uriStr.startsWith("file://")) continue
@@ -220,9 +278,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val serverPath = withContext(Dispatchers.IO) {
                         RmailClient.uploadFile(client, filename, data)
                     } ?: continue
-                    // Replace the local URI with the server path in the outbox file
                     withContext(Dispatchers.IO) {
-                        val file = java.io.File(store.outbox, outboxFilename)
+                        val file = File(s.outbox, outboxFilename)
                         if (file.exists()) {
                             val text = file.readText()
                             file.writeText(text.replace(uriStr, serverPath))
@@ -235,7 +292,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun resolveFilename(uri: Uri): String? {
-        // Try content resolver display name, fall back to last path segment
         getApplication<Application>().contentResolver.query(
             uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
             null, null, null
@@ -245,12 +301,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return uri.lastPathSegment
     }
 
+    // ── Mailbox management ──────────────────────────────────────────────────
+
+    fun addMailbox(config: MailboxConfig) {
+        registry.add(config)
+        _mailboxes.value = registry.loadAll()
+    }
+
+    fun updateMailbox(config: MailboxConfig) {
+        registry.update(config)
+        if (activeConfig?.id == config.id) activeConfig = config
+        _mailboxes.value = registry.loadAll()
+    }
+
+    fun removeMailbox(id: String) {
+        if (_activeMailboxId.value == id) deselectMailbox()
+        registry.remove(id)
+        _mailboxes.value = registry.loadAll()
+    }
+
     fun onSettingsSaved() {
+        val config = activeConfig ?: return
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                SyncWorker.schedule(getApplication(), settings.bgSyncIntervalMinutes)
+                SyncWorker.schedule(getApplication(), config.bgSyncIntervalMinutes)
             }
             triggerSync()
         }
     }
+
+    /** Helper for screens that need to know if the active mailbox is configured */
+    val isActiveConfigured: Boolean get() = activeConfig?.isConfigured == true
+
+    /** Per-mailbox swipe-to-delete setting */
+    val swipeToDelete: Boolean get() = activeConfig?.swipeToDelete ?: true
 }

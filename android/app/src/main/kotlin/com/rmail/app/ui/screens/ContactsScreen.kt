@@ -30,7 +30,7 @@ fun ContactsScreen(
     val syncStatus by vm.syncStatus.collectAsState()
     val daemonName by vm.daemonName.collectAsState()
 
-    val isConnected = syncStatus != SyncStatus.ERROR && vm.settings.isConfigured
+    val isConnected = syncStatus != SyncStatus.ERROR && vm.isActiveConfigured
     var showOfflineDialog by remember { mutableStateOf(false) }
 
     if (showOfflineDialog) {
@@ -99,7 +99,7 @@ fun ContactsScreen(
             ) {
                 Text(
                     if (myAddress != null) "My address: $myAddress"
-                    else if (!vm.settings.isConfigured) "Not configured"
+                    else if (!vm.isActiveConfigured) "Not configured"
                     else "Connecting...",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,

@@ -154,8 +154,11 @@ class RmailClient(
         }
 
         val contacts = obj.optString("contacts").ifBlank { null }
+        val mailboxName = obj.optString("mailbox_name").ifBlank { null }
+        val mailboxPath = obj.optString("mailbox_path").ifBlank { null }
 
-        return SyncResponse(fetchInbox, removeInbox, fetchOutbox, removeOutbox, contacts)
+        return SyncResponse(fetchInbox, removeInbox, fetchOutbox, removeOutbox, contacts,
+            mailboxName, mailboxPath)
     }
 
     /**

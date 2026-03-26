@@ -7,7 +7,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.rmail.app.data.MailStore
-import com.rmail.app.data.Settings
+import com.rmail.app.data.MailboxRegistry
 import java.util.concurrent.TimeUnit
 
 class SyncWorker(
@@ -16,20 +16,23 @@ class SyncWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val settings = Settings(applicationContext)
-        if (!settings.isConfigured) return Result.success()
+        val registry = MailboxRegistry(applicationContext)
+        val configs = registry.loadAll()
+        if (configs.isEmpty()) return Result.success()
 
-        val store = MailStore(applicationContext)
-        val manager = SyncManager(applicationContext, settings, store)
-
-        return when (val result = manager.sync()) {
-            is SyncResult.Success, is SyncResult.NewMessages -> Result.success()
-            is SyncResult.Error -> {
-                // Retry transient errors; give up on permanent ones
-                if (result.message.contains("Decryption failed")) Result.failure()
-                else Result.retry()
+        var anyRetry = false
+        for (config in configs) {
+            if (!config.isConfigured) continue
+            val store = MailStore(applicationContext, config.id)
+            val manager = SyncManager(applicationContext, config, store)
+            when (val result = manager.sync()) {
+                is SyncResult.Error -> {
+                    if (!result.message.contains("Decryption failed")) anyRetry = true
+                }
+                else -> {}
             }
         }
+        return if (anyRetry) Result.retry() else Result.success()
     }
 
     companion object {

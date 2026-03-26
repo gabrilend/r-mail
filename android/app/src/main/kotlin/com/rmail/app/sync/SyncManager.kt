@@ -9,7 +9,7 @@ import com.rmail.app.RmailApplication
 import com.rmail.app.data.DeletedEntry
 import com.rmail.app.data.InboxEntry
 import com.rmail.app.data.MailStore
-import com.rmail.app.data.Settings
+import com.rmail.app.data.MailboxConfig
 import com.rmail.app.data.SyncRequest
 import com.rmail.app.data.SyncState
 import com.rmail.app.net.RmailClient
@@ -18,34 +18,34 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed class SyncResult {
-    data object Success : SyncResult()
-    data class NewMessages(val count: Int) : SyncResult()
+    data class Success(val mailboxName: String? = null) : SyncResult()
+    data class NewMessages(val count: Int, val mailboxName: String? = null) : SyncResult()
     data class Error(val message: String) : SyncResult()
 }
 
 class SyncManager(
     private val context: Context,
-    private val settings: Settings,
+    private val config: MailboxConfig,
     private val store: MailStore,
     private val serverLanIp: String? = null
 ) {
 
     suspend fun sync(): SyncResult = withContext(Dispatchers.IO) {
-        if (!settings.isConfigured) return@withContext SyncResult.Error("Not configured")
+        if (!config.isConfigured) return@withContext SyncResult.Error("Not configured")
 
         try {
             // Try LAN IP first (fast, same network), fall back to configured host
             val host = if (serverLanIp != null) {
                 try {
                     val sock = java.net.Socket()
-                    sock.connect(java.net.InetSocketAddress(serverLanIp, settings.serverPort), 1_000)
+                    sock.connect(java.net.InetSocketAddress(serverLanIp, config.port), 1_000)
                     sock.close()
                     serverLanIp
                 } catch (_: Exception) {
-                    settings.serverHost
+                    config.host
                 }
-            } else settings.serverHost
-            val client = RmailClient(host, settings.serverPort, settings.deviceToken)
+            } else config.host
+            val client = RmailClient(host, config.port, config.token)
             val state = store.readSyncState()
 
             // ── 1. Compute local diff ──────────────────────────────────────
@@ -145,10 +145,10 @@ class SyncManager(
 
             if (newCount > 0) {
                 postNotification(newCount, resp.fetchInbox.values.firstOrNull()?.filename)
-                return@withContext SyncResult.NewMessages(newCount)
+                return@withContext SyncResult.NewMessages(newCount, resp.mailboxName)
             }
 
-            SyncResult.Success
+            SyncResult.Success(resp.mailboxName)
 
         } catch (e: Exception) {
             SyncResult.Error(e.message ?: "Unknown sync error")
@@ -171,7 +171,7 @@ class SyncManager(
     }
 
     private fun postNotification(count: Int, firstFilename: String?) {
-        val detail = settings.notificationDetail
+        val detail = config.notificationDetail
         val title = if (count == 1) "New message" else "$count new messages"
         val text = when (detail) {
             "full", "sender" -> firstFilename?.let { extractSender(it) }

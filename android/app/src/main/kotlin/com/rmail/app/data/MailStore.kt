@@ -16,9 +16,9 @@ import java.io.File
  *     sync-state.json
  *     contacts
  */
-class MailStore(context: Context) {
+class MailStore(context: Context, mailboxId: String) {
 
-    val root: File = File(context.filesDir, "mailbox-0").also { it.mkdirs() }
+    val root: File = File(context.filesDir, "mailbox-$mailboxId").also { it.mkdirs() }
     val inbox: File = File(root, "inbox").also { it.mkdirs() }
     val outbox: File = File(root, "outbox").also { it.mkdirs() }
     val attachments: File = File(root, "attachments").also { it.mkdirs() }
