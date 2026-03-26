@@ -16,12 +16,14 @@ Phase 2 focuses on shared device support, multi-device mailbox access, and codeb
 | 200 | Shared device sync access | Open |
 | 201 | Modularize rmail.lua codebase | Open |
 | 202 | Fix chunk response parsing | Fixed |
-| 203 | LAN discovery router IP rewrite | Fixed |
+| 203 | LAN discovery improvements | Fixed |
+| 204 | Fix partial send for large payloads | Fixed |
 
 ## Completed
 
 - **202**: Fixed chunk response parsing - added status to http_post_batch results, fixed data access in send_next_chunks
-- **203**: Fixed LAN discovery when router rewrites UDP source address - include sender's LAN IP in encrypted payload
+- **203**: LAN discovery improvements - include LAN IP in payload, multicast + subnet scan fallback, NixOS path fixes
+- **204**: Fixed partial send bug in http_encrypt_and_send - large payloads (attachment chunks) were getting truncated because send() wasn't looping. This was the root cause of "chunk failed" errors.
 
 ## Notes
 

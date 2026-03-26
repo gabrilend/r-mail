@@ -1013,12 +1013,8 @@ end
 local function send_encrypted(sock, key, plaintext)
     local nonce      = crypto.random_bytes(12)
     local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
-    if not ciphertext then
-        log("send_encrypted: encryption failed")
-        return false
-    end
+    if not ciphertext then return false end
     local data       = uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
-    log("send_encrypted: sending %d bytes", #data)
     -- Send all data, handling partial sends (important for large payloads)
     sock:settimeout(30)  -- allow time for large transfers
     local sent = 0
@@ -1029,11 +1025,9 @@ local function send_encrypted(sock, key, plaintext)
         elseif partial and partial > 0 then
             sent = sent + partial
         else
-            log("send_encrypted: send failed at %d/%d bytes: %s", sent, #data, tostring(err))
             return false  -- send failed
         end
     end
-    log("send_encrypted: sent %d bytes successfully", sent)
     return true
 end
 
@@ -3155,9 +3149,7 @@ local function main()
         while true do
             local data, sender_ip, sender_port = udp:receivefrom()
             if not data then break end
-            log("UDP packet received from %s:%s (%d bytes)", sender_ip, tostring(sender_port), #data)
-            local ok, err = pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
-            if not ok then log("UDP handler error: %s", tostring(err)) end
+            pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
         end
     end
     -- }}}
