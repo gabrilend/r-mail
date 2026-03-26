@@ -3059,7 +3059,9 @@ local function main()
         while true do
             local data, sender_ip, sender_port = udp:receivefrom()
             if not data then break end
-            pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
+            log("UDP packet received from %s:%s (%d bytes)", sender_ip, tostring(sender_port), #data)
+            local ok, err = pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
+            if not ok then log("UDP handler error: %s", tostring(err)) end
         end
     end
     -- }}}
@@ -3154,10 +3156,12 @@ local function main()
                 end
 
                 -- Cache the peer's LAN IP for same-network optimization.
-                -- Only cache if: the peer sent us a private IP (meaning they're on our LAN)
-                -- AND their configured public IP matches ours (confirming same network).
+                -- Only cache if: (1) we don't already have a cached value from UDP discovery,
+                -- (2) the peer sent us a private IP (meaning they're on our LAN),
+                -- (3) their configured public IP matches ours (confirming same network).
+                -- Note: TCP source IP can be rewritten by hairpin NAT, so prefer UDP discovery.
                 local peer_ip = client:getpeername()
-                if peer_ip and contact_name then
+                if peer_ip and contact_name and not lan.peers[contact_name] then
                     local is_private = peer_ip:match("^192%.168%.") or
                                        peer_ip:match("^10%.") or peer_ip:match("^172%.")
                     if is_private then
