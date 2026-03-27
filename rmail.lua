@@ -2242,7 +2242,22 @@ local function sync_outbox(my_name)
                                 contact = contacts[rname],
                             }
                         else
-                            log("skipping %s: unknown contact '%s'", name, rname)
+                            log("unknown contact '%s' in %s", rname, name)
+                            -- Mark unknown contact in the outbox file so user can see and fix it
+                            local outbox_path = OUTBOX .. "/" .. name
+                            local text = read_file(outbox_path)
+                            local marker = "// UNKNOWN CONTACT: " .. rname
+                            if text and not text:find(marker, 1, true) then
+                                local target = "to: " .. rname
+                                local pos = text:lower():find(target:lower(), 1, true)
+                                if pos then
+                                    local eol = text:find("\n", pos) or #text
+                                    text = text:sub(1, eol) ..
+                                        marker .. " \xe2\x80\x94 not in your contacts file\n" ..
+                                        text:sub(eol + 1)
+                                    write_file(outbox_path, text)
+                                end
+                            end
                         end
                     elseif contacts[rname] then
                         -- existing recipient: check for new attach: lines not yet in progress
