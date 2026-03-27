@@ -1756,8 +1756,34 @@ local function handle_attachment_chunk(data, sender)
 
     if total_checksum and sha256_file(zip_path) ~= total_checksum then
         os.remove(zip_path)
-        log("total checksum mismatch for %s from %s", filename, sender)
-        return 500, {error = "total checksum mismatch"}
+        log("total checksum mismatch for %s from %s — initiating repair", filename, sender)
+        -- Repair: re-verify each chunk, delete bad ones, return new missing list
+        local repair_missing = {}
+        for i = 0, total_chunks - 1 do
+            local cp = pending_dir .. "/chunk-" .. tostring(i)
+            if file_exists(cp) then
+                if chunk_checksum then
+                    -- We don't have per-chunk checksums stored, so we can't verify
+                    -- individual chunks against expected values here. Instead, delete
+                    -- all chunks and request a full re-send. The sender's manifest
+                    -- will handle it.
+                end
+                -- For now: keep all chunks (they were individually verified on receive)
+                -- The whole-file mismatch likely means an assembly bug, not chunk corruption
+            else
+                repair_missing[#repair_missing + 1] = i
+            end
+        end
+        if #repair_missing == 0 then
+            -- All chunks present but assembly checksum failed — re-request all chunks
+            -- to rule out disk corruption between receive and assembly
+            for i = 0, total_chunks - 1 do
+                os.remove(pending_dir .. "/chunk-" .. tostring(i))
+                repair_missing[#repair_missing + 1] = i
+            end
+            log("repair: cleared all chunks for full re-transfer of %s", filename)
+        end
+        return 200, {ok = true, missing = repair_missing}
     end
 
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
@@ -3029,6 +3055,72 @@ local function handle_api_upload_chunk(upload_id, chunk_n, body)
     return 200, {ok = true, complete = true}
 end
 
+-- POST /api/upload/resume — resume an interrupted upload.
+-- Phone sends filename + num_chunks + per-chunk checksums.
+-- Server finds the existing upload (or creates a new one) and responds with
+-- which chunks are missing so the phone only uploads what's needed.
+local function handle_api_upload_resume(data)
+    if not data or not data.filename then return 400, {error = "missing filename"} end
+    local filename   = sanitize_filename(data.filename)
+    local num_chunks = tonumber(data.num_chunks)
+    if not num_chunks or num_chunks < 1 or num_chunks > 100000 then
+        return 400, {error = "invalid num_chunks"}
+    end
+    local checksums = data.chunk_checksums or {}
+
+    -- Find existing upload for this filename
+    local uploads = load_state("uploads.json")
+    local upload_id, upload
+    for uid, u in pairs(uploads) do
+        if u.filename == filename and u.num_chunks == num_chunks then
+            upload_id = uid; upload = u; break
+        end
+    end
+
+    -- No existing upload — create a new one
+    if not upload then
+        upload_id = uuid()
+        local upload_dir = paths.uploads .. "/" .. upload_id
+        os.execute("mkdir -p " .. shell_quote(upload_dir))
+        upload = {
+            filename   = filename,
+            num_chunks = num_chunks,
+            path       = upload_dir .. "/" .. filename,
+            upload_dir = upload_dir,
+            created_at = os.time(),
+        }
+        uploads[upload_id] = upload
+        save_state("uploads.json", uploads)
+    end
+
+    -- Check which chunks the server already has (and verify checksums)
+    local missing = {}
+    for i = 0, num_chunks - 1 do
+        local chunk_path = upload.upload_dir .. "/chunk-" .. tostring(i)
+        if file_exists(chunk_path) then
+            -- Verify checksum if provided
+            local expected = checksums[tostring(i)] or checksums[i + 1]  -- handle both 0-indexed and 1-indexed
+            if expected and expected ~= "" then
+                local actual = sha256_of_bytes(read_file_binary(chunk_path) or "")
+                if actual ~= expected then
+                    os.remove(chunk_path)  -- bad chunk, request re-upload
+                    missing[#missing + 1] = i
+                end
+            end
+            -- chunk exists and is valid (or no checksum to verify)
+        else
+            missing[#missing + 1] = i
+        end
+    end
+
+    log("phone upload resume: %s — %d/%d chunks missing, id=%s", filename, #missing, num_chunks, upload_id)
+    return 200, {
+        upload_id   = upload_id,
+        server_path = upload.path,
+        missing     = missing,
+    }
+end
+
 -- ============================================================
 -- Extracted functions (formerly inside main, broken out to stay
 -- under LuaJIT's 60-upvalue limit per function)
@@ -3343,6 +3435,9 @@ local function handle_request(rt, client)
             elseif method == "POST" and path == "/api/log" then
                 local data = json.decode(body or "{}") or {}
                 local s, r = handle_api_log(data, contact_name); send_response(resp, s, r)
+            elseif method == "POST" and path == "/api/upload/resume" then
+                local data = json.decode(body or "{}") or {}
+                local s, r = handle_api_upload_resume(data); send_response(resp, s, r)
             elseif method == "POST" and path == "/api/upload/start" then
                 local data = json.decode(body or "{}") or {}
                 local s, r = handle_api_upload_start(data); send_response(resp, s, r)

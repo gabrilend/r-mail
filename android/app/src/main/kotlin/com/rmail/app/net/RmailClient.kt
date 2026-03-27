@@ -486,6 +486,32 @@ class RmailClient(
         }
     }
 
+    data class UploadResumeResult(val uploadId: String, val serverPath: String, val missing: List<Int>)
+
+    /**
+     * POST /api/upload/resume — resume an interrupted upload.
+     * Server responds with upload_id, server_path, and list of missing chunk indices.
+     */
+    fun uploadResume(filename: String, numChunks: Int, chunkChecksums: Map<Int, String>): UploadResumeResult? {
+        return try {
+            val body = JSONObject().apply {
+                put("filename", filename)
+                put("num_chunks", numChunks)
+                val cs = JSONObject()
+                chunkChecksums.forEach { (k, v) -> cs.put(k.toString(), v) }
+                put("chunk_checksums", cs)
+            }
+            val (status, respBody) = post("/api/upload/resume", body)
+            if (status != 200) return null
+            val obj = JSONObject(respBody.toString(Charsets.UTF_8))
+            val missing = mutableListOf<Int>()
+            obj.optJSONArray("missing")?.let { arr ->
+                for (i in 0 until arr.length()) missing.add(arr.getInt(i))
+            }
+            UploadResumeResult(obj.getString("upload_id"), obj.getString("server_path"), missing)
+        } catch (_: Exception) { null }
+    }
+
     /**
      * PUT /api/upload/<id>/chunk/<n> — send one chunk
      */
@@ -536,64 +562,101 @@ class RmailClient(
         enum class UploadPhase { ZIPPING, SENDING }
 
         /**
-         * Upload a file: compress to a temp zip, then stream chunks to the server.
-         * Matches the daemon-to-daemon path: compress first, then chunk the
-         * compressed output. Peak memory usage is one chunk (~256KB).
+         * Upload a file using the chunk-file model with resume support.
+         * Compress to zip → chunk into files → send checksums to server →
+         * upload only chunks the server doesn't have.
          *
-         * @param cacheDir  directory for the temp zip file (e.g. context.cacheDir)
-         * @param onProgress called with (phase, bytesProcessed, totalBytes) — totalBytes
-         *   is the uncompressed size during ZIPPING, compressed size during SENDING.
-         *   May be called frequently; callers should throttle UI updates.
+         * @param chunksDir directory for chunk temp files (persists for resume)
+         * @param cacheDir directory for the temp zip file
          */
         suspend fun uploadFileCompressed(
             client: RmailClient,
             filename: String,
-            inputStream: java.io.InputStream,
+            inputStream: java.io.InputStream?,
             fileSize: Long,
             cacheDir: java.io.File,
+            chunksDir: java.io.File,
             onProgress: ((UploadPhase, Long, Long) -> Unit)? = null
         ): String? {
-            val zipFile = java.io.File(cacheDir, "rmail-upload-${System.currentTimeMillis()}.zip")
-            try {
-                // Step 1: compress
-                var bytesRead = 0L
-                java.util.zip.ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
-                    zos.putNextEntry(java.util.zip.ZipEntry(filename))
-                    val buf = ByteArray(65536)
-                    var n: Int
-                    while (inputStream.read(buf).also { n = it } > 0) {
-                        zos.write(buf, 0, n)
-                        bytesRead += n
-                        onProgress?.invoke(UploadPhase.ZIPPING, bytesRead, fileSize)
-                    }
-                    zos.closeEntry()
-                }
+            chunksDir.mkdirs()
+            fun chunkFile(i: Int) = java.io.File(chunksDir, "chunk-%04d.bin".format(i))
 
-                // Step 2: stream compressed chunks to server
-                val compressedSize = zipFile.length()
-                val numChunks = ((compressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE).toInt()
-                val start = client.uploadStart(filename, numChunks) ?: return null
-                var bytesSent = 0L
+            // Step 1: check if chunks already exist (resume from previous zip+chunk)
+            val existingChunks = chunksDir.listFiles()?.filter {
+                it.name.startsWith("chunk-") && it.name.endsWith(".bin")
+            }?.size ?: 0
 
-                zipFile.inputStream().buffered().use { fis ->
-                    val chunkBuf = ByteArray(CHUNK_SIZE)
-                    for (i in 0 until numChunks) {
-                        var read = 0
-                        while (read < CHUNK_SIZE) {
-                            val r = fis.read(chunkBuf, read, CHUNK_SIZE - read)
-                            if (r <= 0) break
-                            read += r
+            var numChunks: Int
+            var compressedSize: Long
+
+            if (existingChunks > 0) {
+                // Resume: chunks already on disk from previous attempt
+                numChunks = existingChunks
+                compressedSize = (0 until numChunks).sumOf { chunkFile(it).length() }
+            } else if (inputStream != null) {
+                // Fresh upload: compress to zip, then split into chunk files
+                val zipFile = java.io.File(cacheDir, "rmail-upload-${System.currentTimeMillis()}.zip")
+                try {
+                    var bytesRead = 0L
+                    java.util.zip.ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
+                        zos.putNextEntry(java.util.zip.ZipEntry(filename))
+                        val buf = ByteArray(65536)
+                        var n: Int
+                        while (inputStream.read(buf).also { n = it } > 0) {
+                            zos.write(buf, 0, n)
+                            bytesRead += n
+                            onProgress?.invoke(UploadPhase.ZIPPING, bytesRead, fileSize)
                         }
-                        val chunk = if (read == CHUNK_SIZE) chunkBuf else chunkBuf.copyOf(read)
-                        if (!client.uploadChunk(start.uploadId, i, chunk)) return null
-                        bytesSent += read
-                        onProgress?.invoke(UploadPhase.SENDING, bytesSent, compressedSize)
+                        zos.closeEntry()
                     }
+
+                    // Split zip into chunk files
+                    compressedSize = zipFile.length()
+                    numChunks = ((compressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE).toInt()
+                    zipFile.inputStream().buffered().use { fis ->
+                        val chunkBuf = ByteArray(CHUNK_SIZE)
+                        for (i in 0 until numChunks) {
+                            var read = 0
+                            while (read < CHUNK_SIZE) {
+                                val r = fis.read(chunkBuf, read, CHUNK_SIZE - read)
+                                if (r <= 0) break
+                                read += r
+                            }
+                            chunkFile(i).writeBytes(
+                                if (read == CHUNK_SIZE) chunkBuf else chunkBuf.copyOf(read))
+                        }
+                    }
+                } finally {
+                    zipFile.delete()
                 }
-                return start.serverPath
-            } finally {
-                zipFile.delete()
+            } else {
+                return null  // no input and no cached chunks
             }
+
+            // Step 2: compute per-chunk checksums
+            val checksums = mutableMapOf<Int, String>()
+            for (i in 0 until numChunks) {
+                checksums[i] = com.rmail.app.crypto.Crypto.sha256Hex(chunkFile(i).readBytes())
+            }
+
+            // Step 3: ask server which chunks are missing (resume-aware)
+            val resume = client.uploadResume(filename, numChunks, checksums) ?: return null
+            val missing = resume.missing
+
+            // Step 4: upload only missing chunks
+            var bytesSent = (numChunks - missing.size).toLong() * CHUNK_SIZE
+            onProgress?.invoke(UploadPhase.SENDING, bytesSent, compressedSize)
+
+            for (i in missing) {
+                val data = chunkFile(i).readBytes()
+                if (!client.uploadChunk(resume.uploadId, i, data)) return null
+                bytesSent += data.size
+                onProgress?.invoke(UploadPhase.SENDING, bytesSent, compressedSize)
+            }
+
+            // Success — clean up chunk files
+            chunksDir.deleteRecursively()
+            return resume.serverPath
         }
     }
 }

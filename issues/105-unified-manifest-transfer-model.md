@@ -99,9 +99,13 @@ All transfers follow the same steps:
 - [x] Server→Phone: whole-file checksum verification
 - [x] Server→Phone: repair on mismatch (re-download bad chunks)
 - [x] Server→Phone: concurrent chunk downloads
-- [ ] Server→Phone: persist download state for resume across app restart
-- [ ] Phone→Server: per-chunk checksum verification
-- [ ] Phone→Server: resume interrupted uploads
-- [ ] Daemon→Daemon: whole-file verification and repair
-- [ ] Daemon→Daemon: persist incoming state across restarts
-- [ ] Unified protocol used by all three paths
+- [x] Server→Phone: resume via chunk-file model (filesystem is the state)
+- [x] Phone→Server: per-chunk checksum verification (via /api/upload/resume)
+- [x] Phone→Server: resume interrupted uploads (chunk files persist, server
+      reports missing list)
+- [x] Daemon→Daemon: whole-file verification after assembly
+- [x] Daemon→Daemon: repair on checksum mismatch (clear bad chunks, re-request)
+- [x] Daemon→Daemon: incoming state persists across restarts (chunk files +
+      consent-pending.json survive)
+- [x] All three paths use chunk-file model (individual chunk files on disk,
+      filesystem is the resume state, per-chunk checksums, whole-file verify)

@@ -607,10 +607,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } catch (_: Exception) {}
                     }
 
+                    val uploadChunksDir = java.io.File(app.cacheDir, "upload-chunks/$filename")
                     val serverPath = withContext(Dispatchers.IO) {
-                        app.contentResolver.openInputStream(uri)?.use { stream ->
+                        val stream = app.contentResolver.openInputStream(uri)
+                        try {
                             RmailClient.uploadFileCompressed(
-                                client, filename, stream, fileSize, app.cacheDir
+                                client, filename, stream, fileSize,
+                                app.cacheDir, uploadChunksDir
                             ) { phase, processed, total ->
                                 val processedMB = "%.1f".format(processed / (1024.0 * 1024.0))
                                 val totalMB = "%.1f".format(total / (1024.0 * 1024.0))
@@ -622,6 +625,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                                 writeProgress(msg)
                             }
+                        } finally {
+                            stream?.close()
                         }
                     } ?: continue
 
