@@ -90,6 +90,31 @@ The periodic retry handles the "both offline at different times" problem.
 The scan handles same-ISP IP reassignment. The manual fallback handles
 everything else.
 
+## Resolution: accepted limitation of the home-server model
+
+rmail is fundamentally a home-server system. Each user has a stable home
+daemon (ideally a Raspberry Pi behind a dedicated router) with a fixed
+public IP and forwarded port. Phones and laptops sync TO the home daemon —
+they don't communicate directly with each other.
+
+The home daemon never moves. The only way its public IP changes is if the
+ISP reassigns it, which rmail already detects and notifies contacts about.
+This works as long as both home daemons aren't reassigned simultaneously.
+
+Simultaneous reassignment of two ISPs at the same time is rare enough that
+manual recovery (out-of-band communication of the new IP) is acceptable.
+There is no trustless, infrastructure-free, automated solution to this
+problem — any automated approach requires either a third party (DNS, relay
+server) or assumes the IP is in a predictable range (subnet scan), neither
+of which we can guarantee.
+
+The practical advice for users:
+- Use a DHCP reservation on your home router so the LAN IP is stable
+- If your ISP changes your public IP, rmail handles it automatically
+  (notifies all contacts)
+- If you move house / change ISP, update your contacts manually (one-time)
+- The home daemon should be always-on — that's the stable anchor
+
 ## Status
 
-Research / design phase. Not yet implementing.
+Closed — accepted limitation. Not implementing automated recovery.
