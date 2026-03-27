@@ -1,6 +1,7 @@
 package com.rmail.app.ui
 
 import android.app.Application
+import android.util.Log
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -104,8 +105,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         serverLanIp = null
         _syncError.value = null
         _syncStatus.value = SyncStatus.IDLE
-        _attachments.value = emptyList()
         refreshLocal()
+        refreshLocalAttachments()
         triggerSync()
         startForegroundPolling()
     }
@@ -139,6 +140,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Active mailbox operations ───────────────────────────────────────────
 
+    /** Immediately populate attachment list from locally cached files (no server call). */
+    private fun refreshLocalAttachments() {
+        val s = store ?: return
+        val localFiles = s.attachments.listFiles()?.filter { it.isFile }?.map { file ->
+            AttachmentInfo(
+                filename = file.name,
+                size = file.length(),
+                category = inferCategory(file.name),
+                onServer = false,  // unknown until server responds
+                onDevice = true
+            )
+        }?.sortedBy { it.filename.lowercase() } ?: emptyList()
+        _attachments.value = localFiles
+    }
+
     fun refreshLocal() {
         val s = store ?: return
         _inboxFiles.value = s.listInbox()
@@ -165,9 +181,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         is SyncResult.NewMessages -> result.mailboxName
                         else -> null
                     }
+                    val serverPath = when (result) {
+                        is SyncResult.Success -> result.mailboxPath
+                        is SyncResult.NewMessages -> result.mailboxPath
+                        else -> null
+                    }
                     val cfg = activeConfig
-                    if (serverName != null && cfg != null && cfg.name.isBlank()) {
-                        updateMailbox(cfg.copy(name = serverName))
+                    if (cfg != null) {
+                        var updated = cfg
+                        if (serverName != null && cfg.name.isBlank()) updated = updated.copy(name = serverName)
+                        if (serverPath != null && cfg.mailboxPath.isBlank()) updated = updated.copy(mailboxPath = serverPath)
+                        if (updated != cfg) updateMailbox(updated)
                     }
                 }
                 is SyncResult.Error -> {
@@ -222,12 +246,190 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadAttachmentList() {
         val config = activeConfig ?: return
+        val s = store ?: return
+        val wasSyncing = _syncStatus.value == SyncStatus.SYNCING
+        if (!wasSyncing) _syncStatus.value = SyncStatus.SYNCING
         viewModelScope.launch {
             try {
                 val client = RmailClient(config.host, config.port, config.token)
-                val list = withContext(Dispatchers.IO) { client.listAttachments() }
-                _attachments.value = list
+                val serverList = withContext(Dispatchers.IO) { client.listAttachments() }
+                val serverNames = serverList.map { it.filename }.toSet()
+
+                // Mark server files with device presence, verify checksums.
+                // Corrupt files are auto-repaired: only bad chunks are re-downloaded.
+                val combined = withContext(Dispatchers.IO) {
+                    serverList.map { info ->
+                        var onDevice = s.isAttachmentCached(info.filename)
+                        if (onDevice && info.checksum.isNotBlank()) {
+                            val localFile = s.cachedAttachmentFile(info.filename)
+                            val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(localFile)
+                            if (localHash != info.checksum) {
+                                // File is corrupt — attempt chunk-level repair
+                                val repaired = repairFile(client, info.filename, localFile)
+                                onDevice = repaired
+                                // Don't delete — leave the file for future repair attempts
+                                // unless it's completely unrepairable (wrong size, etc.)
+                            }
+                        }
+                        info.copy(onServer = true, onDevice = onDevice)
+                    }.toMutableList()
+                }
+
+                // Add locally cached files not on the server
+                withContext(Dispatchers.IO) {
+                    s.attachments.listFiles()?.forEach { file ->
+                        if (file.isFile && file.name !in serverNames) {
+                            combined.add(AttachmentInfo(
+                                filename = file.name,
+                                size = file.length(),
+                                category = inferCategory(file.name),
+                                onServer = false,
+                                onDevice = true
+                            ))
+                        }
+                    }
+                }
+
+                _attachments.value = combined.sortedBy { it.filename.lowercase() }
+            } catch (_: Exception) {
+                // Offline — show only local files
+                val s2 = store ?: run {
+                    if (!wasSyncing) _syncStatus.value = SyncStatus.IDLE
+                    return@launch
+                }
+                val localOnly = withContext(Dispatchers.IO) {
+                    s2.attachments.listFiles()?.filter { it.isFile }?.map { file ->
+                        AttachmentInfo(
+                            filename = file.name,
+                            size = file.length(),
+                            category = inferCategory(file.name),
+                            onServer = false,
+                            onDevice = true
+                        )
+                    } ?: emptyList()
+                }
+                _attachments.value = localOnly.sortedBy { it.filename.lowercase() }
+            }
+            if (!wasSyncing) _syncStatus.value = SyncStatus.IDLE
+        }
+    }
+
+    private fun inferCategory(filename: String): String {
+        val ext = filename.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg" -> "image"
+            "mp3", "wav", "ogg", "flac", "aac", "m4a" -> "audio"
+            "mp4", "mkv", "avi", "mov", "webm" -> "video"
+            "txt", "md", "log", "csv", "json", "xml", "html" -> "text"
+            else -> "other"
+        }
+    }
+
+    /**
+     * Repair a corrupt local file by comparing per-chunk checksums with the
+     * server and re-downloading only the mismatched chunks.
+     * Returns true if repair succeeded, false if it failed.
+     */
+    private fun repairFile(client: RmailClient, filename: String, localFile: File): Boolean {
+        return try {
+            // Get server's chunk manifest
+            val (status, body) = client.get("/api/attachments/$filename/info")
+            if (status != 200) return false
+            val info = org.json.JSONObject(body.toString(Charsets.UTF_8))
+            val chunkSize = info.optLong("chunk_size", 256L * 1024)
+            val numChunks = info.getInt("num_chunks")
+            val fileChecksum = info.optString("file_checksum", "")
+            val serverChecksums = mutableListOf<String>()
+            info.optJSONArray("chunk_checksums")?.let { arr ->
+                for (i in 0 until arr.length()) serverChecksums.add(arr.optString(i, ""))
+            }
+            if (serverChecksums.size != numChunks) return false
+
+            // Compute local per-chunk checksums
+            val localChecksums = mutableListOf<String>()
+            localFile.inputStream().buffered().use { stream ->
+                val buf = ByteArray(chunkSize.toInt())
+                for (i in 0 until numChunks) {
+                    var read = 0
+                    while (read < chunkSize) {
+                        val n = stream.read(buf, read, (chunkSize - read).toInt())
+                        if (n <= 0) break
+                        read += n
+                    }
+                    val chunkData = if (read == chunkSize.toInt()) buf else buf.copyOf(read)
+                    localChecksums.add(com.rmail.app.crypto.Crypto.sha256Hex(chunkData))
+                }
+            }
+
+            // Find mismatched chunks
+            val badChunks = (0 until numChunks).filter { i ->
+                i >= localChecksums.size || localChecksums[i] != serverChecksums[i]
+            }
+
+            if (badChunks.isEmpty()) return true // checksums all match after re-check
+
+            Log.i("rmail", "Repairing $filename: ${badChunks.size}/$numChunks chunks corrupted")
+
+            // Re-download only the bad chunks and patch the file
+            val raf = java.io.RandomAccessFile(localFile, "rw")
+            for (chunkIdx in badChunks) {
+                val (chunkStatus, chunkBody) = client.get("/api/attachments/$filename/chunk/$chunkIdx")
+                if (chunkStatus != 200) {
+                    Log.e("rmail", "Repair failed: chunk $chunkIdx returned HTTP $chunkStatus")
+                    raf.close(); return false
+                }
+                val hash = com.rmail.app.crypto.Crypto.sha256Hex(chunkBody)
+                if (hash != serverChecksums[chunkIdx]) {
+                    Log.e("rmail", "Repair failed: chunk $chunkIdx checksum mismatch after re-download " +
+                        "(server may have a bad disk)")
+                    raf.close(); return false
+                }
+                raf.seek(chunkIdx.toLong() * chunkSize)
+                raf.write(chunkBody)
+            }
+            raf.close()
+
+            // Verify whole file after repair
+            if (fileChecksum.isNotBlank()) {
+                val repairedHash = com.rmail.app.crypto.Crypto.sha256HexFile(localFile)
+                if (repairedHash != fileChecksum) {
+                    Log.e("rmail", "Repair failed: whole-file checksum still wrong after patching " +
+                        "${badChunks.size} chunks — file may be wrong size")
+                    return false
+                }
+            }
+            Log.i("rmail", "Repair succeeded for $filename: ${badChunks.size} chunks replaced")
+            true
+        } catch (e: Exception) {
+            Log.e("rmail", "Repair failed for $filename: ${e.message}")
+            false
+        }
+    }
+
+    // Files currently being deleted (shown as spinner)
+    private val _deletingFiles = MutableStateFlow<Set<String>>(emptySet())
+    val deletingFiles: StateFlow<Set<String>> = _deletingFiles
+
+    fun deleteAttachmentFromServer(filename: String) {
+        val config = activeConfig ?: return
+        _deletingFiles.value = _deletingFiles.value + filename
+        viewModelScope.launch {
+            try {
+                val client = RmailClient(config.host, config.port, config.token)
+                val ok = withContext(Dispatchers.IO) { client.deleteAttachment(filename) }
+                if (ok) loadAttachmentList()
             } catch (_: Exception) {}
+            _deletingFiles.value = _deletingFiles.value - filename
+        }
+    }
+
+    fun deleteAttachmentFromDevice(filename: String) {
+        val s = store ?: return
+        _deletingFiles.value = _deletingFiles.value + filename
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { s.cachedAttachmentFile(filename).delete() }
+            loadAttachmentList()
+            _deletingFiles.value = _deletingFiles.value - filename
         }
     }
 
@@ -257,13 +459,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 _downloadProgress.value = _downloadProgress.value - info.filename
                 downloadJobs.remove(info.filename)
+                loadAttachmentList()  // refresh presence info
                 onDone(file)
             } catch (e: Exception) {
                 _downloadProgress.value = _downloadProgress.value - info.filename
                 downloadJobs.remove(info.filename)
-                // Clean up partial file on cancel
-                if (e is CancellationException) {
-                    s.cachedAttachmentFile(info.filename).delete()
+                when (e) {
+                    is CancellationException -> {
+                        s.cachedAttachmentFile(info.filename).delete()
+                    }
+                    is com.rmail.app.net.ChecksumMismatchException -> {
+                        Log.w("rmail", "Download checksum mismatch for ${info.filename}, attempting repair")
+                        val repairClient = RmailClient(config.host, config.port, config.token)
+                        withContext(Dispatchers.IO) {
+                            repairClient.remoteLog("warn", "Checksum mismatch after downloading ${info.filename}, attempting repair")
+                        }
+                        val repaired = withContext(Dispatchers.IO) {
+                            repairFile(repairClient, info.filename, s.cachedAttachmentFile(info.filename))
+                        }
+                        if (repaired) {
+                            Log.i("rmail", "Post-download repair succeeded for ${info.filename}")
+                            withContext(Dispatchers.IO) {
+                                repairClient.remoteLog("info", "Repair succeeded for ${info.filename}")
+                            }
+                            loadAttachmentList()
+                            onDone(s.cachedAttachmentFile(info.filename))
+                            return@launch
+                        } else {
+                            Log.e("rmail", "Post-download repair FAILED for ${info.filename}")
+                            withContext(Dispatchers.IO) {
+                                repairClient.remoteLog("error", "Repair FAILED for ${info.filename}")
+                            }
+                        }
+                    }
+                    else -> {
+                        Log.e("rmail", "Download failed for ${info.filename}: ${e.message}")
+                        try {
+                            val logClient = RmailClient(config.host, config.port, config.token)
+                            withContext(Dispatchers.IO) {
+                                logClient.remoteLog("error", "Download failed for ${info.filename}: ${e.message}")
+                            }
+                        } catch (_: Exception) {}
+                    }
                 }
                 onDone(null)
             }
@@ -300,11 +537,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val daemonLabel = config.name.ifBlank { config.host }
         viewModelScope.launch {
             val client = RmailClient(config.host, config.port, config.token)
+            // Check which files are already on the server to avoid re-uploading
+            val serverFiles = _attachments.value.filter { it.onServer }.map { it.filename }.toSet()
+            val mailboxPath = config.mailboxPath
+
             for (uri in uris) {
                 val uriStr = uri.toString()
                 if (!uriStr.startsWith("content://") && !uriStr.startsWith("file://")) continue
                 try {
                     val filename = resolveFilename(uri) ?: "attachment"
+
+                    // Skip upload if file already exists on server — just update the path
+                    if (filename in serverFiles && mailboxPath.isNotBlank()) {
+                        val serverPath = "$mailboxPath/attachments/$filename"
+                        withContext(Dispatchers.IO) {
+                            val file = File(s.outbox, outboxFilename)
+                            if (file.exists()) {
+                                val text = file.readText()
+                                file.writeText(text.replace(uriStr, serverPath))
+                            }
+                        }
+                        continue
+                    }
+
                     val app = getApplication<Application>()
 
                     // Get file size for progress reporting

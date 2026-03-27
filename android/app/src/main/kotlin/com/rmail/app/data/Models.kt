@@ -50,7 +50,10 @@ data class SyncResponse(
 data class AttachmentInfo(
     val filename: String,
     val size: Long,
-    val category: String   // image / audio / text / other
+    val category: String,   // image / audio / text / other / video
+    val checksum: String = "",
+    val onServer: Boolean = true,
+    val onDevice: Boolean = false
 )
 
 data class UploadStartResult(val uploadId: String, val serverPath: String)

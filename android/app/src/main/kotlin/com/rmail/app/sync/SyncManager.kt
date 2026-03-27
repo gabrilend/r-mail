@@ -18,8 +18,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed class SyncResult {
-    data class Success(val mailboxName: String? = null) : SyncResult()
-    data class NewMessages(val count: Int, val mailboxName: String? = null) : SyncResult()
+    data class Success(val mailboxName: String? = null, val mailboxPath: String? = null) : SyncResult()
+    data class NewMessages(val count: Int, val mailboxName: String? = null, val mailboxPath: String? = null) : SyncResult()
     data class Error(val message: String) : SyncResult()
 }
 
@@ -145,10 +145,10 @@ class SyncManager(
 
             if (newCount > 0) {
                 postNotification(newCount, resp.fetchInbox.values.firstOrNull()?.filename)
-                return@withContext SyncResult.NewMessages(newCount, resp.mailboxName)
+                return@withContext SyncResult.NewMessages(newCount, resp.mailboxName, resp.mailboxPath)
             }
 
-            SyncResult.Success(resp.mailboxName)
+            SyncResult.Success(resp.mailboxName, resp.mailboxPath)
 
         } catch (e: Exception) {
             SyncResult.Error(e.message ?: "Unknown sync error")

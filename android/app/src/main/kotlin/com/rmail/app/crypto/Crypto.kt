@@ -96,4 +96,17 @@ object Crypto {
         val digest = MessageDigest.getInstance("SHA-256")
         return digest.digest(data).joinToString("") { "%02x".format(it) }
     }
+
+    /** Stream a file through SHA-256 without loading it all into memory. */
+    fun sha256HexFile(file: java.io.File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { stream ->
+            val buf = ByteArray(65536)
+            var n: Int
+            while (stream.read(buf).also { n = it } > 0) {
+                digest.update(buf, 0, n)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
 }

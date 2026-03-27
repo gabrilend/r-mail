@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,6 +42,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -60,10 +63,12 @@ import androidx.core.content.FileProvider
 import com.rmail.app.data.AttachmentInfo
 import com.rmail.app.ui.MainViewModel
 import com.rmail.app.ui.SyncStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
 
 private enum class Panel { INBOX, OUTBOX, FILES, CONTACTS, SETTINGS, WRITE }
+private enum class FilesMode { NORMAL, DELETE, FORWARD }
 
 @Composable
 private fun rememberKeyboardOpen(): Boolean {
@@ -91,8 +96,8 @@ private val ButtonColors = mapOf(
     Panel.INBOX to Color(0xFF2E7D32),       // deep green
     Panel.OUTBOX to Color(0xFFFF9800),      // orange
     Panel.FILES to Color(0xFF1565C0),       // deep blue
-    Panel.CONTACTS to Color(0xFFE91E63),    // pink
-    Panel.SETTINGS to Color(0xFF9C27B0),    // purple
+    Panel.CONTACTS to Color(0xFFE53935),    // red
+    Panel.SETTINGS to Color(0xFFD81B60),    // magenta
     Panel.WRITE to Color(0xFF26A69A),       // teal
 )
 
@@ -141,6 +146,10 @@ fun InboxScreen(
     // Contact editor state
     var showContactEditor by remember { mutableStateOf(false) }
 
+    // Files panel selection mode
+    var filesMode by remember { mutableStateOf(FilesMode.NORMAL) }
+    val selectedFiles = remember { mutableStateListOf<String>() }
+
     val context = LocalContext.current
 
     // File picker for compose attachments
@@ -173,6 +182,7 @@ fun InboxScreen(
     }
     LaunchedEffect(currentPanel) {
         if (currentPanel == Panel.FILES) vm.loadAttachmentList()
+        else { filesMode = FilesMode.NORMAL; selectedFiles.clear() }
     }
 
     Scaffold(
@@ -208,7 +218,10 @@ fun InboxScreen(
                             SyncStatus.ERROR -> IconButton(onClick = { vm.triggerSync() }) {
                                 Icon(Icons.Default.Warning, contentDescription = "Sync error")
                             }
-                            SyncStatus.IDLE -> IconButton(onClick = { vm.triggerSync() }) {
+                            SyncStatus.IDLE -> IconButton(onClick = {
+                                vm.triggerSync()
+                                if (currentPanel == Panel.FILES) vm.loadAttachmentList()
+                            }) {
                                 Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                             }
                         }
@@ -290,9 +303,49 @@ fun InboxScreen(
             val gridWidth = 0.5.dp
             // 2x3 grid with gray internal separators
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Horizontal separator between rows
+                val hasFilesRow = currentPanel == Panel.FILES
+                val cornerRadius = 16.dp
+                // Files action row — above the main rows so navigation stays stable
+                if (hasFilesRow) {
+                    val deleteColor = Color(0xFFD32F2F)
+                    val forwardColor = Color(0xFF7B1FA2)
+                    val uploadColor = ButtonColors[Panel.WRITE]!!
+                    val filesRowGray = Color(0xFF9E9E9E)  // light gray for unselected files actions
+                    HorizontalDivider(thickness = gridWidth, color = gridColor)
+                    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                        BottomBarButton("Delete", filesMode == FilesMode.DELETE, deleteColor,
+                            Modifier.weight(1f), unselectedColor = filesRowGray) {
+                            if (filesMode == FilesMode.DELETE) {
+                                filesMode = FilesMode.NORMAL; selectedFiles.clear()
+                            } else {
+                                filesMode = FilesMode.DELETE; selectedFiles.clear()
+                            }
+                        }
+                        VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.DELETE, filesMode == FilesMode.FORWARD)
+                        BottomBarButton("Forward", filesMode == FilesMode.FORWARD, forwardColor,
+                            Modifier.weight(1f), unselectedColor = filesRowGray) {
+                            if (filesMode == FilesMode.FORWARD) {
+                                filesMode = FilesMode.NORMAL; selectedFiles.clear()
+                            } else {
+                                filesMode = FilesMode.FORWARD; selectedFiles.clear()
+                            }
+                        }
+                        VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.FORWARD, false)
+                        BottomBarButton("Upload", false, uploadColor, Modifier.weight(1f),
+                            unselectedColor = filesRowGray) {
+                            val activeId = vm.activeMailboxId.value
+                            val config = activeId?.let { vm.registry.get(it) }
+                            draftRecipients = listOf(config?.name ?: "")
+                            draftAttachments.clear()
+                            draftSubject = ""
+                            draftBody = ""
+                            currentPanel = Panel.WRITE
+                            filePicker.launch("*/*")
+                        }
+                    }
+                }
+                // Top row (always present)
                 HorizontalDivider(thickness = gridWidth, color = gridColor)
-                // Top row
                 Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                     BottomBarButton("Contacts", currentPanel == Panel.CONTACTS,
                         ButtonColors[Panel.CONTACTS]!!, Modifier.weight(1f)) { currentPanel = Panel.CONTACTS }
@@ -303,10 +356,8 @@ fun InboxScreen(
                     BottomBarButton("Write", currentPanel == Panel.WRITE,
                         ButtonColors[Panel.WRITE]!!, Modifier.weight(1f)) { currentPanel = Panel.WRITE }
                 }
-                // Horizontal separator
+                // Bottom row (always present, always at the bottom)
                 HorizontalDivider(thickness = gridWidth, color = gridColor)
-                // Bottom row — corner buttons get rounded corners for curved screens
-                val cornerRadius = 16.dp
                 Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                     BottomBarButton("Inbox", currentPanel == Panel.INBOX,
                         ButtonColors[Panel.INBOX]!!, Modifier.weight(1f),
@@ -361,7 +412,100 @@ fun InboxScreen(
                     { vm.deleteInboxMessage(it) }, { onOpen(it) })
                 Panel.OUTBOX -> MessageList(outboxFiles, "Outbox is empty", true,
                     { vm.deleteOutboxFile(it) }, { onOpenOutbox(it) })
-                Panel.FILES -> AttachmentList(vm, attachments)
+                Panel.FILES -> {
+                    // Box overlay: action bars float on top of the list
+                    Box(Modifier.fillMaxSize()) {
+                        AttachmentList(
+                            vm = vm,
+                            attachments = attachments,
+                            selectionMode = filesMode != FilesMode.NORMAL,
+                            selectedFiles = selectedFiles,
+                            onDeleteServer = { filenames -> filenames.forEach { vm.deleteAttachmentFromServer(it) } },
+                            onDeleteDevice = { filenames -> filenames.forEach { vm.deleteAttachmentFromDevice(it) } },
+                            onForward = { /* handled by bar below */ }
+                        )
+                        // Overlay action bars at top
+                        if (filesMode == FilesMode.DELETE && selectedFiles.isNotEmpty()) {
+                            val teal = ButtonColors[Panel.WRITE]!!
+                            Row(Modifier.fillMaxWidth().align(Alignment.TopCenter)) {
+                                Surface(color = teal, modifier = Modifier.weight(1f).clickable {
+                                    val valid = selectedFiles.filter { fn ->
+                                        attachments.find { it.filename == fn }?.onServer == true
+                                    }
+                                    if (valid.size < selectedFiles.size) {
+                                        selectedFiles.clear(); selectedFiles.addAll(valid)
+                                    } else {
+                                        vm.run { valid.forEach { deleteAttachmentFromServer(it) } }
+                                        selectedFiles.clear(); filesMode = FilesMode.NORMAL
+                                    }
+                                }) {
+                                    Box(contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(vertical = 10.dp)) {
+                                        Text("Delete on server", fontWeight = FontWeight.Bold,
+                                            color = Color.Black)
+                                    }
+                                }
+                                Surface(color = MaterialTheme.colorScheme.errorContainer,
+                                    modifier = Modifier.weight(1f).clickable {
+                                    val valid = selectedFiles.filter { fn ->
+                                        attachments.find { it.filename == fn }?.onDevice == true
+                                    }
+                                    if (valid.size < selectedFiles.size) {
+                                        selectedFiles.clear(); selectedFiles.addAll(valid)
+                                    } else {
+                                        vm.run { valid.forEach { deleteAttachmentFromDevice(it) } }
+                                        selectedFiles.clear(); filesMode = FilesMode.NORMAL
+                                    }
+                                }) {
+                                    Box(contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(vertical = 10.dp)) {
+                                        Text("Delete on device", fontWeight = FontWeight.Bold,
+                                            color = Color.Black)
+                                    }
+                                }
+                            }
+                        }
+                        if (filesMode == FilesMode.FORWARD && selectedFiles.isNotEmpty()) {
+                            Surface(color = Color(0xFF7B1FA2),
+                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).clickable {
+                                    draftRecipients = listOf("")
+                                    draftAttachments.clear()
+                                    draftSubject = ""
+                                    // Split: device files go in attachment field,
+                                    // server-only files go as attach: lines in the body
+                                    val serverOnlyLines = mutableListOf<String>()
+                                    val activeId = vm.activeMailboxId.value
+                                    val mailboxPath = activeId?.let { vm.registry.get(it) }?.mailboxPath ?: ""
+                                    for (fn in selectedFiles.toList()) {
+                                        val info = attachments.find { it.filename == fn }
+                                        val cached = vm.store?.cachedAttachmentFile(fn)
+                                        if (info?.onDevice == true && cached != null && cached.exists()) {
+                                            // On device (possibly also on server) — put in attachment field
+                                            draftAttachments.add(AttachmentEntry(
+                                                uri = android.net.Uri.fromFile(cached),
+                                                displayName = fn,
+                                                mimeType = info.category
+                                            ))
+                                        } else if (info?.onServer == true && mailboxPath.isNotBlank()) {
+                                            // Server-only — attach: line with full server path
+                                            serverOnlyLines.add("attach: $mailboxPath/attachments/$fn")
+                                        }
+                                    }
+                                    draftBody = serverOnlyLines.joinToString("\n")
+                                    currentPanel = Panel.WRITE
+                                    filesMode = FilesMode.NORMAL
+                                    selectedFiles.clear()
+                                }
+                            ) {
+                                Box(contentAlignment = Alignment.Center,
+                                    modifier = Modifier.padding(vertical = 10.dp)) {
+                                    Text("Tap to forward", fontWeight = FontWeight.Bold,
+                                        color = Color.Black)
+                                }
+                            }
+                        }
+                    }
+                }
                 Panel.CONTACTS -> if (showContactEditor) {
                     ContactEditorPanel(
                         existingContacts = contactsContent,
@@ -422,6 +566,7 @@ private fun BottomBarButton(
     label: String, selected: Boolean, color: Color,
     modifier: Modifier = Modifier,
     shape: androidx.compose.ui.graphics.Shape = androidx.compose.ui.graphics.RectangleShape,
+    unselectedColor: Color? = null,  // override unselected text color
     onClick: () -> Unit
 ) {
     Box(
@@ -436,7 +581,7 @@ private fun BottomBarButton(
             label,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) Color.Black else color
+            color = if (selected) Color.Black else (unselectedColor ?: color)
         )
     }
 }
@@ -460,7 +605,7 @@ private fun ActionBar(onClear: () -> Unit, onSave: () -> Unit) {
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(vertical = 10.dp)) {
                 Text("Clear changes", fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onErrorContainer)
+                    color = Color.Black)
             }
         }
         Surface(
@@ -469,7 +614,7 @@ private fun ActionBar(onClear: () -> Unit, onSave: () -> Unit) {
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(vertical = 10.dp)) {
                 Text("Save changes", fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    color = Color.Black)
             }
         }
     }
@@ -1030,7 +1175,56 @@ private fun ComposePanel(
         attachments.forEachIndexed { index, entry ->
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
-                Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                // Image thumbnail or file type icon
+                val isImage = entry.mimeType?.startsWith("image") == true ||
+                    entry.displayName.lowercase().let {
+                        it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") ||
+                        it.endsWith(".gif") || it.endsWith(".webp") || it.endsWith(".bmp")
+                    }
+                val uriStr = entry.uri.toString()
+                if (isImage && (uriStr.startsWith("file://") || uriStr.startsWith("content://"))) {
+                    // Try loading thumbnail from URI
+                    val ctx = LocalContext.current
+                    var bitmap by remember(entry.uri) {
+                        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+                    }
+                    LaunchedEffect(entry.uri) {
+                        bitmap = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            try {
+                                if (uriStr.startsWith("file://")) {
+                                    val file = java.io.File(entry.uri.path!!)
+                                    android.graphics.BitmapFactory.decodeFile(
+                                        file.absolutePath,
+                                        android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 }
+                                    )?.asImageBitmap()
+                                } else {
+                                    ctx.contentResolver.openInputStream(entry.uri)?.use { stream ->
+                                        android.graphics.BitmapFactory.decodeStream(
+                                            stream, null,
+                                            android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 }
+                                        )?.asImageBitmap()
+                                    }
+                                }
+                            } catch (_: Exception) { null }
+                        }
+                    }
+                    if (bitmap != null) {
+                        Image(bitmap!!, null, Modifier.size(36.dp).padding(end = 4.dp),
+                            contentScale = ContentScale.Crop)
+                    } else {
+                        Icon(Icons.Default.Image, null, Modifier.size(24.dp).padding(end = 4.dp))
+                    }
+                } else {
+                    val ext = entry.displayName.substringAfterLast('.', "").lowercase()
+                    Icon(when {
+                        isImage -> Icons.Default.Image
+                        ext in listOf("mp4", "mkv", "avi", "mov", "webm") -> Icons.Default.PlayCircle
+                        ext in listOf("mp3", "wav", "ogg", "flac", "aac") -> Icons.Default.AudioFile
+                        ext in listOf("txt", "md", "log", "csv", "json") -> Icons.AutoMirrored.Filled.TextSnippet
+                        else -> Icons.Default.AttachFile
+                    }, null, Modifier.size(24.dp).padding(end = 4.dp))
+                }
+                Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(entry.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
                     Text(entry.mimeType?.substringAfter('/') ?: "file",
                         style = MaterialTheme.typography.bodySmall,
@@ -1144,6 +1338,28 @@ private fun sanitizeFilename(name: String): String {
     var s = name.substringAfterLast('/').substringAfterLast('\\').trimStart('.')
     s = s.replace(Regex("[\\x00-\\x1f/\\\\]"), "_")
     return s.ifBlank { "untitled" }
+}
+
+// ── Image thumbnail from file ────────────────────────────────────────────────
+
+@Composable
+private fun AttachmentThumbnail(file: File, modifier: Modifier = Modifier) {
+    var bitmap by remember(file.absolutePath) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    LaunchedEffect(file.absolutePath) {
+        bitmap = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            try {
+                val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 }
+                android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+                    ?.asImageBitmap()
+            } catch (_: Exception) { null }
+        }
+    }
+    if (bitmap != null) {
+        Image(bitmap!!, contentDescription = null, modifier = modifier,
+            contentScale = ContentScale.Crop)
+    } else {
+        Icon(Icons.Default.Image, null, modifier)
+    }
 }
 
 // ── Contacts diff visual transformation ─────────────────────────────────────
@@ -1270,83 +1486,136 @@ private fun MessageList(
 // ── Attachment list ─────────────────────────────────────────────────────────
 
 @Composable
-private fun AttachmentList(vm: MainViewModel, attachments: List<AttachmentInfo>) {
+private fun AttachmentList(
+    vm: MainViewModel,
+    attachments: List<AttachmentInfo>,
+    selectionMode: Boolean,
+    selectedFiles: MutableList<String>,
+    onDeleteServer: (List<String>) -> Unit,
+    onDeleteDevice: (List<String>) -> Unit,
+    onForward: (List<String>) -> Unit
+) {
     val context = LocalContext.current
     val downloadProgress by vm.downloadProgress.collectAsState()
+    val deletingFiles by vm.deletingFiles.collectAsState()
     val accentColor = Color(vm.globalSettings.accentColor.toLong() and 0xFFFFFFFFL)
+    val activeId by vm.activeMailboxId.collectAsState()
+    val config = activeId?.let { vm.registry.get(it) }
+    val daemonLabel = config?.name?.ifBlank { null } ?: config?.host ?: "server"
 
-    if (attachments.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No attachments on home server",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+    Column(Modifier.fillMaxSize()) {
+        // Delete action bar (when in delete selection mode with selections)
+        if (selectionMode && selectedFiles.isNotEmpty()) {
+            // Handled by parent via action bar
         }
-    } else {
-        LazyColumn {
-            items(attachments, key = { it.filename }) { info ->
-                val progress = downloadProgress[info.filename]
-                val isCached = vm.store?.isAttachmentCached(info.filename) ?: false
 
-                Column {
-                    Row(Modifier.fillMaxWidth()
-                        .clickable {
-                            if (isCached) {
-                                val file = vm.store?.cachedAttachmentFile(info.filename) ?: return@clickable
-                                if (file.exists()) openFile(context, file)
-                            } else if (progress == null) {
-                                vm.downloadAttachment(info) { file ->
-                                    if (file != null) openFile(context, file)
+        if (attachments.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No files",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(attachments, key = { it.filename }) { info ->
+                    val progress = downloadProgress[info.filename]
+                    val isSelected = info.filename in selectedFiles
+                    val isDeleting = info.filename in deletingFiles
+
+                    Column {
+                        Row(Modifier.fillMaxWidth()
+                            .then(if (isSelected) Modifier.background(
+                                accentColor.copy(alpha = 0.1f)) else Modifier)
+                            .clickable {
+                                if (selectionMode) {
+                                    if (isSelected) selectedFiles.remove(info.filename)
+                                    else selectedFiles.add(info.filename)
+                                } else if (info.onDevice) {
+                                    val file = vm.store?.cachedAttachmentFile(info.filename)
+                                        ?: return@clickable
+                                    if (file.exists()) openFile(context, file)
+                                } else if (info.onServer && progress == null) {
+                                    vm.downloadAttachment(info) { file ->
+                                        if (file != null) openFile(context, file)
+                                    }
                                 }
                             }
-                        }
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(when (info.category) {
-                            "image" -> Icons.Default.Image
-                            "audio" -> Icons.Default.AudioFile
-                            "text" -> Icons.AutoMirrored.Filled.TextSnippet
-                            else -> Icons.Default.AttachFile
-                        }, null, Modifier.size(24.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(info.filename, style = MaterialTheme.typography.bodyMedium)
-                            if (progress != null) {
-                                Text("${formatSize(progress.first)} / ${formatSize(progress.second)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = accentColor)
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // File type icon, image thumbnail, or checkbox
+                            if (selectionMode) {
+                                Checkbox(
+                                    checked = isSelected,
+                                    onCheckedChange = {
+                                        if (it) selectedFiles.add(info.filename)
+                                        else selectedFiles.remove(info.filename)
+                                    },
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            } else if (info.category == "image" && info.onDevice) {
+                                // Image thumbnail from cached file
+                                val cachedFile = vm.store?.cachedAttachmentFile(info.filename)
+                                if (cachedFile != null && cachedFile.exists()) {
+                                    AttachmentThumbnail(cachedFile, Modifier.size(36.dp))
+                                } else {
+                                    Icon(Icons.Default.Image, null, Modifier.size(24.dp))
+                                }
                             } else {
-                                Text(formatSize(info.size),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                                Icon(when (info.category) {
+                                    "image" -> Icons.Default.Image
+                                    "video" -> Icons.Default.PlayCircle
+                                    "audio" -> Icons.Default.AudioFile
+                                    "text" -> Icons.AutoMirrored.Filled.TextSnippet
+                                    else -> Icons.Default.AttachFile
+                                }, null, Modifier.size(24.dp))
                             }
-                        }
-                        when {
-                            progress != null -> {
-                                // Cancel download button (red X)
-                                IconButton(onClick = { vm.cancelDownload(info.filename) }) {
-                                    Icon(Icons.Default.Close, "Cancel download",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(info.filename, style = MaterialTheme.typography.bodyMedium)
+                                if (progress != null) {
+                                    Text("${formatSize(progress.first)} / ${formatSize(progress.second)}",
+                                        style = MaterialTheme.typography.bodySmall, color = accentColor)
+                                } else {
+                                    Text(formatSize(info.size),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                                 }
+                                // Presence info
+                                val locations = mutableListOf<String>()
+                                if (info.onServer) locations.add(daemonLabel)
+                                if (info.onDevice) locations.add("android")
+                                Text("Present on: ${locations.joinToString(", ")}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
                             }
-                            isCached -> Icon(Icons.Default.CheckCircle, "Cached",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp))
-                            else -> Icon(Icons.Default.Download, "Download",
-                                modifier = Modifier.size(20.dp))
+                            when {
+                                isDeleting -> CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                progress != null -> {
+                                    IconButton(onClick = { vm.cancelDownload(info.filename) }) {
+                                        Icon(Icons.Default.Close, "Cancel",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(20.dp))
+                                    }
+                                }
+                                info.onDevice -> Icon(Icons.Default.CheckCircle, "On device",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp))
+                                info.onServer -> Icon(Icons.Default.Download, "Download",
+                                    modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        if (progress != null && progress.second > 0) {
+                            LinearProgressIndicator(
+                                progress = { (progress.first.toFloat() / progress.second).coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                                color = accentColor,
+                                trackColor = accentColor.copy(alpha = 0.15f)
+                            )
                         }
                     }
-                    // Progress bar below the item
-                    if (progress != null && progress.second > 0) {
-                        LinearProgressIndicator(
-                            progress = { (progress.first.toFloat() / progress.second).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().height(3.dp),
-                            color = accentColor,
-                            trackColor = accentColor.copy(alpha = 0.15f)
-                        )
-                    }
+                    HorizontalDivider(thickness = 0.5.dp)
                 }
-                HorizontalDivider(thickness = 0.5.dp)
             }
         }
     }

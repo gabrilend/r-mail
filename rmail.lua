@@ -2888,6 +2888,7 @@ local function handle_api_list_attachments()
             size     = size or 0,
             category = infer_attachment_category(f),
             sender   = sender_for[f] or "",
+            checksum = sha256_file(path) or "",
         }
     end
     return 200, {files = result}
@@ -2901,6 +2902,24 @@ local function handle_api_get_attachment(filename)
     return 200, "application/octet-stream", content
 end
 
+-- POST /api/log — accept a log message from a phone and write it to the daemon's log.
+local function handle_api_log(data, caller_name)
+    local msg = data and data.message or "(no message)"
+    local level = data and data.level or "info"
+    log("[%s] %s: %s", caller_name or "phone", level, msg)
+    return 200, {ok = true}
+end
+
+-- DELETE /api/attachments/<filename> — delete an attachment from the server.
+local function handle_api_delete_attachment(filename)
+    filename = sanitize_filename(filename)
+    local path = paths.attachments .. "/" .. filename
+    if not file_exists(path) then return 404, {error = "not found"} end
+    os.remove(path)
+    log("attachment deleted by phone: %s", filename)
+    return 200, {ok = true}
+end
+
 -- GET /api/attachments/<filename>/info — return file size and chunk count for chunked download.
 local DOWNLOAD_CHUNK_SIZE = 256 * 1024  -- 256 KiB per chunk (small for resumability over flaky connections)
 
@@ -2912,7 +2931,28 @@ local function handle_api_attachment_info(filename)
     if h then h:close() end
     if not size or size == 0 then return 404, {error = "not found"} end
     local num_chunks = math.ceil(size / DOWNLOAD_CHUNK_SIZE)
-    return 200, {size = size, num_chunks = num_chunks, chunk_size = DOWNLOAD_CHUNK_SIZE}
+    -- Compute per-chunk checksums so the client can verify each chunk
+    local chunk_checksums = {}
+    local f = io.open(path, "rb")
+    if f then
+        for i = 1, num_chunks do
+            local data = f:read(DOWNLOAD_CHUNK_SIZE)
+            if data then
+                local bytes = crypto.sha256(data)
+                local hex = ""
+                for j = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(j)) end
+                chunk_checksums[i] = hex
+            end
+        end
+        f:close()
+    end
+    return 200, {
+        size = size,
+        num_chunks = num_chunks,
+        chunk_size = DOWNLOAD_CHUNK_SIZE,
+        chunk_checksums = chunk_checksums,
+        file_checksum = sha256_file(path) or "",
+    }
 end
 
 -- GET /api/attachments/<filename>/chunk/<n> — download one chunk of an attachment.
@@ -3434,6 +3474,14 @@ local function main()
                             local s, ct, c = handle_api_get_attachment(fn)
                             if ct then send_raw_response(resp, s, ct, c)
                             else send_response(resp, s, {error = "not found"}) end
+                        elseif method == "DELETE" and path:match("^/api/attachments/(.+)$") then
+                            fn = path:match("^/api/attachments/(.+)$")
+                            local s, r = handle_api_delete_attachment(fn)
+                            send_response(resp, s, r)
+                        elseif method == "POST" and path == "/api/log" then
+                            local data = json.decode(body or "{}") or {}
+                            local s, r = handle_api_log(data, contact_name)
+                            send_response(resp, s, r)
                         elseif method == "POST" and path == "/api/upload/start" then
                             local data = json.decode(body or "{}") or {}
                             local s, r = handle_api_upload_start(data)

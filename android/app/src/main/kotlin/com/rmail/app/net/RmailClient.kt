@@ -16,6 +16,8 @@ import kotlinx.coroutines.sync.Semaphore
 import java.io.IOException
 import java.net.Socket
 
+class ChecksumMismatchException(message: String) : IOException(message)
+
 /**
  * Low-level client for the rmail AES-GCM-over-TCP protocol.
  *
@@ -83,13 +85,15 @@ class RmailClient(
         }
     }
 
-    private fun get(path: String): Pair<Int, ByteArray> = request("GET", path)
+    internal fun get(path: String): Pair<Int, ByteArray> = request("GET", path)
 
     private fun post(path: String, json: JSONObject): Pair<Int, ByteArray> =
         request("POST", path, json.toString().toByteArray(Charsets.UTF_8), "application/json")
 
     private fun post(path: String, body: ByteArray): Pair<Int, ByteArray> =
         request("POST", path, body, "application/octet-stream")
+
+    private fun delete(path: String): Pair<Int, ByteArray> = request("DELETE", path)
 
     private fun put(path: String, body: ByteArray): Pair<Int, ByteArray> =
         request("PUT", path, body, "application/octet-stream")
@@ -212,7 +216,8 @@ class RmailClient(
             AttachmentInfo(
                 filename = obj.getString("filename"),
                 size = obj.getLong("size"),
-                category = obj.optString("category", "other")
+                category = obj.optString("category", "other"),
+                checksum = obj.optString("checksum", "")
             )
         }
     }
@@ -221,51 +226,88 @@ class RmailClient(
      * GET /api/attachments/<filename>
      */
     /**
-     * Download an attachment in chunks, streaming directly to a file.
-     * Uses parallel downloads (4 concurrent) for speed. Each chunk is a
-     * separate encrypted request, so peak memory is ~4 chunks.
-     * The server specifies chunk_size in the info response (typically 5MB).
+     * Download an attachment with concurrent chunk downloads and per-chunk
+     * checksum verification. Each chunk writes to a non-overlapping region
+     * of the file via RandomAccessFile.seek(). Concurrency is dynamic based
+     * on available heap memory. Whole-file checksum verified after assembly.
      */
     suspend fun downloadAttachmentChunked(
         filename: String,
         destFile: java.io.File,
         onProgress: ((Long, Long) -> Unit)? = null
     ): Boolean {
-        // Step 1: get file info
+        // Step 1: get file info including per-chunk checksums
         val (infoStatus, infoBody) = get("/api/attachments/$filename/info")
         if (infoStatus != 200) throw IOException("Attachment info failed: HTTP $infoStatus")
         val info = JSONObject(infoBody.toString(Charsets.UTF_8))
         val totalSize = info.getLong("size")
         val numChunks = info.getInt("num_chunks")
         val chunkSize = info.optLong("chunk_size", 256L * 1024)
+        val fileChecksum = info.optString("file_checksum", "")
+
+        // Parse per-chunk checksums
+        val chunkChecksums = mutableMapOf<Int, String>()
+        info.optJSONArray("chunk_checksums")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                chunkChecksums[i] = arr.optString(i, "")
+            }
+        }
 
         // Step 2: pre-allocate file
         java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
 
-        // Step 3: download chunks in parallel, write each to its correct offset
+        // Step 3: calculate max concurrency from available heap
+        val runtime = Runtime.getRuntime()
+        val freeHeap = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+        val maxConcurrent = ((freeHeap * 0.5) / chunkSize).toInt().coerceIn(2, 64)
+
+        // Step 4: download chunks concurrently, verify and write each one
         val downloaded = java.util.concurrent.atomic.AtomicLong(0)
-        val parallelism = 4
-        val semaphore = Semaphore(parallelism)
-        val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val semaphore = Semaphore(maxConcurrent)
+        val failed = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
         coroutineScope {
             for (i in 0 until numChunks) {
-                if (failed.get()) break
+                kotlinx.coroutines.yield()  // cancellation check
+                if (failed.get() != null) break
+
                 semaphore.acquire()
                 launch(Dispatchers.IO) {
                     try {
-                        if (failed.get()) return@launch
-                        val (status, body) = get("/api/attachments/$filename/chunk/$i")
-                        if (status != 200) { failed.set(true); return@launch }
-                        // Write chunk at its correct file offset
+                        if (failed.get() != null) return@launch
+                        val expectedHash = chunkChecksums[i] ?: ""
+                        var chunk: ByteArray? = null
+
+                        // Try up to 3 times per chunk
+                        for (attempt in 1..3) {
+                            val (status, body) = get("/api/attachments/$filename/chunk/$i")
+                            if (status != 200) {
+                                failed.set("Chunk $i: HTTP $status")
+                                return@launch
+                            }
+                            if (expectedHash.isNotBlank()) {
+                                val actualHash = com.rmail.app.crypto.Crypto.sha256Hex(body)
+                                if (actualHash == expectedHash) { chunk = body; break }
+                            } else {
+                                chunk = body; break
+                            }
+                        }
+
+                        if (chunk == null) {
+                            failed.set("Chunk $i failed checksum after 3 retries")
+                            return@launch
+                        }
+
+                        // Write to non-overlapping region — safe for concurrent access
                         java.io.RandomAccessFile(destFile, "rw").use { raf ->
                             raf.seek(i.toLong() * chunkSize)
-                            raf.write(body)
+                            raf.write(chunk)
                         }
-                        val total = downloaded.addAndGet(body.size.toLong())
+
+                        val total = downloaded.addAndGet(chunk.size.toLong())
                         onProgress?.invoke(total, totalSize)
-                    } catch (_: Exception) {
-                        failed.set(true)
+                    } catch (e: Exception) {
+                        if (failed.get() == null) failed.set("Chunk $i: ${e.message}")
                     } finally {
                         semaphore.release()
                     }
@@ -273,11 +315,44 @@ class RmailClient(
             }
         }
 
-        if (failed.get()) {
+        if (failed.get() != null) {
             destFile.delete()
-            throw IOException("Chunked download failed")
+            throw IOException("Chunked download failed: ${failed.get()}")
         }
+
+        // Step 5: verify whole-file checksum
+        if (fileChecksum.isNotBlank()) {
+            val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(destFile)
+            if (localHash != fileChecksum) {
+                // Don't delete — caller can attempt chunk-level repair
+                throw ChecksumMismatchException(
+                    "File checksum mismatch after assembly ($localHash != $fileChecksum)")
+            }
+        }
+
         return true
+    }
+
+    /**
+     * DELETE /api/attachments/<filename> — delete an attachment from the server.
+     */
+    fun deleteAttachment(filename: String): Boolean {
+        return try {
+            val (status, _) = delete("/api/attachments/$filename")
+            status == 200
+        } catch (_: Exception) { false }
+    }
+
+    /**
+     * POST /api/log — send a log message to the server's daemon log.
+     */
+    fun remoteLog(level: String, message: String) {
+        try {
+            post("/api/log", JSONObject().apply {
+                put("level", level)
+                put("message", message)
+            })
+        } catch (_: Exception) {} // best-effort, don't crash if server is unreachable
     }
 
     data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String)

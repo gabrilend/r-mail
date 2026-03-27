@@ -14,7 +14,8 @@ data class MailboxConfig(
     val token: String = "",
     val swipeToDelete: Boolean = true,
     val bgSyncIntervalMinutes: Int = 15,
-    val notificationDetail: String = "full"
+    val notificationDetail: String = "full",
+    val mailboxPath: String = ""  // server-side mailbox directory, learned from sync
 ) {
     val isConfigured: Boolean get() = host.isNotBlank() && token.isNotBlank()
 }
@@ -114,7 +115,8 @@ class MailboxRegistry(private val context: Context) {
         token = obj.optString("token", ""),
         swipeToDelete = obj.optBoolean("swipe_to_delete", true),
         bgSyncIntervalMinutes = obj.optInt("bg_sync_interval", 15),
-        notificationDetail = obj.optString("notification_detail", "full")
+        notificationDetail = obj.optString("notification_detail", "full"),
+        mailboxPath = obj.optString("mailbox_path", "")
     )
 
     private fun toJson(c: MailboxConfig) = JSONObject().apply {
@@ -126,5 +128,6 @@ class MailboxRegistry(private val context: Context) {
         put("swipe_to_delete", c.swipeToDelete)
         put("bg_sync_interval", c.bgSyncIntervalMinutes)
         put("notification_detail", c.notificationDetail)
+        put("mailbox_path", c.mailboxPath)
     }
 }
