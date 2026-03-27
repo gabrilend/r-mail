@@ -63,4 +63,4 @@ Before fix:
 
 ## Status
 
-**FIXED** - Pending commit
+**FIXED** - Committed

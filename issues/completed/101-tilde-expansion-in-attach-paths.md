@@ -64,4 +64,4 @@ Added `expand_tilde()` helper function at line ~172 and called it in `parse_outb
 
 ## Status
 
-**FIXED** - Pending commit
+**FIXED** - Committed

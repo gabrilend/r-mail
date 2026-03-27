@@ -38,4 +38,4 @@ Also send the response back to the payload's LAN IP, not the UDP source.
 
 ## Status
 
-**FIXED** - Pending commit
+**FIXED** - Committed

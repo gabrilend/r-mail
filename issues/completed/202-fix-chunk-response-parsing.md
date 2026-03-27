@@ -29,4 +29,4 @@ Two bugs in the chunk transfer response handling:
 
 ## Status
 
-**FIXED** - Pending commit
+**FIXED** - Committed
