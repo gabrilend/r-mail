@@ -35,11 +35,38 @@ class RmailClient(
 ) {
     private val key = Crypto.keyFromToken(token)
 
+    // ── Persistent connection ───────────────────────────────────────────────
+    // Reuses a single TCP connection for multiple requests. Reconnects
+    // transparently if the connection is dead. The server supports keep-alive
+    // via its coroutine event loop.
+
+    private var sock: Socket? = null
+    private var sockOut: java.io.OutputStream? = null
+    private var sockInp: java.io.InputStream? = null
+
+    @Synchronized
+    private fun ensureConnected() {
+        if (sock != null && sock!!.isConnected && !sock!!.isClosed) return
+        sock?.close()
+        val s = Socket()
+        s.connect(java.net.InetSocketAddress(host, port), 5_000)
+        s.soTimeout = 10_000
+        sock = s
+        sockOut = s.getOutputStream()
+        sockInp = s.getInputStream()
+    }
+
+    @Synchronized
+    fun close() {
+        try { sock?.close() } catch (_: Exception) {}
+        sock = null; sockOut = null; sockInp = null
+    }
+
     // ── Core transport ─────────────────────────────────────────────────────
 
     /**
      * Send one request and return (statusCode, body).
-     * Throws IOException on network errors.
+     * Reuses the persistent connection. Reconnects once on failure.
      */
     private fun request(
         method: String,
@@ -55,34 +82,38 @@ class RmailClient(
         }
         sb.append("\r\n")
         val header = sb.toString().toByteArray(Charsets.UTF_8)
-        val request = header + body
+        val reqBytes = header + body
 
-        Socket().use { sock ->
-            sock.connect(java.net.InetSocketAddress(host, port), 5_000)
-            sock.soTimeout = 10_000
-            val out = sock.getOutputStream()
-            val inp = sock.getInputStream()
+        // Try on existing connection, reconnect once on failure
+        for (attempt in 1..2) {
+            try {
+                ensureConnected()
+                val out = sockOut!!
+                val inp = sockInp!!
 
-            out.write(Crypto.encryptFrame(request, key))
-            out.flush()
+                out.write(Crypto.encryptFrame(reqBytes, key))
+                out.flush()
 
-            val plaintext = Crypto.decryptFrame(inp, key)
-                ?: throw IOException("Decryption failed — wrong token or tampered response")
+                val plaintext = Crypto.decryptFrame(inp, key)
+                    ?: throw IOException("Decryption failed — wrong token or tampered response")
 
-            // Parse HTTP-style response: "HTTP/1.0 200 OK\r\n...\r\n\r\nbody"
-            val responseText = plaintext.toString(Charsets.ISO_8859_1)
-            val headerEnd = responseText.indexOf("\r\n\r\n")
-            if (headerEnd < 0) throw IOException("Malformed response: no header/body separator")
+                val responseText = plaintext.toString(Charsets.ISO_8859_1)
+                val headerEnd = responseText.indexOf("\r\n\r\n")
+                if (headerEnd < 0) throw IOException("Malformed response: no header/body separator")
 
-            val statusLine = responseText.substring(0, responseText.indexOf("\r\n"))
-            val statusCode = statusLine.split(" ").getOrNull(1)?.toIntOrNull()
-                ?: throw IOException("Malformed status line: $statusLine")
+                val statusLine = responseText.substring(0, responseText.indexOf("\r\n"))
+                val statusCode = statusLine.split(" ").getOrNull(1)?.toIntOrNull()
+                    ?: throw IOException("Malformed status line: $statusLine")
 
-            // Body starts after \r\n\r\n — return as raw bytes
-            val bodyStart = headerEnd + 4
-            val responseBody = plaintext.copyOfRange(bodyStart, plaintext.size)
-            return Pair(statusCode, responseBody)
+                val bodyStart = headerEnd + 4
+                val responseBody = plaintext.copyOfRange(bodyStart, plaintext.size)
+                return Pair(statusCode, responseBody)
+            } catch (e: IOException) {
+                close()  // force reconnect on next attempt
+                if (attempt == 2) throw e
+            }
         }
+        throw IOException("request failed after 2 attempts")  // unreachable but satisfies compiler
     }
 
     internal fun get(path: String): Pair<Int, ByteArray> = request("GET", path)
@@ -226,14 +257,14 @@ class RmailClient(
      * GET /api/attachments/<filename>
      */
     /**
-     * Download an attachment with concurrent chunk downloads and per-chunk
-     * checksum verification. Each chunk writes to a non-overlapping region
-     * of the file via RandomAccessFile.seek(). Concurrency is dynamic based
-     * on available heap memory. Whole-file checksum verified after assembly.
+     * Download an attachment with concurrent chunk downloads, per-chunk checksum
+     * verification, and resumable state. If a previous download was interrupted,
+     * only missing chunks are downloaded. State is persisted to stateDir.
      */
     suspend fun downloadAttachmentChunked(
         filename: String,
         destFile: java.io.File,
+        stateDir: java.io.File? = null,
         onProgress: ((Long, Long) -> Unit)? = null
     ): Boolean {
         // Step 1: get file info including per-chunk checksums
@@ -245,7 +276,6 @@ class RmailClient(
         val chunkSize = info.optLong("chunk_size", 256L * 1024)
         val fileChecksum = info.optString("file_checksum", "")
 
-        // Parse per-chunk checksums
         val chunkChecksums = mutableMapOf<Int, String>()
         info.optJSONArray("chunk_checksums")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -253,22 +283,84 @@ class RmailClient(
             }
         }
 
-        // Step 2: pre-allocate file
-        java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
+        // Step 2: check for resumable state
+        val stateFile = if (stateDir != null) {
+            stateDir.mkdirs()
+            java.io.File(stateDir, "$filename.download.json")
+        } else null
 
-        // Step 3: calculate max concurrency from available heap
+        val received = BooleanArray(numChunks) { false }
+        if (stateFile != null && stateFile.exists() && destFile.exists()) {
+            try {
+                val state = JSONObject(stateFile.readText())
+                // Verify the state matches this download (same file, same chunks)
+                if (state.optLong("total_size") == totalSize &&
+                    state.optInt("num_chunks") == numChunks &&
+                    state.optString("file_checksum") == fileChecksum) {
+                    val arr = state.optJSONArray("received")
+                    if (arr != null) {
+                        for (i in 0 until minOf(arr.length(), numChunks)) {
+                            received[i] = arr.optBoolean(i, false)
+                        }
+                    }
+                }
+            } catch (_: Exception) { /* corrupt state file, start fresh */ }
+        }
+
+        val missingChunks = (0 until numChunks).filter { !received[it] }
+
+        // Step 3: pre-allocate file if starting fresh, or verify size for resume
+        if (missingChunks.size == numChunks) {
+            // Fresh download
+            java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
+        } else if (destFile.length() != totalSize) {
+            // Size mismatch — can't resume, start fresh
+            java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
+            for (i in received.indices) received[i] = false
+        }
+
+        val alreadyDownloaded = received.count { it }.toLong() * chunkSize
+        val downloaded = java.util.concurrent.atomic.AtomicLong(alreadyDownloaded)
+        onProgress?.invoke(alreadyDownloaded, totalSize)
+
+        if (missingChunks.isEmpty()) {
+            // All chunks already received from a previous session — verify whole file
+            stateFile?.delete()
+            if (fileChecksum.isNotBlank()) {
+                val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(destFile)
+                if (localHash != fileChecksum) throw ChecksumMismatchException(
+                    "Resumed file checksum mismatch ($localHash != $fileChecksum)")
+            }
+            return true
+        }
+
+        // Step 4: calculate max concurrency
         val runtime = Runtime.getRuntime()
         val freeHeap = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
         val maxConcurrent = ((freeHeap * 0.5) / chunkSize).toInt().coerceIn(2, 64)
 
-        // Step 4: download chunks concurrently, verify and write each one
-        val downloaded = java.util.concurrent.atomic.AtomicLong(0)
+        // Step 5: download missing chunks concurrently
         val semaphore = Semaphore(maxConcurrent)
         val failed = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        var lastStateSave = System.currentTimeMillis()
+
+        fun saveState() {
+            if (stateFile == null) return
+            try {
+                val state = JSONObject()
+                state.put("total_size", totalSize)
+                state.put("num_chunks", numChunks)
+                state.put("file_checksum", fileChecksum)
+                val arr = org.json.JSONArray()
+                for (r in received) arr.put(r)
+                state.put("received", arr)
+                stateFile.writeText(state.toString())
+            } catch (_: Exception) {}
+        }
 
         coroutineScope {
-            for (i in 0 until numChunks) {
-                kotlinx.coroutines.yield()  // cancellation check
+            for (i in missingChunks) {
+                kotlinx.coroutines.yield()
                 if (failed.get() != null) break
 
                 semaphore.acquire()
@@ -278,7 +370,6 @@ class RmailClient(
                         val expectedHash = chunkChecksums[i] ?: ""
                         var chunk: ByteArray? = null
 
-                        // Try up to 3 times per chunk
                         for (attempt in 1..3) {
                             val (status, body) = get("/api/attachments/$filename/chunk/$i")
                             if (status != 200) {
@@ -298,14 +389,21 @@ class RmailClient(
                             return@launch
                         }
 
-                        // Write to non-overlapping region — safe for concurrent access
                         java.io.RandomAccessFile(destFile, "rw").use { raf ->
                             raf.seek(i.toLong() * chunkSize)
                             raf.write(chunk)
                         }
+                        received[i] = true
 
                         val total = downloaded.addAndGet(chunk.size.toLong())
                         onProgress?.invoke(total, totalSize)
+
+                        // Save state periodically (every 2 seconds)
+                        val now = System.currentTimeMillis()
+                        if (now - lastStateSave > 2000) {
+                            lastStateSave = now
+                            saveState()
+                        }
                     } catch (e: Exception) {
                         if (failed.get() == null) failed.set("Chunk $i: ${e.message}")
                     } finally {
@@ -316,19 +414,21 @@ class RmailClient(
         }
 
         if (failed.get() != null) {
-            destFile.delete()
+            saveState()  // preserve progress for resume
             throw IOException("Chunked download failed: ${failed.get()}")
         }
 
-        // Step 5: verify whole-file checksum
+        // Step 6: verify whole-file checksum
         if (fileChecksum.isNotBlank()) {
             val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(destFile)
             if (localHash != fileChecksum) {
-                // Don't delete — caller can attempt chunk-level repair
+                saveState()  // preserve for repair
                 throw ChecksumMismatchException(
                     "File checksum mismatch after assembly ($localHash != $fileChecksum)")
             }
         }
+        // Success — clean up state file
+        stateFile?.delete()
 
         return true
     }

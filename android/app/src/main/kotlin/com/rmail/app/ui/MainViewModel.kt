@@ -451,7 +451,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val file = s.cachedAttachmentFile(info.filename)
 
                 withContext(Dispatchers.IO) {
-                    client.downloadAttachmentChunked(info.filename, file) { downloaded, total ->
+                    val dlStateDir = java.io.File(s.attachments, ".downloads")
+                    client.downloadAttachmentChunked(info.filename, file, dlStateDir) { downloaded, total ->
                         _downloadProgress.value = _downloadProgress.value +
                             (info.filename to (downloaded to total))
                     }

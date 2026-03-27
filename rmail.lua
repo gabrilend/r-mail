@@ -3203,49 +3203,80 @@ end
 
 local function handle_request(rt, client)
     client:settimeout(10)
-    local first4 = client:receive(4)
-    if not first4 or #first4 ~= 4 then return end
 
-    if first4 == "GET " then
-        while true do
-            local line = client:receive("*l")
-            if not line or line == "" then break end
+    -- Known sender from previous request on this connection (for keep-alive)
+    local known_contact = nil
+    local known_key = nil
+
+    while true do
+        -- Read first 4 bytes — length prefix or "GET " for health check
+        -- Use a longer timeout for keep-alive idle (waiting for next request)
+        client:settimeout(known_contact and 30 or 10)
+        local first4 = client:receive(4)
+        if not first4 or #first4 ~= 4 then return end  -- connection closed or timeout
+
+        -- Plaintext health check
+        if first4 == "GET " then
+            while true do
+                local line = client:receive("*l")
+                if not line or line == "" then break end
+            end
+            local hc_body = json.encode({ok = true, name = rt.my_name})
+            client:send(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
+                "Content-Length: " .. #hc_body .. "\r\nConnection: close\r\n\r\n" .. hc_body)
+            return  -- health check doesn't support keep-alive
         end
-        local hc_body = json.encode({ok = true, name = rt.my_name})
-        client:send(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
-            "Content-Length: " .. #hc_body .. "\r\nConnection: close\r\n\r\n" .. hc_body)
-        return
-    end
 
-    local len = parse_uint32_be(first4)
-    if len < 28 or len > 64 * 1024 * 1024 then return end
-    local packet = client:receive(len)
-    if not packet or #packet ~= len then return end
+        -- Encrypted frame
+        client:settimeout(10)
+        local len = parse_uint32_be(first4)
+        if len < 28 or len > 64 * 1024 * 1024 then return end
+        local packet = client:receive(len)
+        if not packet or #packet ~= len then return end
 
-    local plaintext, contact_name = trial_decrypt(packet)
-    if not plaintext then log("decryption failed: no matching contact key"); return end
-
-    -- Cache peer LAN IP (TCP fallback, prefer UDP discovery)
-    local peer_ip = client:getpeername()
-    if peer_ip and contact_name and not rt.lan.peers[contact_name] then
-        local is_private = peer_ip:match("^192%.168%.") or
-                           peer_ip:match("^10%.") or peer_ip:match("^172%.")
-        if is_private then
-            local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
-            local cc = load_contacts()
-            if cc[contact_name] and cc[contact_name].ip == my_public then
-                rt.lan.peers[contact_name] = peer_ip
+        -- Decrypt: try known sender's key first (fast path for keep-alive)
+        local plaintext, contact_name
+        if known_contact and known_key then
+            plaintext = crypto.aes_gcm_decrypt(known_key, packet:sub(1, 12), packet:sub(13))
+            if plaintext then
+                contact_name = known_contact
             end
         end
-    end
+        -- Fall back to trial decryption if fast path failed or this is the first request
+        if not plaintext then
+            plaintext, contact_name = trial_decrypt(packet)
+        end
+        if not plaintext then log("decryption failed: no matching contact key"); return end
 
-    local method, path, headers, body = parse_request_string(plaintext)
-    if not method then return end
+        -- Cache sender for subsequent requests on this connection
+        if not known_contact then
+            known_contact = contact_name
+            local cc = load_contacts()
+            if cc[contact_name] then
+                known_key = derive_key(cc[contact_name].token)
+            end
 
-    local contacts = load_contacts()
-    local key = derive_key(contacts[contact_name].token)
-    local is_own_device = contacts[contact_name].own == "true"
+            -- Cache peer LAN IP on first request only
+            local peer_ip = client:getpeername()
+            if peer_ip and contact_name and not rt.lan.peers[contact_name] then
+                local is_private = peer_ip:match("^192%.168%.") or
+                                   peer_ip:match("^10%.") or peer_ip:match("^172%.")
+                if is_private then
+                    local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+                    if cc[contact_name] and cc[contact_name].ip == my_public then
+                        rt.lan.peers[contact_name] = peer_ip
+                    end
+                end
+            end
+        end
+
+        local method, path, headers, body = parse_request_string(plaintext)
+        if not method then return end
+
+        local contacts = load_contacts()
+        local key = derive_key(contacts[contact_name].token)
+        local is_own_device = contacts[contact_name].own == "true"
     local resp = make_response_buffer()
 
     if method == "GET" and path == "/" then
@@ -3329,6 +3360,9 @@ local function handle_request(rt, client)
     else send_response(resp, 404, {error = "not found"}) end
 
     send_encrypted(client, key, resp:get())
+
+    -- Loop back for next request on this keep-alive connection
+    end -- while true (keep-alive loop)
 end
 
 -- ============================================================
@@ -3436,13 +3470,91 @@ local function init_runtime()
 end
 
 -- ============================================================
--- Main — thin loop, all logic in extracted functions
+-- Cooperative socket wrapper — yields to event loop on block
 -- ============================================================
+
+-- Wraps a raw TCP socket so that receive/send yield the current coroutine
+-- instead of blocking. The event loop resumes the coroutine when select()
+-- says the socket is ready.
+
+local function make_async_socket(raw_sock)
+    local wrapper = {_sock = raw_sock, _timeout = 10}
+    raw_sock:settimeout(0)  -- non-blocking
+
+    function wrapper:receive(pattern)
+        local deadline = socket.gettime() + self._timeout
+        local buffer = ""
+        while true do
+            -- For line mode, try to receive with whatever we have
+            local data, err, partial = self._sock:receive(pattern)
+            if data then
+                if #buffer > 0 then return buffer .. data end
+                return data
+            end
+            if partial and #partial > 0 then
+                buffer = buffer .. partial
+                if type(pattern) == "number" then
+                    pattern = pattern - #partial
+                    if pattern <= 0 then return buffer end
+                end
+                -- For "*l" mode, partial means we got data but no newline yet
+                -- Keep accumulating — LuaSocket will continue from where it left off
+            end
+            if err == "timeout" or err == "wantread" then
+                if socket.gettime() > deadline then
+                    return nil, "timeout", buffer
+                end
+                coroutine.yield("read", self._sock)
+            elseif err == "closed" then
+                if #buffer > 0 then return nil, "closed", buffer end
+                return nil, "closed"
+            else
+                return nil, err, partial
+            end
+        end
+    end
+
+    function wrapper:send(data, i)
+        i = i or 1
+        local deadline = socket.gettime() + 30
+        while i <= #data do
+            local bytes, err, last = self._sock:send(data, i)
+            if bytes then
+                -- LuaSocket returns the index of the last byte sent
+                if bytes >= #data then return bytes end
+                i = bytes + 1
+            elseif err == "timeout" or err == "wantwrite" then
+                if last and last >= i then i = last + 1 end
+                if i > #data then return #data end
+                if socket.gettime() > deadline then return nil, "timeout", i - 1 end
+                coroutine.yield("write", self._sock)
+            else
+                return nil, err, last
+            end
+        end
+        return #data
+    end
+
+    function wrapper:settimeout(t) self._timeout = t end
+    function wrapper:getpeername() return self._sock:getpeername() end
+    function wrapper:close() return self._sock:close() end
+
+    return wrapper
+end
+
+-- ============================================================
+-- Coroutine event loop — concurrent connection handling
+-- ============================================================
+
+-- Active client coroutines: each connection gets its own coroutine.
+-- The main loop uses socket.select() to multiplex across all active
+-- sockets and resumes coroutines when their socket is ready.
+-- The sync cycle runs inline between select iterations (not as a
+-- coroutine) to keep state management simple.
 
 local function main()
     local rt = init_runtime()
 
-    -- Set module-level callbacks (used by http_post_batch)
     resolve_lan_host = function(host, target_port)
         return do_resolve_lan_host(rt.lan.peers, host, target_port)
     end
@@ -3450,17 +3562,113 @@ local function main()
         do_on_connection_timeout(rt, host, target_port)
     end
 
+    -- Active client coroutines: raw_socket -> {co, wait_type, wait_sock, last_activity}
+    -- wait_type is "read" or "write", wait_sock is the raw socket to select on
+    local clients = {}
+
+    rt.server:settimeout(0)  -- non-blocking accept
+
+    local function resume_client(raw_sock)
+        local info = clients[raw_sock]
+        if not info or coroutine.status(info.co) ~= "suspended" then return end
+        info.last_activity = socket.gettime()
+        local ok, wait_type, wait_sock = coroutine.resume(info.co)
+        if not ok then
+            log("request error: %s", tostring(wait_type))  -- wait_type is the error on failure
+            pcall(function() raw_sock:close() end)
+            clients[raw_sock] = nil
+        elseif coroutine.status(info.co) == "dead" then
+            pcall(function() raw_sock:close() end)
+            clients[raw_sock] = nil
+        else
+            -- Coroutine yielded — it wants to wait for I/O
+            info.wait_type = wait_type   -- "read" or "write"
+            info.wait_sock = wait_sock or raw_sock
+        end
+    end
+
     while true do
-        local client = rt.server:accept()
-        if client then
-            local ok, err = pcall(handle_request, rt, client)
-            if not ok then log("request error: %s", tostring(err)) end
-            client:close()
+        -- Build socket lists for select
+        local recvt = {rt.server}
+        local sendt = {}
+        for raw_sock, info in pairs(clients) do
+            if info.wait_type == "read" then
+                recvt[#recvt + 1] = info.wait_sock
+            elseif info.wait_type == "write" then
+                sendt[#sendt + 1] = info.wait_sock
+            end
         end
 
+        local readable, writable = socket.select(
+            #recvt > 0 and recvt or nil,
+            #sendt > 0 and sendt or nil,
+            0.5)
+
+        -- Handle readable sockets
+        if readable then
+            for _, sock in ipairs(readable) do
+                if sock == rt.server then
+                    local raw_client = rt.server:accept()
+                    if raw_client then
+                        local async_client = make_async_socket(raw_client)
+                        local co = coroutine.create(function()
+                            handle_request(rt, async_client)
+                        end)
+                        clients[raw_client] = {
+                            co = co, wait_type = nil, wait_sock = nil,
+                            last_activity = socket.gettime()
+                        }
+                        -- Start processing — will run until first yield or completion
+                        local ok, wait_type, wait_sock = coroutine.resume(co)
+                        if not ok then
+                            log("request error: %s", tostring(wait_type))
+                            pcall(function() raw_client:close() end)
+                            clients[raw_client] = nil
+                        elseif coroutine.status(co) == "dead" then
+                            pcall(function() raw_client:close() end)
+                            clients[raw_client] = nil
+                        else
+                            clients[raw_client].wait_type = wait_type
+                            clients[raw_client].wait_sock = wait_sock or raw_client
+                        end
+                    end
+                else
+                    -- Find which client owns this socket and resume it
+                    for raw_sock, info in pairs(clients) do
+                        if info.wait_sock == sock and info.wait_type == "read" then
+                            resume_client(raw_sock)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Handle writable sockets
+        if writable then
+            for _, sock in ipairs(writable) do
+                for raw_sock, info in pairs(clients) do
+                    if info.wait_sock == sock and info.wait_type == "write" then
+                        resume_client(raw_sock)
+                        break
+                    end
+                end
+            end
+        end
+
+        -- Clean up stale connections (idle > 30s)
+        local now = socket.gettime()
+        for raw_sock, info in pairs(clients) do
+            if now - info.last_activity > 30 then
+                pcall(function() raw_sock:close() end)
+                clients[raw_sock] = nil
+            end
+        end
+
+        -- UDP discovery (non-blocking)
         pcall(poll_udp_cycle, rt)
 
-        local now = socket.gettime()
+        -- Sync cycle (runs inline, not as a coroutine — simpler state management)
         if file_exists(STATE .. "/sync-now") then
             os.remove(STATE .. "/sync-now")
             rt.last_sync = 0
@@ -3473,6 +3681,7 @@ local function main()
             rt.last_sync = now
         end
 
+        -- NAT renewal
         if rt.nat_mapping then
             if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
                 local ok_r, res = pcall(nat.create_mapping, rt.port)
