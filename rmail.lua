@@ -2901,6 +2901,34 @@ local function handle_api_get_attachment(filename)
     return 200, "application/octet-stream", content
 end
 
+-- GET /api/attachments/<filename>/info — return file size and chunk count for chunked download.
+local DOWNLOAD_CHUNK_SIZE = 256 * 1024  -- 256 KiB per chunk (small for resumability over flaky connections)
+
+local function handle_api_attachment_info(filename)
+    filename = sanitize_filename(filename)
+    local path = paths.attachments .. "/" .. filename
+    local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
+    local size = h and tonumber(h:read("*a"))
+    if h then h:close() end
+    if not size or size == 0 then return 404, {error = "not found"} end
+    local num_chunks = math.ceil(size / DOWNLOAD_CHUNK_SIZE)
+    return 200, {size = size, num_chunks = num_chunks, chunk_size = DOWNLOAD_CHUNK_SIZE}
+end
+
+-- GET /api/attachments/<filename>/chunk/<n> — download one chunk of an attachment.
+local function handle_api_attachment_chunk(filename, chunk_n)
+    filename = sanitize_filename(filename)
+    local path = paths.attachments .. "/" .. filename
+    local f = io.open(path, "rb")
+    if not f then return 404, nil, nil end
+    local offset = chunk_n * DOWNLOAD_CHUNK_SIZE
+    f:seek("set", offset)
+    local data = f:read(DOWNLOAD_CHUNK_SIZE)
+    f:close()
+    if not data or #data == 0 then return 404, nil, nil end
+    return 200, "application/octet-stream", data
+end
+
 -- POST /api/upload/start — register a new phone-to-server attachment upload.
 -- Returns upload_id and the server_path the phone should reference in attach: lines.
 local function handle_api_upload_start(data)
@@ -3391,6 +3419,16 @@ local function main()
                         elseif method == "GET" and path == "/api/attachments" then
                             local s, r = handle_api_list_attachments()
                             send_response(resp, s, r)
+                        elseif method == "GET" and path:match("^/api/attachments/(.+)/info$") then
+                            fn = path:match("^/api/attachments/(.+)/info$")
+                            local s, r = handle_api_attachment_info(fn)
+                            send_response(resp, s, r)
+                        elseif method == "GET" and path:match("^/api/attachments/(.+)/chunk/(%d+)$") then
+                            fn = path:match("^/api/attachments/(.+)/chunk/(%d+)$")
+                            local cn = tonumber(path:match("/chunk/(%d+)$"))
+                            local s, ct, c = handle_api_attachment_chunk(fn, cn)
+                            if ct then send_raw_response(resp, s, ct, c)
+                            else send_response(resp, s, {error = "not found"}) end
                         elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
                             fn = path:match("^/api/attachments/(.+)$")
                             local s, ct, c = handle_api_get_attachment(fn)

@@ -24,13 +24,23 @@ fun ReadScreen(
     onReply: (String) -> Unit,
     onForward: (String) -> Unit
 ) {
-    val message = remember(filename) {
-        if (isOutbox) vm.loadOutboxMessage(filename) else vm.loadMessage(filename)
+    // For outbox files, re-read periodically to show upload progress
+    var message by remember(filename) {
+        mutableStateOf(if (isOutbox) vm.loadOutboxMessage(filename) else vm.loadMessage(filename))
+    }
+    if (isOutbox) {
+        LaunchedEffect(filename) {
+            while (true) {
+                kotlinx.coroutines.delay(1000)
+                message = vm.loadOutboxMessage(filename)
+            }
+        }
     }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
 
-    if (message == null) {
+    val msg = message
+    if (msg == null) {
         LaunchedEffect(Unit) { onBack() }
         return
     }
@@ -64,7 +74,7 @@ fun ReadScreen(
                 },
                 actions = {
                     if (!isOutbox) {
-                        IconButton(onClick = { onReply(buildReply(message)) }) {
+                        IconButton(onClick = { onReply(buildReply(msg)) }) {
                             Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Reply")
                         }
                     }
@@ -81,7 +91,7 @@ fun ReadScreen(
                                     text = { Text("Forward") },
                                     onClick = {
                                         menuExpanded = false
-                                        onForward(buildForward(message))
+                                        onForward(buildForward(msg))
                                     }
                                 )
                             }
@@ -98,9 +108,9 @@ fun ReadScreen(
             )
         }
     ) { padding ->
-        if (message.isConsent) {
+        if (msg.isConsent) {
             ConsentView(
-                message = message,
+                message = msg,
                 onAccept = {
                     vm.saveOutboxFile(filename, "accept")
                     vm.triggerSync()
@@ -121,7 +131,7 @@ fun ReadScreen(
                     .verticalScroll(rememberScrollState())
             ) {
                 Text(
-                    text = message.content,
+                    text = msg.content,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                 )

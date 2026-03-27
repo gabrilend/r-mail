@@ -14,6 +14,7 @@ import com.rmail.app.net.RmailClient
 import com.rmail.app.sync.SyncManager
 import com.rmail.app.sync.SyncResult
 import com.rmail.app.sync.SyncWorker
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -230,20 +231,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Download progress: filename -> (bytesDownloaded, totalBytes) or null when not downloading
+    private val _downloadProgress = MutableStateFlow<Map<String, Pair<Long, Long>>>(emptyMap())
+    val downloadProgress: StateFlow<Map<String, Pair<Long, Long>>> = _downloadProgress
+
+    // Active download jobs, keyed by filename, so they can be cancelled
+    private val downloadJobs = mutableMapOf<String, Job>()
+
     fun downloadAttachment(info: AttachmentInfo, onDone: (File?) -> Unit) {
         val config = activeConfig ?: run { onDone(null); return }
         val s = store ?: run { onDone(null); return }
-        viewModelScope.launch {
+        val job = viewModelScope.launch {
             try {
+                _downloadProgress.value = _downloadProgress.value + (info.filename to (0L to info.size))
+
                 val client = RmailClient(config.host, config.port, config.token)
-                val data = withContext(Dispatchers.IO) { client.downloadAttachment(info.filename) }
                 val file = s.cachedAttachmentFile(info.filename)
-                file.writeBytes(data)
+
+                withContext(Dispatchers.IO) {
+                    client.downloadAttachmentChunked(info.filename, file) { downloaded, total ->
+                        _downloadProgress.value = _downloadProgress.value +
+                            (info.filename to (downloaded to total))
+                    }
+                }
+
+                _downloadProgress.value = _downloadProgress.value - info.filename
+                downloadJobs.remove(info.filename)
                 onDone(file)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                _downloadProgress.value = _downloadProgress.value - info.filename
+                downloadJobs.remove(info.filename)
+                // Clean up partial file on cancel
+                if (e is CancellationException) {
+                    s.cachedAttachmentFile(info.filename).delete()
+                }
                 onDone(null)
             }
         }
+        downloadJobs[info.filename] = job
+    }
+
+    fun cancelDownload(filename: String) {
+        downloadJobs[filename]?.cancel()
+        downloadJobs.remove(filename)
+        _downloadProgress.value = _downloadProgress.value - filename
+        store?.cachedAttachmentFile(filename)?.delete()
     }
 
     private fun fetchMyAddress() {
@@ -265,6 +297,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val config = activeConfig ?: return
         val s = store ?: return
         if (uris.isEmpty()) return
+        val daemonLabel = config.name.ifBlank { config.host }
         viewModelScope.launch {
             val client = RmailClient(config.host, config.port, config.token)
             for (uri in uris) {
@@ -272,16 +305,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!uriStr.startsWith("content://") && !uriStr.startsWith("file://")) continue
                 try {
                     val filename = resolveFilename(uri) ?: "attachment"
-                    val data = withContext(Dispatchers.IO) {
-                        getApplication<Application>().contentResolver.openInputStream(uri)?.readBytes()
-                    } ?: continue
+                    val app = getApplication<Application>()
+
+                    // Get file size for progress reporting
+                    val fileSize = withContext(Dispatchers.IO) {
+                        app.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+                    }
+
+                    // Progress marker in the outbox file — throttled to once per second
+                    val progressMarker = "\n\n---\n"
+                    var lastProgressWrite = 0L
+                    fun writeProgress(line: String) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressWrite < 1000) return
+                        lastProgressWrite = now
+                        try {
+                            val file = File(s.outbox, outboxFilename)
+                            if (!file.exists()) return
+                            val text = file.readText()
+                            val base = if (progressMarker in text)
+                                text.substringBefore(progressMarker)
+                            else text
+                            file.writeText(base + progressMarker + line)
+                        } catch (_: Exception) {}
+                    }
+
                     val serverPath = withContext(Dispatchers.IO) {
-                        RmailClient.uploadFile(client, filename, data)
+                        app.contentResolver.openInputStream(uri)?.use { stream ->
+                            RmailClient.uploadFileCompressed(
+                                client, filename, stream, fileSize, app.cacheDir
+                            ) { phase, processed, total ->
+                                val processedMB = "%.1f".format(processed / (1024.0 * 1024.0))
+                                val totalMB = "%.1f".format(total / (1024.0 * 1024.0))
+                                val msg = when (phase) {
+                                    RmailClient.Companion.UploadPhase.ZIPPING ->
+                                        "zipping $filename... $processedMB MB / $totalMB MB"
+                                    RmailClient.Companion.UploadPhase.SENDING ->
+                                        "sending to $daemonLabel... $processedMB MB / $totalMB MB"
+                                }
+                                writeProgress(msg)
+                            }
+                        }
                     } ?: continue
+
+                    // Upload done — replace URI with server path, remove progress
                     withContext(Dispatchers.IO) {
                         val file = File(s.outbox, outboxFilename)
                         if (file.exists()) {
-                            val text = file.readText()
+                            var text = file.readText()
+                            // Remove progress marker and everything after it
+                            if (progressMarker in text) {
+                                text = text.substringBefore(progressMarker)
+                            }
                             file.writeText(text.replace(uriStr, serverPath))
                         }
                     }

@@ -9,6 +9,10 @@ import com.rmail.app.data.SyncResponse
 import com.rmail.app.data.UploadStartResult
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import java.io.IOException
 import java.net.Socket
 
@@ -201,7 +205,8 @@ class RmailClient(
     fun listAttachments(): List<AttachmentInfo> {
         val (status, body) = get("/api/attachments")
         if (status != 200) throw IOException("List attachments failed: HTTP $status")
-        val arr = JSONArray(body.toString(Charsets.UTF_8))
+        val obj = JSONObject(body.toString(Charsets.UTF_8))
+        val arr = obj.optJSONArray("files") ?: JSONArray()
         return (0 until arr.length()).map { i ->
             val obj = arr.getJSONObject(i)
             AttachmentInfo(
@@ -215,10 +220,64 @@ class RmailClient(
     /**
      * GET /api/attachments/<filename>
      */
-    fun downloadAttachment(filename: String): ByteArray {
-        val (status, body) = get("/api/attachments/$filename")
-        if (status != 200) throw IOException("Download attachment $filename failed: HTTP $status")
-        return body
+    /**
+     * Download an attachment in chunks, streaming directly to a file.
+     * Uses parallel downloads (4 concurrent) for speed. Each chunk is a
+     * separate encrypted request, so peak memory is ~4 chunks.
+     * The server specifies chunk_size in the info response (typically 5MB).
+     */
+    suspend fun downloadAttachmentChunked(
+        filename: String,
+        destFile: java.io.File,
+        onProgress: ((Long, Long) -> Unit)? = null
+    ): Boolean {
+        // Step 1: get file info
+        val (infoStatus, infoBody) = get("/api/attachments/$filename/info")
+        if (infoStatus != 200) throw IOException("Attachment info failed: HTTP $infoStatus")
+        val info = JSONObject(infoBody.toString(Charsets.UTF_8))
+        val totalSize = info.getLong("size")
+        val numChunks = info.getInt("num_chunks")
+        val chunkSize = info.optLong("chunk_size", 256L * 1024)
+
+        // Step 2: pre-allocate file
+        java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
+
+        // Step 3: download chunks in parallel, write each to its correct offset
+        val downloaded = java.util.concurrent.atomic.AtomicLong(0)
+        val parallelism = 4
+        val semaphore = Semaphore(parallelism)
+        val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        coroutineScope {
+            for (i in 0 until numChunks) {
+                if (failed.get()) break
+                semaphore.acquire()
+                launch(Dispatchers.IO) {
+                    try {
+                        if (failed.get()) return@launch
+                        val (status, body) = get("/api/attachments/$filename/chunk/$i")
+                        if (status != 200) { failed.set(true); return@launch }
+                        // Write chunk at its correct file offset
+                        java.io.RandomAccessFile(destFile, "rw").use { raf ->
+                            raf.seek(i.toLong() * chunkSize)
+                            raf.write(body)
+                        }
+                        val total = downloaded.addAndGet(body.size.toLong())
+                        onProgress?.invoke(total, totalSize)
+                    } catch (_: Exception) {
+                        failed.set(true)
+                    } finally {
+                        semaphore.release()
+                    }
+                }
+            }
+        }
+
+        if (failed.get()) {
+            destFile.delete()
+            throw IOException("Chunked download failed")
+        }
+        return true
     }
 
     data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String)
@@ -304,24 +363,68 @@ class RmailClient(
     companion object {
         const val CHUNK_SIZE = 256 * 1024  // 256 KiB per chunk
 
+        /** Progress phases reported by the upload callback */
+        enum class UploadPhase { ZIPPING, SENDING }
+
         /**
-         * Upload a file in chunks. Returns the server path to embed in the outbox file,
-         * or null on failure.
+         * Upload a file: compress to a temp zip, then stream chunks to the server.
+         * Matches the daemon-to-daemon path: compress first, then chunk the
+         * compressed output. Peak memory usage is one chunk (~256KB).
+         *
+         * @param cacheDir  directory for the temp zip file (e.g. context.cacheDir)
+         * @param onProgress called with (phase, bytesProcessed, totalBytes) — totalBytes
+         *   is the uncompressed size during ZIPPING, compressed size during SENDING.
+         *   May be called frequently; callers should throttle UI updates.
          */
-        suspend fun uploadFile(
+        suspend fun uploadFileCompressed(
             client: RmailClient,
             filename: String,
-            data: ByteArray
+            inputStream: java.io.InputStream,
+            fileSize: Long,
+            cacheDir: java.io.File,
+            onProgress: ((UploadPhase, Long, Long) -> Unit)? = null
         ): String? {
-            val numChunks = (data.size + CHUNK_SIZE - 1) / CHUNK_SIZE
-            val start = client.uploadStart(filename, numChunks) ?: return null
-            for (i in 0 until numChunks) {
-                val from = i * CHUNK_SIZE
-                val to = minOf(from + CHUNK_SIZE, data.size)
-                val ok = client.uploadChunk(start.uploadId, i, data.copyOfRange(from, to))
-                if (!ok) return null
+            val zipFile = java.io.File(cacheDir, "rmail-upload-${System.currentTimeMillis()}.zip")
+            try {
+                // Step 1: compress
+                var bytesRead = 0L
+                java.util.zip.ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
+                    zos.putNextEntry(java.util.zip.ZipEntry(filename))
+                    val buf = ByteArray(65536)
+                    var n: Int
+                    while (inputStream.read(buf).also { n = it } > 0) {
+                        zos.write(buf, 0, n)
+                        bytesRead += n
+                        onProgress?.invoke(UploadPhase.ZIPPING, bytesRead, fileSize)
+                    }
+                    zos.closeEntry()
+                }
+
+                // Step 2: stream compressed chunks to server
+                val compressedSize = zipFile.length()
+                val numChunks = ((compressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE).toInt()
+                val start = client.uploadStart(filename, numChunks) ?: return null
+                var bytesSent = 0L
+
+                zipFile.inputStream().buffered().use { fis ->
+                    val chunkBuf = ByteArray(CHUNK_SIZE)
+                    for (i in 0 until numChunks) {
+                        var read = 0
+                        while (read < CHUNK_SIZE) {
+                            val r = fis.read(chunkBuf, read, CHUNK_SIZE - read)
+                            if (r <= 0) break
+                            read += r
+                        }
+                        val chunk = if (read == CHUNK_SIZE) chunkBuf else chunkBuf.copyOf(read)
+                        if (!client.uploadChunk(start.uploadId, i, chunk)) return null
+                        bytesSent += read
+                        onProgress?.invoke(UploadPhase.SENDING, bytesSent, compressedSize)
+                    }
+                }
+                return start.serverPath
+            } finally {
+                zipFile.delete()
             }
-            return start.serverPath
         }
     }
 }

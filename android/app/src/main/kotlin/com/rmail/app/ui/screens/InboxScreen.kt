@@ -1271,8 +1271,10 @@ private fun MessageList(
 
 @Composable
 private fun AttachmentList(vm: MainViewModel, attachments: List<AttachmentInfo>) {
-    var downloadingFile by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val downloadProgress by vm.downloadProgress.collectAsState()
+    val accentColor = Color(vm.globalSettings.accentColor.toLong() and 0xFFFFFFFFL)
+
     if (attachments.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No attachments on home server",
@@ -1281,55 +1283,94 @@ private fun AttachmentList(vm: MainViewModel, attachments: List<AttachmentInfo>)
     } else {
         LazyColumn {
             items(attachments, key = { it.filename }) { info ->
-                AttachmentItem(info, downloadingFile == info.filename,
-                    vm.store?.isAttachmentCached(info.filename) ?: false,
-                    onDownload = {
-                        downloadingFile = info.filename
-                        vm.downloadAttachment(info) { file -> downloadingFile = null
-                            if (file != null) shareFile(context, file) }
-                    },
-                    onOpen = {
-                        val file = vm.store?.cachedAttachmentFile(info.filename) ?: return@AttachmentItem
-                        if (file.exists()) shareFile(context, file)
-                    })
+                val progress = downloadProgress[info.filename]
+                val isCached = vm.store?.isAttachmentCached(info.filename) ?: false
+
+                Column {
+                    Row(Modifier.fillMaxWidth()
+                        .clickable {
+                            if (isCached) {
+                                val file = vm.store?.cachedAttachmentFile(info.filename) ?: return@clickable
+                                if (file.exists()) openFile(context, file)
+                            } else if (progress == null) {
+                                vm.downloadAttachment(info) { file ->
+                                    if (file != null) openFile(context, file)
+                                }
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(when (info.category) {
+                            "image" -> Icons.Default.Image
+                            "audio" -> Icons.Default.AudioFile
+                            "text" -> Icons.AutoMirrored.Filled.TextSnippet
+                            else -> Icons.Default.AttachFile
+                        }, null, Modifier.size(24.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(info.filename, style = MaterialTheme.typography.bodyMedium)
+                            if (progress != null) {
+                                Text("${formatSize(progress.first)} / ${formatSize(progress.second)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = accentColor)
+                            } else {
+                                Text(formatSize(info.size),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                            }
+                        }
+                        when {
+                            progress != null -> {
+                                // Cancel download button (red X)
+                                IconButton(onClick = { vm.cancelDownload(info.filename) }) {
+                                    Icon(Icons.Default.Close, "Cancel download",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp))
+                                }
+                            }
+                            isCached -> Icon(Icons.Default.CheckCircle, "Cached",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp))
+                            else -> Icon(Icons.Default.Download, "Download",
+                                modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    // Progress bar below the item
+                    if (progress != null && progress.second > 0) {
+                        LinearProgressIndicator(
+                            progress = { (progress.first.toFloat() / progress.second).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().height(3.dp),
+                            color = accentColor,
+                            trackColor = accentColor.copy(alpha = 0.15f)
+                        )
+                    }
+                }
                 HorizontalDivider(thickness = 0.5.dp)
             }
         }
     }
 }
 
-@Composable
-private fun AttachmentItem(
-    info: AttachmentInfo, isDownloading: Boolean, isCached: Boolean,
-    onDownload: () -> Unit, onOpen: () -> Unit
-) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = if (isCached) onOpen else onDownload)
-        .padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(when (info.category) {
-            "image" -> Icons.Default.Image; "audio" -> Icons.Default.AudioFile
-            "text" -> Icons.AutoMirrored.Filled.TextSnippet; else -> Icons.Default.AttachFile
-        }, null, Modifier.size(24.dp))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(info.filename, style = MaterialTheme.typography.bodyMedium)
-            Text(formatSize(info.size), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-        }
-        when {
-            isDownloading -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            isCached -> Icon(Icons.Default.CheckCircle, "Cached", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-            else -> Icon(Icons.Default.Download, "Download", modifier = Modifier.size(20.dp))
-        }
-    }
-}
-
-private fun shareFile(context: android.content.Context, file: File) {
+/**
+ * Open a file using ACTION_VIEW. Android remembers the user's app choice per
+ * mime type via the system chooser's "Always" option.
+ */
+private fun openFile(context: android.content.Context, file: File) {
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val mime = context.contentResolver.getType(uri) ?: "*/*"
     val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, context.contentResolver.getType(uri) ?: "*/*")
+        setDataAndType(uri, mime)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(Intent.createChooser(intent, "Open with"))
+    // ACTION_VIEW with a specific mime type lets Android use the user's default app
+    // if they've set one (e.g. gallery for images). No chooser is shown in that case.
+    try {
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        // No app can handle this type — fall back to chooser
+        context.startActivity(Intent.createChooser(intent, "Open with"))
+    }
 }
 
 private fun formatSize(bytes: Long): String = when {
