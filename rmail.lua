@@ -3030,545 +3030,454 @@ local function handle_api_upload_chunk(upload_id, chunk_n, body)
 end
 
 -- ============================================================
--- Main
+-- Extracted functions (formerly inside main, broken out to stay
+-- under LuaJIT's 60-upvalue limit per function)
 -- ============================================================
 
-local function main()
+-- rmail multicast group address (239.x.x.x is organization-local scope)
+local MULTICAST_ADDR = "239.192.82.77"
+
+local function check_lan_ip_change(port)
+    local new_lan_ip = nat.get_local_ip()
+    if not new_lan_ip then return end
+    local stored_lan_ip = read_file(STATE .. "/lan_ip")
+    if stored_lan_ip then stored_lan_ip = stored_lan_ip:match("^%s*(.-)%s*$") end
+    if stored_lan_ip and not stored_lan_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_lan_ip = nil end
+    write_file(STATE .. "/lan_ip", new_lan_ip)
+    if not stored_lan_ip then log("LAN IP recorded: %s", new_lan_ip); return end
+    if stored_lan_ip == new_lan_ip then return end
+    log("LAN IP changed: %s -> %s", stored_lan_ip, new_lan_ip)
+    if cfg.auto_port_forward then
+        log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP"); return
+    end
+    write_file(INBOX .. "/lan-ip-changed", string.format(
+        "Your local IP address changed from %s to %s.\n\n" ..
+        "If you use manual port forwarding, your router is still forwarding port %d\n" ..
+        "to %s. Update your router's port forwarding rule to point to %s instead,\n" ..
+        "or set a DHCP reservation / static IP so this doesn't happen again.",
+        stored_lan_ip, new_lan_ip, port, stored_lan_ip, new_lan_ip))
+end
+
+local function do_resolve_lan_host(lan_peers, host, target_port)
+    local my_public = read_file(STATE .. "/public_ip")
+    if not my_public then return nil end
+    my_public = my_public:match("^%s*(.-)%s*$")
+    if host ~= my_public then return nil end
+    local contacts = load_contacts()
+    for name, c in pairs(contacts) do
+        if c.ip == host and tostring(c.port or "") == tostring(target_port) then
+            local lan_ip = c.lan_ip or lan_peers[name]
+            if lan_ip then
+                log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
+                return lan_ip
+            end
+        end
+    end
+    return nil
+end
+
+-- {{{ UDP LAN Discovery
+
+local function join_multicast_group(udp_socket)
+    local ok, err = udp_socket:setoption("ip-add-membership", {
+        multiaddr = MULTICAST_ADDR, interface = "0.0.0.0"
+    })
+    if ok then log("joined multicast group %s", MULTICAST_ADDR)
+    else log("failed to join multicast group: %s", tostring(err)) end
+    return ok
+end
+
+local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
+    local my_lan_ip = nat.get_local_ip()
+    if not my_lan_ip then return end
+    local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
+    local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
+    for name, c in pairs(contacts) do
+        if c.ip == my_public_ip and c.token and c.port then
+            local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
+            local key = derive_key(c.token)
+            local encrypted = encrypt_packet(key, payload)
+            if encrypted then
+                local udp = socket.udp()
+                udp:setoption("ip-multicast-ttl", 1)
+                udp:sendto(encrypted, MULTICAST_ADDR, c.port)
+                udp:close()
+                if subnet_base then
+                    for i = 1, 254 do
+                        if i ~= my_last_octet then
+                            local udp2 = socket.udp()
+                            udp2:sendto(encrypted, subnet_base .. i, c.port)
+                            udp2:close()
+                        end
+                    end
+                end
+                log("LAN discovery: multicast + subnet scan for %s (port %d)", name, c.port)
+            end
+        end
+    end
+end
+
+local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip, lan_peers)
+    for name, c in pairs(contacts) do
+        if c.token then
+            local key = derive_key(c.token)
+            local plaintext = decrypt_packet(key, data)
+            if plaintext then
+                local disc_name, disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)%s+(%S+)")
+                if disc_name and disc_lan_ip then
+                    lan_peers[disc_name] = disc_lan_ip
+                    log("LAN discovery: %s is at %s (received request)", disc_name, disc_lan_ip)
+                    local my_lan_ip = nat.get_local_ip()
+                    if not my_lan_ip then return end
+                    local resp_payload = "RMAIL-HERE " .. my_name .. " " .. my_lan_ip
+                    local resp_encrypted = encrypt_packet(derive_key(c.token), resp_payload)
+                    if resp_encrypted then
+                        local udp = socket.udp()
+                        udp:sendto(resp_encrypted, disc_lan_ip, tonumber(disc_port))
+                        udp:close()
+                    end
+                    return
+                end
+                local here_name, here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)%s+(%S+)")
+                if here_name and here_lan_ip then
+                    lan_peers[here_name] = here_lan_ip
+                    log("LAN discovery: %s is at %s (received response)", here_name, here_lan_ip)
+                    return
+                end
+            end
+        end
+    end
+end
+
+local function poll_udp_discovery(udp, contacts, my_name, my_port, my_public_ip, lan_peers)
+    while true do
+        local data, sender_ip, sender_port = udp:receivefrom()
+        if not data then break end
+        pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip, lan_peers)
+    end
+end
+
+-- }}}
+
+local function do_on_connection_timeout(rt, host, target_port)
+    local my_public = read_file(STATE .. "/public_ip")
+    if not my_public then return end
+    my_public = my_public:match("^%s*(.-)%s*$")
+    if host ~= my_public then return end
+    local my_lan_ip = nat.get_local_ip()
+    if not my_lan_ip then return end
+    local contacts = load_contacts()
+    for name, c in pairs(contacts) do
+        if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
+            if rt.lan.discovery_sent[name] then return end
+            rt.lan.discovery_sent[name] = true
+            local payload = "RMAIL-DISCOVER " .. rt.my_name .. " " .. rt.port .. " " .. my_lan_ip
+            local key = derive_key(c.token)
+            local encrypted = encrypt_packet(key, payload)
+            if encrypted then
+                local udp = socket.udp()
+                udp:setoption("ip-multicast-ttl", 1)
+                udp:sendto(encrypted, MULTICAST_ADDR, c.port)
+                udp:close()
+                local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
+                local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
+                if subnet_base then
+                    for i = 1, 254 do
+                        if i ~= my_last_octet then
+                            local udp2 = socket.udp()
+                            udp2:sendto(encrypted, subnet_base .. i, c.port)
+                            udp2:close()
+                        end
+                    end
+                end
+                log("LAN discovery: multicast + subnet scan on connection failure (looking for %s)", name)
+            end
+            return
+        end
+    end
+end
+
+-- ============================================================
+-- Request handler (extracted from main)
+-- ============================================================
+
+local function handle_request(rt, client)
+    client:settimeout(10)
+    local first4 = client:receive(4)
+    if not first4 or #first4 ~= 4 then return end
+
+    if first4 == "GET " then
+        while true do
+            local line = client:receive("*l")
+            if not line or line == "" then break end
+        end
+        local hc_body = json.encode({ok = true, name = rt.my_name})
+        client:send(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
+            "Content-Length: " .. #hc_body .. "\r\nConnection: close\r\n\r\n" .. hc_body)
+        return
+    end
+
+    local len = parse_uint32_be(first4)
+    if len < 28 or len > 64 * 1024 * 1024 then return end
+    local packet = client:receive(len)
+    if not packet or #packet ~= len then return end
+
+    local plaintext, contact_name = trial_decrypt(packet)
+    if not plaintext then log("decryption failed: no matching contact key"); return end
+
+    -- Cache peer LAN IP (TCP fallback, prefer UDP discovery)
+    local peer_ip = client:getpeername()
+    if peer_ip and contact_name and not rt.lan.peers[contact_name] then
+        local is_private = peer_ip:match("^192%.168%.") or
+                           peer_ip:match("^10%.") or peer_ip:match("^172%.")
+        if is_private then
+            local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+            local cc = load_contacts()
+            if cc[contact_name] and cc[contact_name].ip == my_public then
+                rt.lan.peers[contact_name] = peer_ip
+            end
+        end
+    end
+
+    local method, path, headers, body = parse_request_string(plaintext)
+    if not method then return end
+
+    local contacts = load_contacts()
+    local key = derive_key(contacts[contact_name].token)
+    local is_own_device = contacts[contact_name].own == "true"
+    local resp = make_response_buffer()
+
+    if method == "GET" and path == "/" then
+        send_response(resp, 200, {ok = true, name = rt.my_name})
+    elseif method == "GET" and path == "/deps" then
+        send_response(resp, 200, {deps = DEPS_REGISTRY})
+    elseif method == "GET" and path:match("^/deps/(.+)$") then
+        local dep_name = path:match("^/deps/(.+)$")
+        if DEPS_REGISTRY[dep_name] then send_response(resp, 200, DEPS_REGISTRY[dep_name])
+        else send_response(resp, 404, {error = "unknown dependency: " .. dep_name}) end
+    elseif method == "GET" and path == "/install-script" then
+        local script_path = script_dir .. "scripts/install.sh"
+        local f = io.open(script_path, "r")
+        if f then
+            local content = f:read("*a"); f:close()
+            local hh = io.popen("sha256sum '" .. script_path:gsub("'", "'\\''") .. "'")
+            local sha = ""; if hh then sha = (hh:read("*a") or ""):match("^(%x+)") or ""; hh:close() end
+            send_raw_response(resp, 200, "application/x-shellscript", content, {["X-SHA256"] = sha})
+        else send_response(resp, 404, {error = "install script not found"}) end
+    elseif method == "GET" and path == "/peer-address" then
+        local s, r = handle_peer_address(contact_name); send_response(resp, s, r)
+    elseif path:match("^/api/") then
+        if not is_own_device then
+            send_response(resp, 403, {error = "own device required"})
+        else
+            local fn
+            if method == "GET" and path == "/api/myaddress" then
+                local s, r = handle_api_myaddress(rt.my_name, rt.port); send_response(resp, s, r)
+            elseif method == "GET" and path == "/api/contacts" then
+                local s, ct, c = handle_api_get_contacts(); send_raw_response(resp, s, ct, c)
+            elseif method == "POST" and path == "/api/contacts" then
+                local s, r = handle_api_post_contacts(body); send_response(resp, s, r)
+            elseif method == "POST" and path == "/api/sync" then
+                local data = json.decode(body or "{}") or {}
+                local s, r = handle_api_sync(data, contact_name, rt.my_name); send_response(resp, s, r)
+            elseif method == "GET" and path:match("^/api/file/inbox/(.+)$") then
+                fn = path:match("^/api/file/inbox/(.+)$")
+                local s, ct, c = handle_api_get_file(INBOX, fn)
+                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+            elseif method == "GET" and path:match("^/api/file/outbox/(.+)$") then
+                fn = path:match("^/api/file/outbox/(.+)$")
+                local s, ct, c = handle_api_get_file(OUTBOX, fn)
+                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+            elseif method == "POST" and path:match("^/api/file/outbox/(.+)$") then
+                fn = path:match("^/api/file/outbox/(.+)$")
+                local s, r = handle_api_post_outbox_file(fn, body or ""); send_response(resp, s, r)
+            elseif method == "GET" and path == "/api/attachments" then
+                local s, r = handle_api_list_attachments(); send_response(resp, s, r)
+            elseif method == "GET" and path:match("^/api/attachments/(.+)/info$") then
+                fn = path:match("^/api/attachments/(.+)/info$")
+                local s, r = handle_api_attachment_info(fn); send_response(resp, s, r)
+            elseif method == "GET" and path:match("^/api/attachments/(.+)/chunk/(%d+)$") then
+                fn = path:match("^/api/attachments/(.+)/chunk/(%d+)$")
+                local cn = tonumber(path:match("/chunk/(%d+)$"))
+                local s, ct, c = handle_api_attachment_chunk(fn, cn)
+                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+            elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
+                fn = path:match("^/api/attachments/(.+)$")
+                local s, ct, c = handle_api_get_attachment(fn)
+                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+            elseif method == "DELETE" and path:match("^/api/attachments/(.+)$") then
+                fn = path:match("^/api/attachments/(.+)$")
+                local s, r = handle_api_delete_attachment(fn); send_response(resp, s, r)
+            elseif method == "POST" and path == "/api/log" then
+                local data = json.decode(body or "{}") or {}
+                local s, r = handle_api_log(data, contact_name); send_response(resp, s, r)
+            elseif method == "POST" and path == "/api/upload/start" then
+                local data = json.decode(body or "{}") or {}
+                local s, r = handle_api_upload_start(data); send_response(resp, s, r)
+            elseif method == "PUT" and path:match("^/api/upload/([^/]+)/chunk/(%d+)$") then
+                local uid, cn = path:match("^/api/upload/([^/]+)/chunk/(%d+)$")
+                local s, r = handle_api_upload_chunk(uid, tonumber(cn), body or ""); send_response(resp, s, r)
+            else send_response(resp, 404, {error = "not found"}) end
+        end
+    elseif method == "POST" and body and body ~= "" then
+        local data = json.decode(body)
+        if path == "/deliver" then local s, r = handle_deliver(data, contact_name); send_response(resp, s, r)
+        elseif path == "/delete" then local s, r = handle_delete(data, contact_name); send_response(resp, s, r)
+        elseif path == "/update-address" then local s, r = handle_update_address(data, contact_name); send_response(resp, s, r)
+        else send_response(resp, 404, {error = "not found"}) end
+    else send_response(resp, 404, {error = "not found"}) end
+
+    send_encrypted(client, key, resp:get())
+end
+
+-- ============================================================
+-- Sync cycle (extracted from main)
+-- ============================================================
+
+local function run_sync_cycle(rt)
+    check_transfers_file_cancellations()
+    local w1 = sync_outbox(rt.my_name)
+    local w2 = sync_inbox(rt.my_name)
+    local w3 = sync_address_notifications(rt.my_name)
+    local w4 = check_consent_pending()
+    local w5 = send_consent_responses(rt.my_name)
+    local w6 = send_next_chunks(rt.my_name)
+    local w7 = send_attachment_cancellations(rt.my_name)
+    write_transfers_file(load_state("chunks-outgoing.json"))
+    if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
+        rt.interval = math.max(rt.min_interval, rt.interval - 240)
+        log("had work, interval -> %ds", rt.interval)
+    else
+        rt.interval = math.min(rt.interval + 360, rt.max_interval)
+        log("idle, interval -> %ds", rt.interval)
+    end
+end
+
+local function poll_udp_cycle(rt)
+    local my_public = read_file(STATE .. "/public_ip")
+    if my_public then
+        my_public = my_public:match("^%s*(.-)%s*$")
+        local contacts = load_contacts()
+        poll_udp_discovery(rt.lan.udp, contacts, rt.my_name, rt.port, my_public, rt.lan.peers)
+    end
+end
+
+-- ============================================================
+-- Init runtime — setup, validation, returns state table
+-- ============================================================
+
+local function init_runtime()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
                paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
-
     if not config.name then
-        io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n")
-        os.exit(1)
+        io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n"); os.exit(1)
     end
     if not tools.zip then
-        io.stderr:write("error: 'zip' not found — required for attachment transfer\n")
-        io.stderr:write("       run: scripts/install.sh\n")
-        os.exit(1)
+        io.stderr:write("error: 'zip' not found\n       run: scripts/install.sh\n"); os.exit(1)
     end
     if not tools.unzip then
-        io.stderr:write("error: 'unzip' not found — required for attachment transfer\n")
-        io.stderr:write("       run: scripts/install.sh\n")
-        os.exit(1)
+        io.stderr:write("error: 'unzip' not found\n       run: scripts/install.sh\n"); os.exit(1)
     end
     align_contacts()
-    local contacts = load_contacts()
-    local my_name = config.name
-    local port = tonumber(config.port or 8025)
 
-    log("rmail starting: name=%s port=%d", my_name, port)
+    local rt = {
+        my_name      = config.name,
+        port         = tonumber(config.port or 8025),
+        nat_mapping  = nil,
+        interval     = 10,   -- TODO: increase for production
+        min_interval = 10,
+        max_interval = 30,   -- TODO: increase for production
+        last_sync    = socket.gettime(),
+        lan = { udp = nil, peers = {}, discovery_sent = {} },
+    }
+
+    log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
     log("AES-256-GCM encryption enabled")
 
-    -- NAT: clean up stale mapping from previous run
     pcall(nat.cleanup_old_mapping)
+    pcall(nat.security_check, rt.my_name)
 
-    -- NAT: security check (always runs on startup)
-    pcall(nat.security_check, my_name)
-
-    -- NAT: auto port forwarding (opt-in)
-    local nat_mapping = nil
     if cfg.auto_port_forward then
         log("attempting automatic port forwarding...")
-        local ok_nat, result = pcall(nat.create_mapping, port)
+        local ok_nat, result = pcall(nat.create_mapping, rt.port)
         if ok_nat and result and result.protocol then
-            nat_mapping = result
-            log("port %d mapped via %s", port, result.protocol)
+            rt.nat_mapping = result
+            log("port %d mapped via %s", rt.port, result.protocol)
         else
-            log("warning: auto port forward failed, port %d may not be reachable", port)
+            log("warning: auto port forward failed, port %d may not be reachable", rt.port)
         end
     end
 
-    local server = assert(socket.bind("0.0.0.0", port))
-    server:settimeout(1)
+    rt.server = assert(socket.bind("0.0.0.0", rt.port))
+    rt.server:settimeout(1)
 
-    -- LAN discovery state (consolidated to reduce upvalue count for Lua 5.4)
-    local lan = {
-        udp = socket.udp(),  -- UDP socket for discovery
-        peers = {},          -- contact_name -> LAN IP cache
-        discovery_sent = {}, -- contacts already sent discovery this cycle
-    }
-    assert(lan.udp:setsockname("0.0.0.0", port))
-    lan.udp:settimeout(0)  -- non-blocking
+    rt.lan.udp = socket.udp()
+    assert(rt.lan.udp:setsockname("0.0.0.0", rt.port))
+    rt.lan.udp:settimeout(0)
 
-    log("listening on :%d (TCP + UDP)", port)
+    log("listening on :%d (TCP + UDP)", rt.port)
 
-    -- check for IP change on startup
-    pcall(detect_ip_change, my_name, port)
+    pcall(detect_ip_change, rt.my_name, rt.port)
+    pcall(check_lan_ip_change, rt.port)
+    join_multicast_group(rt.lan.udp)
 
-    -- check for LAN IP change on startup
-    pcall(function()
-        local new_lan_ip = nat.get_local_ip()
-        if not new_lan_ip then return end
-        local stored_lan_ip = read_file(STATE .. "/lan_ip")
-        if stored_lan_ip then stored_lan_ip = stored_lan_ip:match("^%s*(.-)%s*$") end
-        if stored_lan_ip and not stored_lan_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_lan_ip = nil end
-        write_file(STATE .. "/lan_ip", new_lan_ip)
-        if not stored_lan_ip then
-            log("LAN IP recorded: %s", new_lan_ip)
-            return
-        end
-        if stored_lan_ip == new_lan_ip then return end
-        log("LAN IP changed: %s -> %s", stored_lan_ip, new_lan_ip)
-        if cfg.auto_port_forward then
-            log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP")
-            return
-        end
-        write_file(INBOX .. "/lan-ip-changed", string.format(
-            "Your local IP address changed from %s to %s.\n\n" ..
-            "If you use manual port forwarding, your router is still forwarding port %d\n" ..
-            "to %s. Update your router's port forwarding rule to point to %s instead,\n" ..
-            "or set a DHCP reservation / static IP so this doesn't happen again.",
-            stored_lan_ip, new_lan_ip, port, stored_lan_ip, new_lan_ip))
-    end)
-
-    -- Enable same-network optimization: when a contact's IP matches our public IP,
-    -- use their cached LAN IP instead to avoid hairpin NAT.
-    resolve_lan_host = function(host, target_port)
-        local my_public = read_file(STATE .. "/public_ip")
-        if not my_public then return nil end
-        my_public = my_public:match("^%s*(.-)%s*$")
-        if host ~= my_public then return nil end
-        -- This contact is behind the same router — find their LAN IP
-        local contacts = load_contacts()
-        for name, c in pairs(contacts) do
-            if c.ip == host and tostring(c.port or "") == tostring(target_port) then
-                -- Check for manually configured lan_ip first, then cached discovery
-                local lan_ip = c.lan_ip or lan.peers[name]
-                if lan_ip then
-                    log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
-                    return lan_ip
-                end
-            end
-        end
-        return nil
-    end
-
-    -- {{{ UDP LAN Discovery
-    -- rmail multicast group address (239.x.x.x is organization-local scope)
-    -- 239.192.82.77 = 239.192.R.M (R=82, M=77 for "RM" = rmail)
-    local MULTICAST_ADDR = "239.192.82.77"
-
-    -- Join the rmail multicast group so we receive discovery from other instances
-    local function join_multicast_group(udp_socket)
-        local ok, err = udp_socket:setoption("ip-add-membership", {
-            multiaddr = MULTICAST_ADDR,
-            interface = "0.0.0.0"
-        })
-        if ok then
-            log("joined multicast group %s", MULTICAST_ADDR)
-        else
-            log("failed to join multicast group: %s", tostring(err))
-        end
-        return ok
-    end
-
-    -- Send encrypted discovery request to same-network contacts.
-    -- Tries multicast first, then falls back to subnet scan (for routers that block multicast).
-    -- Payload includes sender's LAN IP because routers may rewrite UDP source address.
-    local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
-        local my_lan_ip = nat.get_local_ip()
-        if not my_lan_ip then return end
-
-        -- Parse subnet base (assumes /24 - most home networks)
-        local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
-        local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
-
-        for name, c in pairs(contacts) do
-            if c.ip == my_public_ip and c.token and c.port then
-                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
-                local key = derive_key(c.token)
-                local encrypted = encrypt_packet(key, payload)
-                if encrypted then
-                    -- Method 1: Multicast (preferred, may be blocked)
-                    local udp = socket.udp()
-                    udp:setoption("ip-multicast-ttl", 1)
-                    udp:sendto(encrypted, MULTICAST_ADDR, c.port)
-                    udp:close()
-
-                    -- Method 2: Subnet scan fallback (254 packets, but reliable)
-                    if subnet_base then
-                        for i = 1, 254 do
-                            if i ~= my_last_octet then
-                                local target_ip = subnet_base .. i
-                                local udp2 = socket.udp()
-                                udp2:sendto(encrypted, target_ip, c.port)
-                                udp2:close()
-                            end
-                        end
-                    end
-
-                    log("LAN discovery: multicast + subnet scan for %s (port %d)", name, c.port)
-                end
-            end
-        end
-    end
-
-    -- Handle incoming UDP packet: try to decrypt with each contact's key.
-    -- If successful, it's either a discovery request or response.
-    -- Uses LAN IP from payload (not UDP source) because routers may rewrite source address.
-    local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
-        -- Try to decrypt with each contact's key
-        for name, c in pairs(contacts) do
-            if c.token then
-                local key = derive_key(c.token)
-                local plaintext = decrypt_packet(key, data)
-                if plaintext then
-                    -- Successful decryption - this packet is from 'name'
-                    local disc_name, disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)%s+(%S+)")
-                    if disc_name and disc_lan_ip then
-                        -- It's a discovery request - cache their LAN IP (from payload, not UDP source)
-                        lan.peers[disc_name] = disc_lan_ip
-                        log("LAN discovery: %s is at %s (received request)", disc_name, disc_lan_ip)
-
-                        -- Send response back to their actual LAN IP
-                        local my_lan_ip = nat.get_local_ip()
-                        if not my_lan_ip then
-                            log("LAN discovery: cannot determine local IP, not responding")
-                            return
-                        end
-                        local resp_payload = "RMAIL-HERE " .. my_name .. " " .. my_lan_ip
-                        local resp_key = derive_key(c.token)
-                        local resp_encrypted = encrypt_packet(resp_key, resp_payload)
-                        if resp_encrypted then
-                            local udp = socket.udp()
-                            udp:sendto(resp_encrypted, disc_lan_ip, tonumber(disc_port))
-                            udp:close()
-                        end
-                        return
-                    end
-
-                    local here_name, here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)%s+(%S+)")
-                    if here_name and here_lan_ip then
-                        -- It's a discovery response - cache their LAN IP (from payload)
-                        lan.peers[here_name] = here_lan_ip
-                        log("LAN discovery: %s is at %s (received response)", here_name, here_lan_ip)
-                        return
-                    end
-                end
-            end
-        end
-    end
-
-    -- Check for and handle UDP packets (non-blocking)
-    local function poll_udp_discovery(udp, contacts, my_name, my_port, my_public_ip)
-        while true do
-            local data, sender_ip, sender_port = udp:receivefrom()
-            if not data then break end
-            pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip)
-        end
-    end
-    -- }}}
-
-    -- {{{ on_connection_timeout
-    -- Callback for connection failures: trigger LAN discovery for same-network contacts.
-    -- Only sends once per contact per sync cycle to avoid spamming (tracked in lan.discovery_sent).
-    on_connection_timeout = function(host, target_port)
-        local my_public = read_file(STATE .. "/public_ip")
-        if not my_public then return end
-        my_public = my_public:match("^%s*(.-)%s*$")
-        if host ~= my_public then return end  -- not a same-network contact
-
-        local my_lan_ip = nat.get_local_ip()
-        if not my_lan_ip then return end
-
-        local contacts = load_contacts()
-        for name, c in pairs(contacts) do
-            if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
-                if lan.discovery_sent[name] then return end  -- already sent this cycle
-                lan.discovery_sent[name] = true
-
-                local payload = "RMAIL-DISCOVER " .. my_name .. " " .. port .. " " .. my_lan_ip
-                local key = derive_key(c.token)
-                local encrypted = encrypt_packet(key, payload)
-                if encrypted then
-                    -- Multicast
-                    local udp = socket.udp()
-                    udp:setoption("ip-multicast-ttl", 1)
-                    udp:sendto(encrypted, MULTICAST_ADDR, c.port)
-                    udp:close()
-
-                    -- Subnet scan fallback
-                    local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
-                    local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
-                    if subnet_base then
-                        for i = 1, 254 do
-                            if i ~= my_last_octet then
-                                local udp2 = socket.udp()
-                                udp2:sendto(encrypted, subnet_base .. i, c.port)
-                                udp2:close()
-                            end
-                        end
-                    end
-
-                    log("LAN discovery: multicast + subnet scan on connection failure (looking for %s)", name)
-                end
-                return
-            end
-        end
-    end
-    -- }}}
-
-    -- Join multicast group for LAN discovery
-    join_multicast_group(lan.udp)
-
-    -- Send LAN discovery on startup (rule #1)
+    -- Initial LAN discovery
     pcall(function()
         local my_public = read_file(STATE .. "/public_ip")
         if my_public then
             my_public = my_public:match("^%s*(.-)%s*$")
-            local contacts = load_contacts()
-            send_lan_discovery(contacts, my_name, port, my_public)
+            send_lan_discovery(load_contacts(), rt.my_name, rt.port, my_public)
         end
     end)
 
-    local interval = 10   -- TODO: increase for production (was 300, min was 60)
-    local MIN_INTERVAL = 10
-    local MAX_INTERVAL = 30  -- TODO: increase for production (e.g. 3600)
-    local last_sync = socket.gettime()
+    return rt
+end
+
+-- ============================================================
+-- Main — thin loop, all logic in extracted functions
+-- ============================================================
+
+local function main()
+    local rt = init_runtime()
+
+    -- Set module-level callbacks (used by http_post_batch)
+    resolve_lan_host = function(host, target_port)
+        return do_resolve_lan_host(rt.lan.peers, host, target_port)
+    end
+    on_connection_timeout = function(host, target_port)
+        do_on_connection_timeout(rt, host, target_port)
+    end
 
     while true do
-        local client = server:accept()
+        local client = rt.server:accept()
         if client then
-            local ok, err = pcall(function()
-                client:settimeout(10)
-
-                -- Read first 4 bytes to distinguish plaintext health-check from
-                -- an encrypted packet (length prefix).
-                local first4 = client:receive(4)
-                if not first4 or #first4 ~= 4 then return end
-
-                if first4 == "GET " then
-                    -- Plaintext HTTP: serve health check only (used by curl,
-                    -- validate-router-settings.sh, etc.).  No auth required.
-                    while true do
-                        local line = client:receive("*l")
-                        if not line or line == "" then break end
-                    end
-                    local hc_body = json.encode({ok = true, name = my_name})
-                    client:send(
-                        "HTTP/1.1 200 OK\r\n" ..
-                        "Content-Type: application/json\r\n" ..
-                        "Content-Length: " .. #hc_body .. "\r\n" ..
-                        "Connection: close\r\n\r\n" ..
-                        hc_body)
-                    return
-                end
-
-                -- Encrypted packet: first4 is the 4-byte big-endian length prefix.
-                local len = parse_uint32_be(first4)
-                if len < 28 or len > 64 * 1024 * 1024 then return end
-                local packet = client:receive(len)
-                if not packet or #packet ~= len then return end
-
-                local plaintext, contact_name = trial_decrypt(packet)
-                if not plaintext then
-                    log("decryption failed: no matching contact key")
-                    return
-                end
-
-                -- Cache the peer's LAN IP for same-network optimization.
-                -- Only cache if: (1) we don't already have a cached value from UDP discovery,
-                -- (2) the peer sent us a private IP (meaning they're on our LAN),
-                -- (3) their configured public IP matches ours (confirming same network).
-                -- Note: TCP source IP can be rewritten by hairpin NAT, so prefer UDP discovery.
-                local peer_ip = client:getpeername()
-                if peer_ip and contact_name and not lan.peers[contact_name] then
-                    local is_private = peer_ip:match("^192%.168%.") or
-                                       peer_ip:match("^10%.") or peer_ip:match("^172%.")
-                    if is_private then
-                        local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
-                        local cc = load_contacts()
-                        if cc[contact_name] and cc[contact_name].ip == my_public then
-                            lan.peers[contact_name] = peer_ip
-                        end
-                    end
-                end
-
-                local method, path, headers, body = parse_request_string(plaintext)
-                if not method then return end
-
-                -- key for encrypting the response (same contact's token)
-                local contacts = load_contacts()
-                local key = derive_key(contacts[contact_name].token)
-                local is_own_device = contacts[contact_name].own == "true"
-                local resp = make_response_buffer()
-
-                if method == "GET" and path == "/" then
-                    send_response(resp, 200, {ok = true, name = my_name})
-                elseif method == "GET" and path == "/deps" then
-                    send_response(resp, 200, {deps = DEPS_REGISTRY})
-                elseif method == "GET" and path:match("^/deps/(.+)$") then
-                    local dep_name = path:match("^/deps/(.+)$")
-                    if DEPS_REGISTRY[dep_name] then
-                        send_response(resp, 200, DEPS_REGISTRY[dep_name])
-                    else
-                        send_response(resp, 404, {error = "unknown dependency: " .. dep_name})
-                    end
-                elseif method == "GET" and path == "/install-script" then
-                    local script_path = script_dir .. "scripts/install.sh"
-                    local f = io.open(script_path, "r")
-                    if f then
-                        local content = f:read("*a")
-                        f:close()
-                        local hash_handle = io.popen("sha256sum '" .. script_path:gsub("'", "'\\''") .. "'")
-                        local sha256 = ""
-                        if hash_handle then
-                            sha256 = (hash_handle:read("*a") or ""):match("^(%x+)") or ""
-                            hash_handle:close()
-                        end
-                        send_raw_response(resp, 200, "application/x-shellscript", content, {["X-SHA256"] = sha256})
-                    else
-                        send_response(resp, 404, {error = "install script not found"})
-                    end
-                elseif method == "GET" and path == "/peer-address" then
-                    local s, r = handle_peer_address(contact_name)
-                    send_response(resp, s, r)
-                elseif path:match("^/api/") then
-                    if not is_own_device then
-                        send_response(resp, 403, {error = "own device required"})
-                    else
-                        local fn
-                        if method == "GET" and path == "/api/myaddress" then
-                            local s, r = handle_api_myaddress(my_name, port)
-                            send_response(resp, s, r)
-                        elseif method == "GET" and path == "/api/contacts" then
-                            local s, ct, c = handle_api_get_contacts()
-                            send_raw_response(resp, s, ct, c)
-                        elseif method == "POST" and path == "/api/contacts" then
-                            local s, r = handle_api_post_contacts(body)
-                            send_response(resp, s, r)
-                        elseif method == "POST" and path == "/api/sync" then
-                            local data = json.decode(body or "{}") or {}
-                            local s, r = handle_api_sync(data, contact_name, my_name)
-                            send_response(resp, s, r)
-                        elseif method == "GET" and path:match("^/api/file/inbox/(.+)$") then
-                            fn = path:match("^/api/file/inbox/(.+)$")
-                            local s, ct, c = handle_api_get_file(INBOX, fn)
-                            if ct then send_raw_response(resp, s, ct, c)
-                            else send_response(resp, s, {error = "not found"}) end
-                        elseif method == "GET" and path:match("^/api/file/outbox/(.+)$") then
-                            fn = path:match("^/api/file/outbox/(.+)$")
-                            local s, ct, c = handle_api_get_file(OUTBOX, fn)
-                            if ct then send_raw_response(resp, s, ct, c)
-                            else send_response(resp, s, {error = "not found"}) end
-                        elseif method == "POST" and path:match("^/api/file/outbox/(.+)$") then
-                            fn = path:match("^/api/file/outbox/(.+)$")
-                            local s, r = handle_api_post_outbox_file(fn, body or "")
-                            send_response(resp, s, r)
-                        elseif method == "GET" and path == "/api/attachments" then
-                            local s, r = handle_api_list_attachments()
-                            send_response(resp, s, r)
-                        elseif method == "GET" and path:match("^/api/attachments/(.+)/info$") then
-                            fn = path:match("^/api/attachments/(.+)/info$")
-                            local s, r = handle_api_attachment_info(fn)
-                            send_response(resp, s, r)
-                        elseif method == "GET" and path:match("^/api/attachments/(.+)/chunk/(%d+)$") then
-                            fn = path:match("^/api/attachments/(.+)/chunk/(%d+)$")
-                            local cn = tonumber(path:match("/chunk/(%d+)$"))
-                            local s, ct, c = handle_api_attachment_chunk(fn, cn)
-                            if ct then send_raw_response(resp, s, ct, c)
-                            else send_response(resp, s, {error = "not found"}) end
-                        elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
-                            fn = path:match("^/api/attachments/(.+)$")
-                            local s, ct, c = handle_api_get_attachment(fn)
-                            if ct then send_raw_response(resp, s, ct, c)
-                            else send_response(resp, s, {error = "not found"}) end
-                        elseif method == "DELETE" and path:match("^/api/attachments/(.+)$") then
-                            fn = path:match("^/api/attachments/(.+)$")
-                            local s, r = handle_api_delete_attachment(fn)
-                            send_response(resp, s, r)
-                        elseif method == "POST" and path == "/api/log" then
-                            local data = json.decode(body or "{}") or {}
-                            local s, r = handle_api_log(data, contact_name)
-                            send_response(resp, s, r)
-                        elseif method == "POST" and path == "/api/upload/start" then
-                            local data = json.decode(body or "{}") or {}
-                            local s, r = handle_api_upload_start(data)
-                            send_response(resp, s, r)
-                        elseif method == "PUT" and path:match("^/api/upload/([^/]+)/chunk/(%d+)$") then
-                            local uid, cn = path:match("^/api/upload/([^/]+)/chunk/(%d+)$")
-                            local s, r = handle_api_upload_chunk(uid, tonumber(cn), body or "")
-                            send_response(resp, s, r)
-                        else
-                            send_response(resp, 404, {error = "not found"})
-                        end
-                    end
-                elseif method == "POST" and body and body ~= "" then
-                    local data = json.decode(body)
-                    if path == "/deliver" then
-                        local s, r = handle_deliver(data, contact_name)
-                        send_response(resp, s, r)
-                    elseif path == "/delete" then
-                        local s, r = handle_delete(data, contact_name)
-                        send_response(resp, s, r)
-                    elseif path == "/update-address" then
-                        local s, r = handle_update_address(data, contact_name)
-                        send_response(resp, s, r)
-                    else
-                        send_response(resp, 404, {error = "not found"})
-                    end
-                else
-                    send_response(resp, 404, {error = "not found"})
-                end
-
-                send_encrypted(client, key, resp:get())
-            end)
+            local ok, err = pcall(handle_request, rt, client)
             if not ok then log("request error: %s", tostring(err)) end
             client:close()
         end
 
-        -- Poll for UDP discovery packets (non-blocking)
-        pcall(function()
-            local my_public = read_file(STATE .. "/public_ip")
-            if my_public then
-                my_public = my_public:match("^%s*(.-)%s*$")
-                local contacts = load_contacts()
-                poll_udp_discovery(lan.udp, contacts, my_name, port, my_public)
-            end
-        end)
+        pcall(poll_udp_cycle, rt)
 
         local now = socket.gettime()
-        local trigger = STATE .. "/sync-now"
-        if file_exists(trigger) then
-            os.remove(trigger)
-            last_sync = 0  -- force sync immediately
+        if file_exists(STATE .. "/sync-now") then
+            os.remove(STATE .. "/sync-now")
+            rt.last_sync = 0
             log("manual sync triggered")
         end
-        if now - last_sync >= interval then
-            -- Clear per-cycle discovery tracking (rule #2: send once per sync cycle)
-            lan.discovery_sent = {}
-            local ok, err = pcall(function()
-                check_transfers_file_cancellations()
-                local w1 = sync_outbox(my_name)
-                local w2 = sync_inbox(my_name)
-                local w3 = sync_address_notifications(my_name)
-                local w4 = check_consent_pending()
-                local w5 = send_consent_responses(my_name)
-                local w6 = send_next_chunks(my_name)
-                local w7 = send_attachment_cancellations(my_name)
-                write_transfers_file(load_state("chunks-outgoing.json"))
-                if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
-                    interval = math.max(MIN_INTERVAL, interval - 240)
-                    log("had work, interval -> %ds", interval)
-                else
-                    interval = math.min(interval + 360, MAX_INTERVAL)
-                    log("idle, interval -> %ds", interval)
-                end
-            end)
+        if now - rt.last_sync >= rt.interval then
+            rt.lan.discovery_sent = {}
+            local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
-            last_sync = now
+            rt.last_sync = now
         end
 
-        -- NAT: renew mapping periodically (every 30 minutes)
-        if nat_mapping then
-            local nat_renew_interval = 1800
-            if now - (nat_mapping.last_renewed or nat_mapping.created_at) >= nat_renew_interval then
-                local ok_r, res = pcall(nat.create_mapping, port)
-                if ok_r and res then
-                    log("renewed NAT mapping via %s", res.protocol)
-                end
-                nat_mapping.last_renewed = now
+        if rt.nat_mapping then
+            if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
+                local ok_r, res = pcall(nat.create_mapping, rt.port)
+                if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
+                rt.nat_mapping.last_renewed = now
             end
         end
     end

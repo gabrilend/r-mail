@@ -46,10 +46,15 @@ arguments or via a shared state table. Options:
 Option 1 is the quickest fix. Option 3 is the right long-term approach,
 especially in preparation for the coroutine-based architecture (issue #104).
 
-## Status
+## Status — COMPLETED
 
-- [ ] Consolidate locals into state tables to fix the crash (quick fix)
-- [ ] Extract request handler into its own function
-- [ ] Extract sync cycle into its own function
-- [ ] Extract setup/init code into its own function
-- [ ] Review for further decomposition opportunities
+- [x] `init_runtime()` — setup, validation, returns `rt` state table
+- [x] `handle_request(rt, client)` — request handler (~120 lines)
+- [x] `run_sync_cycle(rt)` — sync cycle (~15 lines)
+- [x] `check_lan_ip_change(port)` — extracted startup check
+- [x] `do_resolve_lan_host(lan_peers, host, target_port)` — module-level
+- [x] `do_on_connection_timeout(rt, host, target_port)` — module-level
+- [x] LAN discovery functions — all promoted to module-level
+- [x] `poll_udp_cycle(rt)` — UDP polling wrapper
+- [x] `main()` reduced from 540 lines to 43 lines
+- [x] Passes LuaJIT 60-upvalue limit (tested)
