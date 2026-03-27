@@ -1254,6 +1254,11 @@ local function http_post_batch(requests)
 
     for i, req in ipairs(requests) do
         local host = req.host
+        if not host or host == "" then
+            log("skipping request to %s: no host", req.path or "?")
+            entries[i] = { conn = nil, req = req, phase = "done", ok = false, data = {} }
+            goto continue_batch
+        end
         if resolve_lan_host then
             local lan_host = resolve_lan_host(req.host, req.port)
             if lan_host and lan_host ~= host then
@@ -1270,6 +1275,7 @@ local function http_post_batch(requests)
             ok = false, data = {},
         }
         lookup[conn] = entries[i]
+        ::continue_batch::
     end
 
     local deadline = socket.gettime() + 8
