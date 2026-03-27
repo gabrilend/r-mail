@@ -257,14 +257,17 @@ class RmailClient(
      * GET /api/attachments/<filename>
      */
     /**
-     * Download an attachment with concurrent chunk downloads, per-chunk checksum
-     * verification, and resumable state. If a previous download was interrupted,
-     * only missing chunks are downloaded. State is persisted to stateDir.
+     * Download an attachment using the chunk-file model (matching daemon-to-daemon).
+     * Each chunk is stored as a separate file in a temp directory. On resume,
+     * the directory is scanned for existing chunks — no state file needed.
+     * Existing chunks are verified concurrently with downloading missing ones.
+     *
+     * @param chunksDir directory for per-chunk temp files (e.g. attachments/.downloads/<filename>/)
      */
     suspend fun downloadAttachmentChunked(
         filename: String,
         destFile: java.io.File,
-        stateDir: java.io.File? = null,
+        chunksDir: java.io.File,
         onProgress: ((Long, Long) -> Unit)? = null
     ): Boolean {
         // Step 1: get file info including per-chunk checksums
@@ -283,83 +286,46 @@ class RmailClient(
             }
         }
 
-        // Step 2: check for resumable state
-        val stateFile = if (stateDir != null) {
-            stateDir.mkdirs()
-            java.io.File(stateDir, "$filename.download.json")
-        } else null
+        // Step 2: scan chunks directory for existing chunks (resume detection)
+        chunksDir.mkdirs()
+        fun chunkFile(i: Int) = java.io.File(chunksDir, "chunk-%04d.bin".format(i))
 
-        val received = BooleanArray(numChunks) { false }
-        if (stateFile != null && stateFile.exists() && destFile.exists()) {
-            try {
-                val state = JSONObject(stateFile.readText())
-                // Verify the state matches this download (same file, same chunks)
-                if (state.optLong("total_size") == totalSize &&
-                    state.optInt("num_chunks") == numChunks &&
-                    state.optString("file_checksum") == fileChecksum) {
-                    val arr = state.optJSONArray("received")
-                    if (arr != null) {
-                        for (i in 0 until minOf(arr.length(), numChunks)) {
-                            received[i] = arr.optBoolean(i, false)
-                        }
-                    }
-                }
-            } catch (_: Exception) { /* corrupt state file, start fresh */ }
+        val existingChunks = mutableSetOf<Int>()
+        for (i in 0 until numChunks) {
+            if (chunkFile(i).exists()) existingChunks.add(i)
         }
+        val missingChunks = (0 until numChunks).filter { it !in existingChunks }.toMutableList()
 
-        val missingChunks = (0 until numChunks).filter { !received[it] }
+        val downloaded = java.util.concurrent.atomic.AtomicLong(
+            existingChunks.sumOf { chunkFile(it).length() })
+        onProgress?.invoke(downloaded.get(), totalSize)
 
-        // Step 3: pre-allocate file if starting fresh, or verify size for resume
-        if (missingChunks.size == numChunks) {
-            // Fresh download
-            java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
-        } else if (destFile.length() != totalSize) {
-            // Size mismatch — can't resume, start fresh
-            java.io.RandomAccessFile(destFile, "rw").use { it.setLength(totalSize) }
-            for (i in received.indices) received[i] = false
-        }
-
-        val alreadyDownloaded = received.count { it }.toLong() * chunkSize
-        val downloaded = java.util.concurrent.atomic.AtomicLong(alreadyDownloaded)
-        onProgress?.invoke(alreadyDownloaded, totalSize)
-
-        if (missingChunks.isEmpty()) {
-            // All chunks already received from a previous session — verify whole file
-            stateFile?.delete()
-            if (fileChecksum.isNotBlank()) {
-                val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(destFile)
-                if (localHash != fileChecksum) throw ChecksumMismatchException(
-                    "Resumed file checksum mismatch ($localHash != $fileChecksum)")
-            }
-            return true
-        }
-
-        // Step 4: calculate max concurrency
+        // Step 3: concurrently verify existing chunks AND download missing ones
         val runtime = Runtime.getRuntime()
         val freeHeap = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
         val maxConcurrent = ((freeHeap * 0.5) / chunkSize).toInt().coerceIn(2, 64)
-
-        // Step 5: download missing chunks concurrently
         val semaphore = Semaphore(maxConcurrent)
         val failed = java.util.concurrent.atomic.AtomicReference<String?>(null)
-        var lastStateSave = System.currentTimeMillis()
-
-        fun saveState() {
-            if (stateFile == null) return
-            try {
-                val state = JSONObject()
-                state.put("total_size", totalSize)
-                state.put("num_chunks", numChunks)
-                state.put("file_checksum", fileChecksum)
-                val arr = org.json.JSONArray()
-                for (r in received) arr.put(r)
-                state.put("received", arr)
-                stateFile.writeText(state.toString())
-            } catch (_: Exception) {}
-        }
 
         coroutineScope {
-            for (i in missingChunks) {
+            // Verify existing chunks in background — bad chunks get added to download queue
+            for (i in existingChunks.toList()) {
+                launch(Dispatchers.IO) {
+                    val expectedHash = chunkChecksums[i] ?: ""
+                    if (expectedHash.isNotBlank()) {
+                        val localHash = com.rmail.app.crypto.Crypto.sha256Hex(chunkFile(i).readBytes())
+                        if (localHash != expectedHash) {
+                            chunkFile(i).delete()
+                            synchronized(missingChunks) { missingChunks.add(i) }
+                        }
+                    }
+                }
+            }
+
+            // Download missing chunks concurrently
+            // Use a snapshot — new entries from failed verification are picked up in a second pass
+            val toDownload = synchronized(missingChunks) { missingChunks.toList() }
+            for (i in toDownload) {
                 kotlinx.coroutines.yield()
                 if (failed.get() != null) break
 
@@ -389,21 +355,9 @@ class RmailClient(
                             return@launch
                         }
 
-                        java.io.RandomAccessFile(destFile, "rw").use { raf ->
-                            raf.seek(i.toLong() * chunkSize)
-                            raf.write(chunk)
-                        }
-                        received[i] = true
-
+                        chunkFile(i).writeBytes(chunk)
                         val total = downloaded.addAndGet(chunk.size.toLong())
                         onProgress?.invoke(total, totalSize)
-
-                        // Save state periodically (every 2 seconds)
-                        val now = System.currentTimeMillis()
-                        if (now - lastStateSave > 2000) {
-                            lastStateSave = now
-                            saveState()
-                        }
                     } catch (e: Exception) {
                         if (failed.get() == null) failed.set("Chunk $i: ${e.message}")
                     } finally {
@@ -414,22 +368,62 @@ class RmailClient(
         }
 
         if (failed.get() != null) {
-            saveState()  // preserve progress for resume
+            // Chunks on disk are preserved for resume — no cleanup
             throw IOException("Chunked download failed: ${failed.get()}")
         }
 
-        // Step 6: verify whole-file checksum
+        // Second pass: pick up any chunks that failed verification and were re-queued
+        val stillMissing = synchronized(missingChunks) {
+            (0 until numChunks).filter { !chunkFile(it).exists() }
+        }
+        if (stillMissing.isNotEmpty()) {
+            // Download the re-queued chunks (from verification failures)
+            coroutineScope {
+                for (i in stillMissing) {
+                    kotlinx.coroutines.yield()
+                    launch(Dispatchers.IO) {
+                        val expectedHash = chunkChecksums[i] ?: ""
+                        for (attempt in 1..3) {
+                            val (status, body) = get("/api/attachments/$filename/chunk/$i")
+                            if (status != 200) continue
+                            if (expectedHash.isNotBlank()) {
+                                if (com.rmail.app.crypto.Crypto.sha256Hex(body) == expectedHash) {
+                                    chunkFile(i).writeBytes(body)
+                                    downloaded.addAndGet(body.size.toLong())
+                                    onProgress?.invoke(downloaded.get(), totalSize)
+                                    break
+                                }
+                            } else {
+                                chunkFile(i).writeBytes(body)
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 4: assemble chunks into final file
+        destFile.outputStream().buffered().use { out ->
+            for (i in 0 until numChunks) {
+                val cf = chunkFile(i)
+                if (!cf.exists()) throw IOException("Chunk $i missing after download")
+                cf.inputStream().use { inp -> inp.copyTo(out) }
+            }
+        }
+
+        // Step 5: verify whole-file checksum
         if (fileChecksum.isNotBlank()) {
             val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(destFile)
             if (localHash != fileChecksum) {
-                saveState()  // preserve for repair
+                // Don't delete chunks — repair can use them
                 throw ChecksumMismatchException(
                     "File checksum mismatch after assembly ($localHash != $fileChecksum)")
             }
         }
-        // Success — clean up state file
-        stateFile?.delete()
 
+        // Success — clean up chunk files
+        chunksDir.deleteRecursively()
         return true
     }
 

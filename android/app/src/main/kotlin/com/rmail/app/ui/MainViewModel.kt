@@ -330,9 +330,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * server and re-downloading only the mismatched chunks.
      * Returns true if repair succeeded, false if it failed.
      */
+    /**
+     * Repair a corrupt file using the chunk-file model. If chunk files still
+     * exist from the download, verify each one and re-download bad chunks.
+     * Then re-assemble and verify the whole file.
+     */
     private fun repairFile(client: RmailClient, filename: String, localFile: File): Boolean {
         return try {
-            // Get server's chunk manifest
+            val s = store ?: return false
+            val chunksDir = File(s.attachments, ".downloads/$filename")
+
+            // Get server manifest
             val (status, body) = client.get("/api/attachments/$filename/info")
             if (status != 200) return false
             val info = org.json.JSONObject(body.toString(Charsets.UTF_8))
@@ -345,60 +353,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (serverChecksums.size != numChunks) return false
 
-            // Compute local per-chunk checksums
-            val localChecksums = mutableListOf<String>()
-            localFile.inputStream().buffered().use { stream ->
-                val buf = ByteArray(chunkSize.toInt())
-                for (i in 0 until numChunks) {
-                    var read = 0
-                    while (read < chunkSize) {
-                        val n = stream.read(buf, read, (chunkSize - read).toInt())
-                        if (n <= 0) break
-                        read += n
+            // If chunk files don't exist, re-chunk from the assembled file
+            chunksDir.mkdirs()
+            fun chunkFile(i: Int) = File(chunksDir, "chunk-%04d.bin".format(i))
+
+            val hasChunkFiles = (0 until numChunks).any { chunkFile(it).exists() }
+            if (!hasChunkFiles && localFile.exists()) {
+                Log.i("rmail", "Re-chunking $filename for repair")
+                localFile.inputStream().buffered().use { stream ->
+                    val buf = ByteArray(chunkSize.toInt())
+                    for (i in 0 until numChunks) {
+                        var read = 0
+                        while (read < chunkSize) {
+                            val n = stream.read(buf, read, (chunkSize - read).toInt())
+                            if (n <= 0) break
+                            read += n
+                        }
+                        chunkFile(i).writeBytes(if (read == chunkSize.toInt()) buf else buf.copyOf(read))
                     }
-                    val chunkData = if (read == chunkSize.toInt()) buf else buf.copyOf(read)
-                    localChecksums.add(com.rmail.app.crypto.Crypto.sha256Hex(chunkData))
                 }
             }
 
-            // Find mismatched chunks
-            val badChunks = (0 until numChunks).filter { i ->
-                i >= localChecksums.size || localChecksums[i] != serverChecksums[i]
+            // Verify each chunk, delete bad ones
+            val badChunks = mutableListOf<Int>()
+            for (i in 0 until numChunks) {
+                val cf = chunkFile(i)
+                if (!cf.exists()) { badChunks.add(i); continue }
+                val hash = com.rmail.app.crypto.Crypto.sha256Hex(cf.readBytes())
+                if (hash != serverChecksums[i]) {
+                    cf.delete()
+                    badChunks.add(i)
+                }
             }
 
-            if (badChunks.isEmpty()) return true // checksums all match after re-check
-
-            Log.i("rmail", "Repairing $filename: ${badChunks.size}/$numChunks chunks corrupted")
-
-            // Re-download only the bad chunks and patch the file
-            val raf = java.io.RandomAccessFile(localFile, "rw")
-            for (chunkIdx in badChunks) {
-                val (chunkStatus, chunkBody) = client.get("/api/attachments/$filename/chunk/$chunkIdx")
-                if (chunkStatus != 200) {
-                    Log.e("rmail", "Repair failed: chunk $chunkIdx returned HTTP $chunkStatus")
-                    raf.close(); return false
+            if (badChunks.isEmpty()) {
+                Log.i("rmail", "Repair: all chunks verified for $filename, re-assembling")
+            } else {
+                Log.i("rmail", "Repairing $filename: ${badChunks.size}/$numChunks chunks need re-download")
+                for (chunkIdx in badChunks) {
+                    val (cs, cb) = client.get("/api/attachments/$filename/chunk/$chunkIdx")
+                    if (cs != 200) { Log.e("rmail", "Repair: chunk $chunkIdx HTTP $cs"); return false }
+                    val hash = com.rmail.app.crypto.Crypto.sha256Hex(cb)
+                    if (hash != serverChecksums[chunkIdx]) {
+                        Log.e("rmail", "Repair: chunk $chunkIdx still bad after re-download"); return false
+                    }
+                    chunkFile(chunkIdx).writeBytes(cb)
                 }
-                val hash = com.rmail.app.crypto.Crypto.sha256Hex(chunkBody)
-                if (hash != serverChecksums[chunkIdx]) {
-                    Log.e("rmail", "Repair failed: chunk $chunkIdx checksum mismatch after re-download " +
-                        "(server may have a bad disk)")
-                    raf.close(); return false
-                }
-                raf.seek(chunkIdx.toLong() * chunkSize)
-                raf.write(chunkBody)
             }
-            raf.close()
 
-            // Verify whole file after repair
+            // Re-assemble
+            localFile.outputStream().buffered().use { out ->
+                for (i in 0 until numChunks) {
+                    chunkFile(i).inputStream().use { inp -> inp.copyTo(out) }
+                }
+            }
+
+            // Verify whole file
             if (fileChecksum.isNotBlank()) {
                 val repairedHash = com.rmail.app.crypto.Crypto.sha256HexFile(localFile)
                 if (repairedHash != fileChecksum) {
-                    Log.e("rmail", "Repair failed: whole-file checksum still wrong after patching " +
-                        "${badChunks.size} chunks — file may be wrong size")
+                    Log.e("rmail", "Repair: whole-file checksum still wrong after re-assembly")
                     return false
                 }
             }
-            Log.i("rmail", "Repair succeeded for $filename: ${badChunks.size} chunks replaced")
+
+            // Clean up chunks
+            chunksDir.deleteRecursively()
+            Log.i("rmail", "Repair succeeded for $filename")
             true
         } catch (e: Exception) {
             Log.e("rmail", "Repair failed for $filename: ${e.message}")
@@ -451,8 +472,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val file = s.cachedAttachmentFile(info.filename)
 
                 withContext(Dispatchers.IO) {
-                    val dlStateDir = java.io.File(s.attachments, ".downloads")
-                    client.downloadAttachmentChunked(info.filename, file, dlStateDir) { downloaded, total ->
+                    val chunksDir = java.io.File(s.attachments, ".downloads/${info.filename}")
+                    client.downloadAttachmentChunked(info.filename, file, chunksDir) { downloaded, total ->
                         _downloadProgress.value = _downloadProgress.value +
                             (info.filename to (downloaded to total))
                     }
