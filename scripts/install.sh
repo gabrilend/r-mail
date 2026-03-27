@@ -961,9 +961,11 @@ elif ask_yn "Set up rmail to run as a service?"; then
             # system lua (LUA_BIN is under /nix/store/), use the stable
             # pkgs.lua5_4 reference instead of the raw store path.
             # if they compiled local lua, use that literal path directly.
+            # NixOS service logs to /tmp (RAM-backed) to avoid disk wear
             if echo "$LUA_BIN" | grep -q '^/nix/store/'; then
                 cat > "$NIX_FILE" <<NIX
 { config, pkgs, ... }:
+# rmail NixOS service - logs to RAM-backed /tmp
 
 let
   rmailPort = $NIX_PORT;
@@ -982,6 +984,8 @@ in {
       ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $MAIL_DIR";
       Restart = "on-failure";
       RestartSec = 5;
+      StandardOutput = "append:/tmp/rmail.log";
+      StandardError = "append:/tmp/rmail.log";
     };
   };
 }
@@ -989,6 +993,7 @@ NIX
             else
                 cat > "$NIX_FILE" <<NIX
 { config, ... }:
+# rmail NixOS service - logs to RAM-backed /tmp
 
 let
   rmailPort = $NIX_PORT;
@@ -1007,6 +1012,8 @@ in {
       ExecStart = "$LUA_BIN $ROOT/rmail.lua $MAIL_DIR";
       Restart = "on-failure";
       RestartSec = 5;
+      StandardOutput = "append:/tmp/rmail.log";
+      StandardError = "append:/tmp/rmail.log";
     };
   };
 }
@@ -1019,13 +1026,15 @@ NIX
             echo "    # add this line to /etc/nixos/configuration.nix:"
             echo "    #   imports = [ ./rmail.nix ];"
             echo "    sudo nixos-rebuild switch"
-            echo "  Logs: journalctl -u rmail -f"
+            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "  Or use: ./scripts/view-logs.sh"
             ;;
         systemd)
             if ask_yn "Set up as a user service? (no root required, starts on login)"; then
                 SERVICE_DIR="$HOME/.config/systemd/user"
                 SERVICE_FILE="$SERVICE_DIR/rmail.service"
                 mkdir -p "$SERVICE_DIR"
+                # systemd user service logs to /tmp (RAM-backed)
                 cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
 Description=rmail messaging daemon
@@ -1036,6 +1045,8 @@ Type=simple
 ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
 Restart=on-failure
 RestartSec=5
+StandardOutput=append:/tmp/rmail.log
+StandardError=append:/tmp/rmail.log
 
 [Install]
 WantedBy=default.target
@@ -1046,10 +1057,12 @@ SERVICE
                 systemctl --user start rmail
                 ok "service enabled and started"
                 echo ""
-                info "Logs: journalctl --user -u rmail -f"
+                info "Logs: tail -f /tmp/rmail.log"
+                info "Or use: ./scripts/view-logs.sh"
                 info "To keep running after logout: loginctl enable-linger"
             else
                 SERVICE_FILE="$ROOT/rmail.service"
+                # systemd system service logs to /tmp (RAM-backed)
                 cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
 Description=rmail messaging daemon
@@ -1061,6 +1074,8 @@ User=$(whoami)
 ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
 Restart=on-failure
 RestartSec=5
+StandardOutput=append:/tmp/rmail.log
+StandardError=append:/tmp/rmail.log
 
 [Install]
 WantedBy=multi-user.target
@@ -1071,37 +1086,37 @@ SERVICE
                 echo "    sudo mv $SERVICE_FILE /etc/systemd/system/rmail.service"
                 echo "    sudo systemctl daemon-reload"
                 echo "    sudo systemctl enable --now rmail"
-                echo "  Logs: journalctl -u rmail -f"
+                echo "  Logs: tail -f /tmp/rmail.log"
+                echo "  Or use: ./scripts/view-logs.sh"
             fi
             ;;
         runit)
             SERVICE_FILE="$ROOT/rmail-run"
-            LOG_FILE="$ROOT/rmail-log-run"
+            # runit service logs to /tmp (RAM-backed) to avoid disk wear
+            # and prevent output from appearing on pre-login TTY
             cat > "$SERVICE_FILE" <<SERVICE
 #!/bin/sh
-exec 2>&1
+# rmail runit service - redirects logs to RAM-backed /tmp
+# Logs don't persist across reboots and don't cause disk wear.
 export HOME=$HOME
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $MAIL_DIR
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $MAIL_DIR >>/tmp/rmail.log 2>&1
 SERVICE
             chmod +x "$SERVICE_FILE"
-            cat > "$LOG_FILE" <<LOGSERVICE
-#!/bin/sh
-exec svlogd -tt /var/log/rmail
-LOGSERVICE
-            chmod +x "$LOG_FILE"
-            ok "generated $SERVICE_FILE and $LOG_FILE"
+            ok "generated $SERVICE_FILE"
             echo ""
             echo "  Run these commands to install the service:"
-            echo "    sudo mkdir -p /etc/sv/rmail/log /var/log/rmail"
+            echo "    sudo mkdir -p /etc/sv/rmail"
             echo "    sudo mv $SERVICE_FILE /etc/sv/rmail/run"
-            echo "    sudo mv $LOG_FILE /etc/sv/rmail/log/run"
             echo "    sudo ln -s /etc/sv/rmail /var/service/"
-            echo "  Logs: sudo tail -f /var/log/rmail/current"
+            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "  Or use: ./scripts/view-logs.sh"
             ;;
         openrc)
             SERVICE_FILE="$ROOT/rmail-init"
+            # openrc service logs to /tmp (RAM-backed) to avoid disk wear
             cat > "$SERVICE_FILE" <<SERVICE
 #!/sbin/openrc-run
+# rmail openrc service - logs to RAM-backed /tmp
 
 description="rmail messaging daemon"
 command="$LUA_BIN"
@@ -1109,8 +1124,8 @@ command_args="$ROOT/rmail.lua $MAIL_DIR"
 command_user="$(whoami)"
 command_background=true
 pidfile="/run/rmail.pid"
-output_log="/var/log/rmail.log"
-error_log="/var/log/rmail.log"
+output_log="/tmp/rmail.log"
+error_log="/tmp/rmail.log"
 SERVICE
             ok "generated $SERVICE_FILE"
             echo ""
@@ -1119,7 +1134,8 @@ SERVICE
             echo "    sudo chmod +x /etc/init.d/rmail"
             echo "    sudo rc-update add rmail default"
             echo "    sudo rc-service rmail start"
-            echo "  Logs: tail -f /var/log/rmail.log"
+            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "  Or use: ./scripts/view-logs.sh"
             ;;
     esac
 fi
