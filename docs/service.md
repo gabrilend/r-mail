@@ -10,6 +10,21 @@ The manual formats are below. Replace `/path/to/lua` with either
 `deps/lua/bin/lua` (local) or your system lua (`which lua`), and
 `/path/to/rmail` with the directory you cloned into.
 
+## Logging
+
+All service configurations log to `/tmp/rmail.log`. Since `/tmp` is typically
+RAM-backed (tmpfs), logs don't persist across reboots and don't cause disk wear.
+
+To view logs in real-time:
+
+```sh
+./scripts/view-logs.sh
+# or directly:
+tail -f /tmp/rmail.log
+```
+
+A hidden symlink `.logs` in the project root also points to the log file.
+
 ---
 
 ## systemd
@@ -72,7 +87,8 @@ journalctl -u rmail -f
 ```sh
 # /etc/sv/rmail/run
 #!/bin/sh
-exec /path/to/lua /path/to/rmail/rmail.lua 2>&1
+export HOME=/home/YOURUSER
+exec chpst -u YOURUSER /path/to/lua /path/to/rmail/rmail.lua >>/tmp/rmail.log 2>&1
 ```
 
 ```sh
@@ -81,6 +97,8 @@ sudo mv rmail-run /etc/sv/rmail/run
 sudo chmod +x /etc/sv/rmail/run
 sudo ln -s /etc/sv/rmail /var/service/
 ```
+
+Logs: `tail -f /tmp/rmail.log` or `./scripts/view-logs.sh`
 
 ---
 
@@ -96,8 +114,8 @@ command_args="/path/to/rmail/rmail.lua"
 command_user="YOURUSER"
 command_background=true
 pidfile="/run/rmail.pid"
-output_log="/var/log/rmail.log"
-error_log="/var/log/rmail.log"
+output_log="/tmp/rmail.log"
+error_log="/tmp/rmail.log"
 ```
 
 ```sh
@@ -105,8 +123,9 @@ sudo mv rmail-init /etc/init.d/rmail
 sudo chmod +x /etc/init.d/rmail
 sudo rc-update add rmail default
 sudo rc-service rmail start
-tail -f /var/log/rmail.log
 ```
+
+Logs: `tail -f /tmp/rmail.log` or `./scripts/view-logs.sh`
 
 ---
 
