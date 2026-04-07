@@ -255,6 +255,11 @@ local function tcp_for(addr)
     if is_ipv6(addr) then return socket.tcp6() else return socket.tcp() end
 end
 
+-- Get the best address for a contact: prefer IPv6 if available, fall back to IPv4.
+local function contact_addr(contact)
+    return contact.ipv6 or contact.ip
+end
+
 local function sanitize_filename(name)
     if not name or name == "" then return "untitled" end
     -- extract basename (strip directory components)
@@ -1276,7 +1281,7 @@ local function http_post_batch(requests)
                 host = lan_host
             end
         end
-        local conn = socket.tcp()
+        local conn = tcp_for(host)
         conn:settimeout(0)
         conn:connect(host, req.port)
         entries[i] = {
@@ -1605,7 +1610,7 @@ local function send_consent_responses(my_name)
         if c and c.ip then
             valid[#valid + 1] = resp
             requests[#requests + 1] = {
-                host = c.ip, port = c.port, path = "/deliver",
+                host = contact_addr(c), port = c.port, path = "/deliver",
                 payload = json.encode({
                     type = "attachment_response",
                     attachment_id = resp.attachment_id,
@@ -1664,7 +1669,7 @@ local function send_attachment_cancellations(my_name)
         if c and c.ip then
             valid[#valid + 1] = item
             requests[#requests + 1] = {
-                host = c.ip, port = c.port, path = "/delete",
+                host = contact_addr(c), port = c.port, path = "/delete",
                 payload = json.encode({
                     message_id = item.entry.message_id,
                 }),
@@ -1996,7 +2001,7 @@ local function send_next_chunks(my_name)
                 aborted = true; break
             end
             local results = http_post_batch({{
-                host = contact.ip, port = contact.port, path = "/deliver",
+                host = contact_addr(contact), port = contact.port, path = "/deliver",
                 payload = json.encode({
                     type = "attachment_chunk",
                     attachment_id = att_id,
@@ -2419,7 +2424,7 @@ local function sync_outbox(my_name)
             if not op.skip then
                 local j = #requests + 1
                 requests[j] = {
-                    host = op.contact.ip, port = op.contact.port,
+                    host = contact_addr(op.contact), port = op.contact.port,
                     path = path, payload = json.encode(data),
                     psk_key = op.contact.token,
                 }
@@ -2567,7 +2572,7 @@ local function sync_inbox(my_name)
         local requests = {}
         for i, op in ipairs(ops) do
             requests[i] = {
-                host = op.contact.ip, port = op.contact.port,
+                host = contact_addr(op.contact), port = op.contact.port,
                 path = "/delete",
                 payload = json.encode({
                     message_id = op.message_id,
@@ -2677,6 +2682,57 @@ local function detect_ip_change(my_name, port)
     save_state("pending-address.json", pending)
 end
 
+-- Get the system's global IPv6 address (no external service needed — no NAT with IPv6).
+-- Returns the first non-temporary global scope address, or nil if IPv6 is unavailable.
+local function get_public_ipv6()
+    local handle = io.popen("ip -6 addr show scope global 2>/dev/null")
+    if not handle then return nil end
+    local output = handle:read("*a")
+    handle:close()
+    -- Match the first global inet6 address that's NOT marked "temporary" (privacy extensions)
+    -- We want the stable SLAAC or static address, not the temporary one
+    for line in output:gmatch("[^\n]+") do
+        if line:match("inet6") and not line:match("temporary") and not line:match("deprecated") then
+            local addr = line:match("inet6%s+([%x:]+)/")
+            if addr and not addr:match("^fe80") then return addr end
+        end
+    end
+    return nil
+end
+
+-- Detect IPv6 address change on startup. Same logic as detect_ip_change but for IPv6.
+-- No need to verify with a second service — the address comes from the OS, not an external query.
+local function detect_ipv6_change(my_name, port)
+    local new_ip = get_public_ipv6()
+    if not new_ip then return end
+
+    local stored_ip = read_file(STATE .. "/public_ipv6")
+    if stored_ip then stored_ip = stored_ip:match("^%s*(.-)%s*$") end
+
+    if stored_ip == new_ip then return end
+
+    if not stored_ip then
+        log("public IPv6 recorded: %s", new_ip)
+        write_file(STATE .. "/public_ipv6", new_ip)
+        return
+    end
+
+    log("public IPv6 changed: %s -> %s", stored_ip, new_ip)
+    write_file(STATE .. "/public_ipv6", new_ip)
+
+    -- Queue notifications for contacts that have an ipv6 field
+    local contacts = load_contacts()
+    local pending = load_state("pending-address.json")
+    for name, contact in pairs(contacts) do
+        if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip)) then
+            pending[name] = pending[name] or {}
+            pending[name].ipv6 = new_ip
+            pending[name].port = port
+        end
+    end
+    save_state("pending-address.json", pending)
+end
+
 local function sync_address_notifications(my_name)
     local pending = load_state("pending-address.json")
     if not next(pending) then return false end
@@ -2704,7 +2760,7 @@ local function sync_address_notifications(my_name)
     local requests = {}
     for i, op in ipairs(ops) do
         requests[i] = {
-            host = op.contact.ip, port = op.contact.port,
+            host = contact_addr(op.contact), port = op.contact.port,
             path = "/update-address",
             payload = json.encode({
                 ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
@@ -2791,7 +2847,8 @@ end
 local function handle_api_myaddress(my_name, port)
     local ip = check_public_ip()
     local lan_ip = nat.get_local_ip()
-    return 200, {ip = ip or "", port = port, name = my_name, lan_ip = lan_ip or ""}
+    local ipv6 = get_public_ipv6()
+    return 200, {ip = ip or "", port = port, name = my_name, lan_ip = lan_ip or "", ipv6 = ipv6 or ""}
 end
 
 -- POST /api/sync — core phone sync endpoint.
@@ -3600,6 +3657,7 @@ local function init_runtime()
     log("listening on :%d (TCP%s + UDP)", rt.port, rt.server6 and "+IPv6" or "")
 
     pcall(detect_ip_change, rt.my_name, rt.port)
+    pcall(detect_ipv6_change, rt.my_name, rt.port)
     pcall(check_lan_ip_change, rt.port)
     join_multicast_group(rt.lan.udp)
 

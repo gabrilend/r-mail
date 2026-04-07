@@ -449,7 +449,7 @@ class RmailClient(
         } catch (_: Exception) {} // best-effort, don't crash if server is unreachable
     }
 
-    data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String)
+    data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String, val ipv6: String)
 
     /**
      * GET /api/myaddress — returns the daemon's public IP, port, name, and LAN IP
@@ -461,7 +461,8 @@ class RmailClient(
             val obj = JSONObject(body.toString(Charsets.UTF_8))
             AddressInfo(
                 obj.getString("ip"), obj.getInt("port"),
-                obj.optString("name", ""), obj.optString("lan_ip", "")
+                obj.optString("name", ""), obj.optString("lan_ip", ""),
+                obj.optString("ipv6", "")
             )
         } catch (_: Exception) {
             null

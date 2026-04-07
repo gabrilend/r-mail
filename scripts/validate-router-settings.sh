@@ -86,6 +86,30 @@ else
     echo ""
 fi
 
+# --- IPv6 check ---
+IPV6_ADDR=$(ip -6 addr show scope global 2>/dev/null | grep -v "temporary\|deprecated" | sed -n 's/.*inet6 \([0-9a-f:]*\)\/.*/\1/p' | head -1)
+if [ -n "$IPV6_ADDR" ]; then
+    printf "  IPv6 address:           %s\n" "$IPV6_ADDR"
+    printf "  Checking IPv6 port...   "
+    curl -s -g --max-time 2 "http://[$IPV6_ADDR]:$PORT/" >/dev/null 2>&1
+    IPV6_EXIT=$?
+    if [ "$IPV6_EXIT" -eq 28 ]; then
+        warn "timed out"
+        info "Port $PORT is not reachable on IPv6."
+        info "Open the port in your firewall for IPv6 too."
+    elif [ "$IPV6_EXIT" -eq 7 ]; then
+        warn "connection refused"
+        info "Daemon may not be binding IPv6. Check if socket.tcp6 is available."
+    else
+        ok "port $PORT is open on IPv6"
+        info "Contacts can use your IPv6 address — no port forwarding needed!"
+    fi
+    echo ""
+else
+    info "No global IPv6 address — IPv6 not available on this network."
+    echo ""
+fi
+
 # --- Hairpin NAT test ---
 # rmail uses AES-256-GCM encryption, so a plain curl will get a garbled
 # response — but that still means the TCP connection reached the machine.

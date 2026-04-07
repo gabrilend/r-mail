@@ -544,7 +544,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val client = RmailClient(config.host, config.port, config.token)
                 val info = withContext(Dispatchers.IO) { client.getMyAddress() }
                 if (info != null) {
-                    _myAddress.value = "${info.ip}:${info.port}"
+                    val v6 = if (info.ipv6.isNotBlank()) " (IPv6: ${info.ipv6})" else ""
+                    _myAddress.value = "${info.ip}:${info.port}$v6"
                     if (info.name.isNotBlank()) _daemonName.value = info.name
                     if (info.lanIp.isNotBlank()) serverLanIp = info.lanIp
                 }

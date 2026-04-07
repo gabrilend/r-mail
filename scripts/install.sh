@@ -323,7 +323,15 @@ echo ""
 echo "  your rmail port: $RMAIL_PORT"
 echo "  config: $CONFIG_FILE"
 echo "  mailbox: $MAIL_DIR"
-echo "  forward port $RMAIL_PORT on your router to this machine"
+IPV6_ADDR=$(ip -6 addr show scope global 2>/dev/null | grep -v "temporary\|deprecated" | sed -n 's/.*inet6 \([0-9a-f:]*\)\/.*/\1/p' | head -1)
+if [ -n "$IPV6_ADDR" ]; then
+    echo ""
+    ok "IPv6 available: $IPV6_ADDR"
+    info "Contacts can reach you at [$IPV6_ADDR]:$RMAIL_PORT"
+    info "No port forwarding needed for IPv6 — just open the port in your firewall."
+else
+    echo "  forward port $RMAIL_PORT on your router to this machine"
+fi
 echo ""
 
 # Contacts file

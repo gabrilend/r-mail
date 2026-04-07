@@ -70,6 +70,14 @@ Or detect automatically: if the address contains `:`, it's IPv6.
 
 ## Status
 
-Not yet implementing. This is a significant but high-value change —
-it would make rmail dramatically easier to set up for anyone on an
-IPv6-capable network.
+- [x] Accept IPv6 addresses in contacts file (auto-detected by : character)
+- [x] Bind dual-stack sockets (IPv4 + IPv6 with IPV6_V6ONLY)
+- [x] Outgoing connections: tcp_for() auto-selects tcp/tcp6 based on address
+- [x] contact_addr() prefers ipv6 field over ip field for dual-stack
+- [x] Dynamic IPv6 detection via `ip -6 addr show scope global` (stable SLAAC, not temporary)
+- [x] IPv6 address change detection and notification
+- [x] /api/myaddress includes ipv6 field
+- [x] Android: parses ipv6 from myaddress, displays in contacts screen
+- [x] validate-router-settings.sh checks IPv6 port connectivity
+- [x] install.sh detects and displays IPv6 (skips port forwarding message if available)
+- [ ] LAN discovery via IPv6 link-local (deferred — IPv4 multicast works for now)
