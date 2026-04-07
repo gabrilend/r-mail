@@ -245,6 +245,16 @@ local function run_hook(script, data, ...)
     return output
 end
 
+-- Returns true if the address string is IPv6 (contains a colon).
+local function is_ipv6(addr)
+    return addr and addr:find(":", 1, true) ~= nil
+end
+
+-- Create the appropriate TCP socket for the address type.
+local function tcp_for(addr)
+    if is_ipv6(addr) then return socket.tcp6() else return socket.tcp() end
+end
+
 local function sanitize_filename(name)
     if not name or name == "" then return "untitled" end
     -- extract basename (strip directory components)
@@ -3560,14 +3570,34 @@ local function init_runtime()
         end
     end
 
+    -- Bind IPv4
     rt.server = assert(socket.bind("0.0.0.0", rt.port))
-    rt.server:settimeout(1)
+    rt.server:settimeout(0)
+
+    -- Bind IPv6 (optional — not all systems have it)
+    rt.server6 = nil
+    local ok6, srv6 = pcall(function()
+        local s = socket.tcp6()
+        -- IPV6_V6ONLY so it doesn't conflict with the IPv4 socket
+        s:setoption("ipv6-v6only", true)
+        s:setoption("reuseaddr", true)
+        assert(s:bind("::", rt.port))
+        assert(s:listen(32))
+        s:settimeout(0)
+        return s
+    end)
+    if ok6 and srv6 then
+        rt.server6 = srv6
+        log("IPv6 enabled")
+    else
+        log("IPv6 not available: %s", tostring(srv6))
+    end
 
     rt.lan.udp = socket.udp()
     assert(rt.lan.udp:setsockname("0.0.0.0", rt.port))
     rt.lan.udp:settimeout(0)
 
-    log("listening on :%d (TCP + UDP)", rt.port)
+    log("listening on :%d (TCP%s + UDP)", rt.port, rt.server6 and "+IPv6" or "")
 
     pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(check_lan_ip_change, rt.port)
@@ -3706,6 +3736,7 @@ local function main()
     while true do
         -- Build socket lists for select
         local recvt = {rt.server}
+        if rt.server6 then recvt[#recvt + 1] = rt.server6 end
         local sendt = {}
         for raw_sock, info in pairs(clients) do
             if info.wait_type == "read" then
@@ -3723,8 +3754,8 @@ local function main()
         -- Handle readable sockets
         if readable then
             for _, sock in ipairs(readable) do
-                if sock == rt.server then
-                    local raw_client = rt.server:accept()
+                if sock == rt.server or sock == rt.server6 then
+                    local raw_client = sock:accept()
                     if raw_client then
                         local async_client = make_async_socket(raw_client)
                         local co = coroutine.create(function()

@@ -1,0 +1,23 @@
+add an auto-recreated symlink in the outbox to a directory in /tmp/ called "RAM" that creates messages
+in RAM, not saved to disk. We should be sure to note in the documentation that if the system doesn't
+sync before the computer is turned off, outbox files in the RAM directory could be lost. Therefore, to
+avoid that failure mode, we should watch that directory and initiate a sync cycle when a file is
+created there. This sometimes doesn't work, but it's better than nothing, hence the documentation
+warning instead of just letting it happen.
+
+also, we should add a "hide" tag at the beginning that sends your traffic to many different contacts
+it's already secure, but we should try and obfuscate it's delivery as well. We can do this by
+asking contacts if they know the recipient, and those contacts can ask their contacts. Then we can
+split up the file into parts and distribute them torrent style. In the config we should have a way
+to disable the torrent behavior, but how it'd work is each client that you can find that knows the
+recipient would send each of their contacts a piece of the file, and each of them would send to
+each of each other that knew the recipient. hmmmmmm this needs more brainstorming, can you work with
+the user to find a better solution?
+
+similar to the arbitrary field reading helper script, we should make an arbitrary tag reader script
+that reads messages for tags within ][ brackets in the message body. It should only find tags that
+are on their own line, and it should have the ][ bracket characters configurable at the top of the
+script. When encountering one, it should run a callback function in the hook script that is calling
+the helper script, defined in the script itself and passed by name as an argument to the helper
+script. Feel free to discuss with the user about the use-cases, implications, or desired implemment-
+-tations.
