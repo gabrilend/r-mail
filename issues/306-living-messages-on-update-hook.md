@@ -37,9 +37,8 @@ written to the inbox file.
 
 Arguments:
 - $1: sender name
-- $2: subject
-- $3: old message body (the current inbox file content)
-- $4: new message body (what the sender changed it to)
+- $2: absolute path to the saved inbox file (filename = subject, content = old body)
+- $3: new message body (what the sender changed it to)
 
 stdout: replaces the saved body (like on_receive_raw)
 
@@ -52,8 +51,8 @@ Use cases:
 
 ## Helper script
 
-`scripts/checksum-message.sh <filepath>` — outputs SHA-256 of a message
-file. Meant to be called from hook scripts to detect changes.
+`scripts/checksum.sh <filepath>` — outputs SHA-256 of any file.
+Meant to be called from hook scripts.
 
 ```sh
 #!/bin/sh
