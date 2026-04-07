@@ -51,8 +51,9 @@ Use cases:
 
 ## Helper script
 
-`scripts/checksum.sh <filepath>` — outputs SHA-256 of any file.
-Meant to be called from hook scripts.
+`helpers/checksum.sh <filepath>` — outputs SHA-256 of any file.
+`helpers/filename.sh <filepath>` — extracts filename from a path.
+Both meant to be called from hook scripts.
 
 ```sh
 #!/bin/sh
