@@ -3,6 +3,7 @@ package com.rmail.app.ui.screens
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.documentfile.provider.DocumentFile
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -154,12 +155,33 @@ fun InboxScreen(
 
     // File picker for compose attachments
     val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             val name = resolveDisplayName(context, uri) ?: uri.lastPathSegment ?: "attachment"
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
             draftAttachments.add(AttachmentEntry(uri, name, mime))
+        }
+    }
+
+    // Directory picker for attaching folders
+    val dirPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return@rememberLauncherForActivityResult
+            fun addChildren(dir: DocumentFile) {
+                for (child in dir.listFiles()) {
+                    if (child.isDirectory) {
+                        addChildren(child)
+                    } else if (child.uri != null) {
+                        val name = child.name ?: child.uri.lastPathSegment ?: "attachment"
+                        val mime = child.type
+                        draftAttachments.add(AttachmentEntry(child.uri, name, mime))
+                    }
+                }
+            }
+            addChildren(tree)
         }
     }
 
@@ -255,7 +277,7 @@ fun InboxScreen(
                             draftBody = ""
                             currentPanel = Panel.WRITE
                             // Immediately open the file picker
-                            filePicker.launch("*/*")
+                            filePicker.launch(arrayOf("*/*"))
                         }) {
                             Icon(Icons.Default.Add, contentDescription = "Upload file")
                         }
@@ -340,7 +362,7 @@ fun InboxScreen(
                             draftSubject = ""
                             draftBody = ""
                             currentPanel = Panel.WRITE
-                            filePicker.launch("*/*")
+                            filePicker.launch(arrayOf("*/*"))
                         }
                     }
                 }
@@ -534,7 +556,8 @@ fun InboxScreen(
                     recipients = draftRecipients,
                     onRecipientsChange = { draftRecipients = it },
                     attachments = draftAttachments,
-                    filePicker = { filePicker.launch("*/*") },
+                    filePicker = { filePicker.launch(arrayOf("*/*")) },
+                    dirPicker = { dirPicker.launch(null) },
                     subject = draftSubject,
                     onSubjectChange = { draftSubject = it },
                     body = draftBody,
@@ -1081,7 +1104,7 @@ private fun SettingsPanel(vm: MainViewModel, onModified: () -> Unit, onSaved: ()
 
             Spacer(Modifier.height(4.dp))
             Text("Notifications", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            listOf("full" to "Sender + subject", "sender" to "Sender only", "none" to "No preview")
+            listOf("full" to "Sender + subject", "sender" to "Sender only", "none" to "No preview", "off" to "No notifications")
                 .forEach { (value, label) ->
                     Row(Modifier.fillMaxWidth().clickable { notifDetail = value; markModified() }
                         .padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1127,6 +1150,7 @@ private fun ComposePanel(
     onRecipientsChange: (List<String>) -> Unit,
     attachments: MutableList<AttachmentEntry>,
     filePicker: () -> Unit,
+    dirPicker: () -> Unit,
     subject: String,
     onSubjectChange: (String) -> Unit,
     body: String,
@@ -1241,7 +1265,8 @@ private fun ComposePanel(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 modifier = Modifier.weight(1f).padding(start = 8.dp))
-            IconButton(onClick = filePicker) { Icon(Icons.Default.Add, contentDescription = "Attach") }
+            IconButton(onClick = dirPicker) { Icon(Icons.Default.Folder, contentDescription = "Attach folder") }
+            IconButton(onClick = filePicker) { Icon(Icons.Default.Add, contentDescription = "Attach file") }
         }
 
         // Subject
@@ -1337,6 +1362,7 @@ private fun sanitizeFilename(name: String): String {
     if (name.isBlank()) return "untitled"
     var s = name.substringAfterLast('/').substringAfterLast('\\').trimStart('.')
     s = s.replace(Regex("[\\x00-\\x1f/\\\\]"), "_")
+    s = s.replace(' ', '-')
     return s.ifBlank { "untitled" }
 }
 

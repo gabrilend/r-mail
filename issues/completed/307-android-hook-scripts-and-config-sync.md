@@ -34,4 +34,4 @@ for this file (inverse of contacts where desktop has priority).
 
 ## Status
 
-Design phase. Depends on the hook system being stable on the daemon side.
+Split into #308 (synced phone config), #309 (script editor), #310 (periodics).

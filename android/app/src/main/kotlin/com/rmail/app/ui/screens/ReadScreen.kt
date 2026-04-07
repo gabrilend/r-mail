@@ -10,6 +10,7 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.rmail.app.data.MailMessage
 import com.rmail.app.ui.MainViewModel
@@ -73,20 +74,22 @@ fun ReadScreen(
                     }
                 },
                 actions = {
-                    if (!isOutbox) {
+                    if (isOutbox) {
+                        IconButton(onClick = { showDeleteDialog = true }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete")
+                        }
+                    } else {
                         IconButton(onClick = { onReply(buildReply(msg)) }) {
                             Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Reply")
                         }
-                    }
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
-                        }
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false }
-                        ) {
-                            if (!isOutbox) {
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More")
+                            }
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false }
+                            ) {
                                 DropdownMenuItem(
                                     text = { Text("Forward") },
                                     onClick = {
@@ -94,14 +97,14 @@ fun ReadScreen(
                                         onForward(buildForward(msg))
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Delete") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        showDeleteDialog = true
+                                    }
+                                )
                             }
-                            DropdownMenuItem(
-                                text = { Text("Delete") },
-                                onClick = {
-                                    menuExpanded = false
-                                    showDeleteDialog = true
-                                }
-                            )
                         }
                     }
                 }
@@ -124,17 +127,31 @@ fun ReadScreen(
                 modifier = Modifier.padding(padding)
             )
         } else {
-            Column(
-                modifier = Modifier
-                    .padding(padding)
-                    .padding(16.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = msg.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
+            Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(16.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = msg.content,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+                if (isOutbox) {
+                    Button(
+                        onClick = { vm.triggerSync() },
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        shape = androidx.compose.ui.graphics.RectangleShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF00BCD4)
+                        )
+                    ) {
+                        Text("Update", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                    }
+                }
             }
         }
     }

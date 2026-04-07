@@ -97,6 +97,7 @@ local hooks = {
     on_package     = config.on_package,
     on_send        = config.on_send,
     on_delete      = config.on_delete,
+    on_update      = config.on_update,
 }
 
 -- Aliases for frequently-used paths (reduces table lookups in hot paths)
@@ -268,6 +269,8 @@ local function sanitize_filename(name)
     name = name:gsub("^%.+", "")
     -- replace control characters and problematic chars with underscores
     name = name:gsub("[%c/%\\%z]", "_")
+    -- spaces to dashes (spaces break HTTP request line parsing)
+    name = name:gsub(" ", "-")
     if name == "" then return "untitled" end
     return name
 end
@@ -624,8 +627,8 @@ function nat.security_check(my_name)
         if file_exists(STATE .. "/nat_security_vulnerability_active") then
             local contacts = load_contacts()
             local recipients = {}
-            for name, _ in pairs(contacts) do
-                if name ~= my_name and warned[name] then
+            for name, c in pairs(contacts) do
+                if name ~= my_name and not c.own and warned[name] then
                     recipients[#recipients + 1] = name
                 end
             end
@@ -661,8 +664,8 @@ function nat.security_check(my_name)
     -- send warning to contacts not yet warned
     local contacts = load_contacts()
     local recipients = {}
-    for name, _ in pairs(contacts) do
-        if name ~= my_name and not warned[name] then
+    for name, c in pairs(contacts) do
+        if name ~= my_name and not c.own and not warned[name] then
             recipients[#recipients + 1] = name
         end
     end
@@ -825,6 +828,34 @@ local function handle_deliver_message(data, sender)
     save_attachments(attachments, sender, inbox_state[filename])
     save_state("inbox.json", inbox_state)
     return 200, {ok = true, filename = filename}
+end
+
+local function handle_deliver_update(data, sender)
+    local message_id = data.message_id
+    local new_body = data.body
+    if not message_id then return 400, {error = "missing message_id"} end
+    if not new_body then return 400, {error = "missing body"} end
+
+    local inbox_state = load_state("inbox.json")
+
+    -- find the inbox file by message_id and sender
+    for filename, meta in pairs(inbox_state) do
+        if meta.message_id == message_id and meta["from"] == sender then
+            local target = INBOX .. "/" .. filename
+
+            if hooks.on_update then
+                local transformed = run_hook(hooks.on_update, sender, target, new_body)
+                if transformed and transformed ~= "" then new_body = transformed end
+            end
+
+            new_body = new_body:gsub("^[\n\r]+", "")
+            write_file(target, new_body)
+            log("updated: %s from %s -> %s", message_id, sender, filename)
+            return 200, {ok = true}
+        end
+    end
+
+    return 404, {error = "message not found"}
 end
 
 local function delete_inbox_attachments(meta)
@@ -1525,9 +1556,10 @@ local function handle_attachment_request(data, sender)
     if total and total > 0 then
         pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
     end
-    local base = filename:gsub("%.[^%.]+$", "")
+    local subject = (data.subject or ""):gsub("[\n\r]", "")
+    local base = subject ~= "" and subject or filename:gsub("%.[^%.]+$", "")
     if base == "" then base = filename end
-    local consent_file = sanitize_filename(base .. "-attachment")
+    local consent_file = sanitize_filename(base .. "-consent-to-download-form")
     write_file(INBOX .. "/" .. consent_file, string.format(
         "%s wants to send you an attachment.\n\n" ..
         "  File:          %s\n" ..
@@ -2063,6 +2095,7 @@ local function handle_deliver(data, sender)
         return 400, {error = "missing type field"}
     end
     if     msg_type == "message"             then return handle_deliver_message(data, sender)
+    elseif msg_type == "update"              then return handle_deliver_update(data, sender)
     elseif msg_type == "attachment_request"  then return handle_attachment_request(data, sender)
     elseif msg_type == "attachment_response" then return handle_attachment_response(data, sender)
     elseif msg_type == "attachment_chunk"    then return handle_attachment_chunk(data, sender)
@@ -2349,6 +2382,43 @@ local function sync_outbox(my_name)
                         end
                     end
                 end
+
+                -- detect body edits: compare current body checksum against stored
+                local current_checksum = sha256_of_bytes(body or "")
+                if state[name].body_checksum and current_checksum ~= state[name].body_checksum then
+                    -- body changed since last sync — queue updates for all delivered recipients
+                    for rname, rmeta in pairs(state[name].recipients) do
+                        if rmeta.message_id and not rmeta.error then
+                            if rmeta.self then
+                                -- self-delivery update: apply directly to own inbox
+                                local inbox_state = load_state("inbox.json")
+                                for iname, imeta in pairs(inbox_state) do
+                                    if imeta.message_id == rmeta.message_id and imeta["from"] == my_name then
+                                        local target = INBOX .. "/" .. iname
+                                        local update_body = body or ""
+                                        if hooks.on_update then
+                                            local transformed = run_hook(hooks.on_update, my_name, target, update_body)
+                                            if transformed and transformed ~= "" then update_body = transformed end
+                                        end
+                                        update_body = update_body:gsub("^[\n\r]+", "")
+                                        write_file(target, update_body)
+                                        log("self-updated: %s -> %s", name, iname)
+                                        did_work = true
+                                        break
+                                    end
+                                end
+                            elseif contacts[rname] then
+                                ops[#ops + 1] = {
+                                    type = "update", filename = name,
+                                    recipient = rname, message_id = rmeta.message_id,
+                                    subject = name, body = body,
+                                    contact = contacts[rname],
+                                }
+                            end
+                        end
+                    end
+                end
+                state[name].body_checksum = current_checksum
             end
         end
     end
@@ -2410,12 +2480,22 @@ local function sync_outbox(my_name)
                     data = {type = "message",
                             subject = op.subject, message_id = op.message_id, body = send_body}
                 end
+            elseif op.type == "update" then
+                path = "/deliver"
+                local send_body = op.body
+                if hooks.on_send then
+                    local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
+                    if transformed and transformed ~= "" then send_body = transformed end
+                end
+                data = {type = "update",
+                        message_id = op.message_id, subject = op.subject, body = send_body}
             elseif op.type == "attachment_request" then
                 path = "/deliver"
                 data = {type = "attachment_request",
                         attachment_id = op.att_id,
                         message_id = op.message_id,
                         filename = op.att_filename,
+                        subject = op.filename,
                         expected_size = op.expected_size}
             else
                 path = "/delete"
@@ -2466,6 +2546,20 @@ local function sync_outbox(my_name)
                     did_work = true
                 else
                     log("failed to send %s to %s", op.filename, op.recipient)
+                end
+            elseif op.type == "update" then
+                if results[i].ok then
+                    log("updated: %s -> %s", op.filename, op.recipient)
+                    did_work = true
+                elseif results[i].status == 404 then
+                    -- recipient deleted the message — clean up
+                    if state[op.filename] then
+                        state[op.filename].recipients[op.recipient] = nil
+                    end
+                    log("update 404: %s removed %s from inbox", op.recipient, op.filename)
+                    did_work = true
+                else
+                    log("failed to update %s for %s (will retry)", op.filename, op.recipient)
                 end
             elseif op.type == "attachment_request" then
                 if results[i].ok then

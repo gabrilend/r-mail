@@ -73,4 +73,4 @@ sha256sum "$1" | cut -d' ' -f1
 
 ## Status
 
-Not yet implementing.
+Implemented. All changes in rmail.lua.

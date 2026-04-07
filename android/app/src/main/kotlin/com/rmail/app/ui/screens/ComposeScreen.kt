@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -86,6 +88,7 @@ private fun sanitizeFilename(name: String): String {
     var s = name.substringAfterLast('/').substringAfterLast('\\')
     s = s.trimStart('.')
     s = s.replace(Regex("[\\x00-\\x1f/\\\\]"), "_")
+    s = s.replace(' ', '-')
     return s.ifBlank { "untitled" }
 }
 
@@ -153,12 +156,33 @@ fun ComposeScreen(
 
     // File picker for adding attachments
     val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
             val name = resolveDisplayName(context, uri) ?: uri.lastPathSegment ?: "attachment"
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
             attachments.add(ComposeAttachmentEntry(uri, name, mime))
+        }
+    }
+
+    // Directory picker for attaching folders
+    val dirPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return@rememberLauncherForActivityResult
+            fun addChildren(dir: DocumentFile) {
+                for (child in dir.listFiles()) {
+                    if (child.isDirectory) {
+                        addChildren(child)
+                    } else if (child.uri != null) {
+                        val name = child.name ?: child.uri.lastPathSegment ?: "attachment"
+                        val mime = child.type
+                        attachments.add(ComposeAttachmentEntry(child.uri, name, mime))
+                    }
+                }
+            }
+            addChildren(tree)
         }
     }
 
@@ -285,8 +309,11 @@ fun ComposeScreen(
                         .weight(1f)
                         .padding(start = 8.dp)
                 )
-                IconButton(onClick = { filePicker.launch("*/*") }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add attachment")
+                IconButton(onClick = { dirPicker.launch(null) }) {
+                    Icon(Icons.Default.Folder, contentDescription = "Attach folder")
+                }
+                IconButton(onClick = { filePicker.launch(arrayOf("*/*")) }) {
+                    Icon(Icons.Default.Add, contentDescription = "Attach file")
                 }
             }
 

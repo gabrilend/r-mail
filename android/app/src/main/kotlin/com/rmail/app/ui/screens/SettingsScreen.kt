@@ -126,7 +126,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     listOf(
                         "full" to "Sender + subject",
                         "sender" to "Sender only",
-                        "none" to "No preview"
+                        "none" to "No preview",
+                        "off" to "No notifications"
                     ).forEach { (value, label) ->
                         Row(
                             modifier = Modifier

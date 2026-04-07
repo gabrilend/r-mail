@@ -144,7 +144,8 @@ class SyncManager(
             // ── 5. Notify if new messages arrived ─────────────────────────
 
             if (newCount > 0) {
-                postNotification(newCount, resp.fetchInbox.values.firstOrNull()?.filename)
+                val first = resp.fetchInbox.values.firstOrNull()
+                postNotification(newCount, first?.from, first?.filename)
                 return@withContext SyncResult.NewMessages(newCount, resp.mailboxName, resp.mailboxPath)
             }
 
@@ -170,12 +171,16 @@ class SyncManager(
         return Pair(newFiles.toList(), deleted.toList())
     }
 
-    private fun postNotification(count: Int, firstFilename: String?) {
+    private fun postNotification(count: Int, sender: String?, subject: String?) {
         val detail = config.notificationDetail
+        if (detail == "off") return
+
         val title = if (count == 1) "New message" else "$count new messages"
         val text = when (detail) {
-            "full", "sender" -> firstFilename?.let { extractSender(it) }
-            else -> null
+            "full" -> if (sender != null && subject != null) "$sender — $subject"
+                      else sender ?: subject
+            "sender" -> sender
+            else -> null   // "none" — notification with no preview text
         }
 
         // Use the launcher intent to avoid a circular package dependency
@@ -194,16 +199,6 @@ class SyncManager(
 
         val nm = context.getSystemService(NotificationManager::class.java)
         nm.notify(NOTIFICATION_ID, notification)
-    }
-
-    private fun extractSender(filename: String): String? {
-        return try {
-            val text = store.readInbox(filename)
-            text.lines().firstOrNull { it.startsWith("from:") }
-                ?.removePrefix("from:")?.trim()
-        } catch (_: Exception) {
-            null
-        }
     }
 
     companion object {

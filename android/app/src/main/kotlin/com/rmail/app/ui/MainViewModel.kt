@@ -167,12 +167,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_syncStatus.value == SyncStatus.SYNCING) return
         viewModelScope.launch {
             _syncStatus.value = SyncStatus.SYNCING
-            _syncError.value = null
             lastSyncTime = System.currentTimeMillis()
             val manager = SyncManager(getApplication(), config, s, serverLanIp)
             when (val result = manager.sync()) {
                 is SyncResult.Success, is SyncResult.NewMessages -> {
                     _syncStatus.value = SyncStatus.IDLE
+                    _syncError.value = null
                     refreshLocal()
                     if (_myAddress.value == null) fetchMyAddress()
                     // Update mailbox name from server if we don't have one
