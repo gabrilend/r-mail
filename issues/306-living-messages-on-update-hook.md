@@ -32,8 +32,8 @@ The receiver matches by message_id and overwrites the inbox file.
 
 ## on_update hook
 
-New hook: `on_update` — runs synchronously before the updated body is
-written to the inbox file.
+New hook: `on_update` — runs synchronously on the receiver's side before the 
+updated body is written to the inbox file.
 
 Arguments:
 - $1: sender name

@@ -4,7 +4,9 @@
 
 Users write hook scripts from inside the rmail app. Scripts react to rmail
 events (on_receive, on_send, on_update, etc.) and can interface with other
-apps on the phone.
+apps on the phone. These scripts are stored on either the desktop or the
+phone, depending on their use - they can interact too by passing arbitrary
+messages between the desktop and the android. [expand on this]
 
 ## Design
 
