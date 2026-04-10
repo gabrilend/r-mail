@@ -117,6 +117,8 @@ Missing or unknown `type` values are rejected with 400.
 
 The daemon checks for outbox/inbox changes on an adaptive timer:
 
+-- should set the default to 5 minutes
+
 - Starts at **5 minutes** (currently set lower for development)
 - Had work: interval **shrinks** (floor: MIN_INTERVAL)
 - No work: interval **grows** (ceiling: MAX_INTERVAL)
@@ -128,4 +130,6 @@ Attachment chunk transfers bypass the sync timer — once a transfer is in
 progress, chunks are sent as fast as the connection allows within a single
 sync pass.
 
-A manual sync can be triggered by creating the file `<mailbox>/.state/sync-now`.
+A sync is triggered automatically when a file is created, modified, or deleted
+in the outbox directory (via Linux inotify). The regular interval-based sync
+still runs as a fallback for incoming messages and other sync operations.

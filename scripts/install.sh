@@ -705,6 +705,29 @@ else
 fi
 
 # ============================================================
+# 6b. rmail_inotify.so (outbox file-change watcher)
+# ============================================================
+
+echo ""
+echo "Checking for rmail_inotify.so..."
+
+install_rmail_inotify() {
+    info "Compiling rmail_inotify.so..."
+    $CC -shared -fPIC -O2 -Wall \
+        $LUA_INC \
+        -o "$LIBS/rmail_inotify.so" \
+        "$ROOT/rmail_inotify.c"
+    cd "$ROOT"
+    ok "done (libs/rmail_inotify.so)"
+}
+
+if [ -f "$LIBS/rmail_inotify.so" ] && ! $FORCE; then
+    ok "found in libs/rmail_inotify.so"
+else
+    install_rmail_inotify
+fi
+
+# ============================================================
 # 7. NAT traversal tools (optional, for auto_port_forward)
 # ============================================================
 
@@ -1159,6 +1182,7 @@ echo "  libs/dkjson.lua        — JSON library"
 echo "  libs/socket/core.so    — luasocket"
 echo "  libs/mime/core.so      — luasocket mime"
 echo "  libs/rmail_crypto.so   — AES-256-GCM encryption"
+echo "  libs/rmail_inotify.so  — outbox file-change watcher"
 echo ""
 echo "AES-256-GCM encryption is active — no configuration needed."
 if $NAT_INSECURE; then

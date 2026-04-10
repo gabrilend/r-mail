@@ -229,6 +229,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveOutboxFile(filename: String, content: String) {
         store?.writeOutbox(filename, content)
         refreshLocal()
+        triggerSync()
     }
 
     fun newOutboxFilename(): String {

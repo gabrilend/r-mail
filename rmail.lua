@@ -117,6 +117,8 @@ local DEPS_REGISTRY = {
                  description = "AES-256-GCM encryption via rmail_crypto.so"},
     dkjson    = {min = "2.5",   max = "2.8",   default = "2.8",   required = true,
                  description = "JSON encoding/decoding"},
+    inotify   = {min = "1.0",   max = "1.0",   default = "1.0",   required = true,
+                 description = "outbox file-change watcher (Linux inotify)"},
     miniupnpc = {min = "2.0",   max = "2.3.3", default = "2.3.3", required = false,
                  description = "UPnP port forwarding (optional)"},
     libnatpmp = {min = "0.0.1", max = "latest", default = "latest", required = false,
@@ -200,6 +202,18 @@ local function file_exists(path)
     local f = io.open(path, "r")
     if f then f:close(); return true end
     return false
+end
+
+local inotify = require("rmail_inotify")
+
+local function start_outbox_watcher(outbox_dir)
+    local fd = inotify.init()
+    if not fd then error("inotify_init failed") end
+    local mask = inotify.IN_CLOSE_WRITE + inotify.IN_CREATE +
+                 inotify.IN_DELETE + inotify.IN_MOVED_TO
+    local wd = inotify.add_watch(fd, outbox_dir, mask)
+    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. outbox_dir) end
+    return fd
 end
 
 local function list_files(dir)
@@ -3701,11 +3715,16 @@ local function init_runtime()
         max_interval = 30,   -- TODO: increase for production
         last_sync    = socket.gettime(),
         lan = { udp = nil, peers = {}, discovery_sent = {} },
+        outbox_inotify_fd = nil,
     }
 
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
     log("AES-256-GCM encryption enabled")
+
+    -- Watch outbox for file changes — triggers immediate sync via inotify
+    rt.outbox_inotify_fd = start_outbox_watcher(OUTBOX)
+    log("outbox inotify watcher active (fd %d)", rt.outbox_inotify_fd)
 
     pcall(nat.cleanup_old_mapping)
     pcall(nat.security_check, rt.my_name)
@@ -3968,16 +3987,19 @@ local function main()
         pcall(poll_udp_cycle, rt)
 
         -- Sync cycle (runs inline, not as a coroutine — simpler state management)
-        if file_exists(STATE .. "/sync-now") then
-            os.remove(STATE .. "/sync-now")
+        local outbox_events = inotify.read(rt.outbox_inotify_fd)
+        if outbox_events then
             rt.last_sync = 0
-            log("manual sync triggered")
+            log("outbox change detected, syncing")
         end
         if now - rt.last_sync >= rt.interval then
             rt.lan.discovery_sent = {}
             local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
             rt.last_sync = now
+            -- Drain any inotify events caused by the sync cycle itself
+            -- (e.g. removing recipients from delivered files) to avoid a feedback loop
+            inotify.read(rt.outbox_inotify_fd)
         end
 
         -- NAT renewal
