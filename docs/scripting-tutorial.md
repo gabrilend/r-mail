@@ -152,6 +152,10 @@ If the script prints nothing for a given recipient, the body is sent unchanged.
 
 ### Read arbitrary contact fields
 
+The `scripts/rfield.sh` helper reads contact fields by name (see
+[Reading contact data in hooks](#reading-contact-data-in-hooks) below for
+details). You can also use grep directly:
+
 If you store extra data in the contacts file (like `alice.phone = "555-1234"`),
 you can read it inside a hook using grep. This works in any hook — here shown
 in `on_send` to look up the recipient:
@@ -306,9 +310,14 @@ causes rmail to log a warning and keep the original body unchanged.
 
 ## Tips
 
-- Hook scripts must be **executable** (`chmod +x`). Lua and C scripts need this
-  too even though they're not shell scripts — the OS needs permission to execute
-  them.
+- Hook scripts must be **executable** (`chmod +x`).
+- For C hooks, compile the source and point the config at the **binary**, not
+  the `.c` file. For example:
+  ```sh
+  cc -O2 -o ~/.config/rmail/hooks/wrap ~/.config/rmail/hooks/wrap.c
+  ```
+  Then in config: `on_receive_raw = ~/.config/rmail/hooks/wrap`. Recompile
+  after editing the source.
 - For `on_receive_raw` and `on_send`, printing nothing or exiting non-zero
   preserves the original body. Your script does not need to handle every case —
   just print nothing to pass the message through unchanged.

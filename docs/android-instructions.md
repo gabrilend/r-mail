@@ -30,8 +30,8 @@ Before setting up the Android app, you need:
 
 1. **A working rmail daemon** on a home computer. Follow the main
    [README](../README.md) to install and configure it.
-2. **Your home computer's public IP address.** You can find this by running any
-   of these commands on the home computer:
+2. **The public IP address of the router which the working rmail daemon is connected to.** 
+   You can find this by running any of these commands on the home computer:
    ```
    curl -s ifconfig.me
    curl -s icanhazip.com
@@ -63,17 +63,13 @@ and install it over USB.
 
 - A computer with **Git** and **Java 17+** installed (the Android build tool
   needs Java).
-
--- you can install these dependencies by running the install script with the --android-deps flag.
-   todo...
-
 - An **Android phone** with USB debugging enabled.
 - A **USB cable** to connect the phone to the computer.
 
 ### Enable USB debugging on your phone
 
 1. Open **Settings > About phone**.
-2. Tap **Build number** seven times. You'll see "You are now a developer."
+2. Tap **Build number** seven times. You'll see "You are now a developer." Congratulations.
 3. Go back to **Settings > System > Developer options** (location varies by
    phone manufacturer — search "developer" in Settings if you can't find it).
 4. Enable **USB debugging**.
@@ -179,11 +175,14 @@ The first screen shows your configured mailboxes. Tap one to open it.
 
 ### Inbox / Outbox / Files
 
-The main screen has three tabs at the bottom:
+The main screen has two rows of tabs at the bottom:
 
 - **Inbox** — messages you've received.
 - **Outbox** — messages you've sent (or are sending).
-- **Files** — attachments on your home server. Tap to download to your android.
+- **Files** — attachments on your home server. Tap to download to your phone.
+- **Contacts** — view and edit your contacts file.
+- **Settings** — connection and sync settings.
+- **Write** — compose a new message.
 
 The top bar has:
 

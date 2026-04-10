@@ -64,7 +64,7 @@ checks again on the next sync cycle. You can leave it for as long as you like.
 
 The `Expected size` is the original uncompressed size, as reported by the
 sender. rmail is a trust-based system — the value is not independently
-verified before transfer.
+verified before transfer. See issue #327 for planned size enforcement.
 
 ### After your decision
 
@@ -181,5 +181,7 @@ each key explaining it.
 ### Message body size limit
 
 Message bodies (the text in your outbox file, below the headers) are capped at
-128 KB. If you try to send a larger body, the daemon writes an error to your
-inbox and won't retry that message. Use an `attach:` line instead.
+128 KB. At 80 characters per line, that's roughly 1,600 lines of text — more
+than enough for any normal message. If you somehow exceed it, the daemon writes
+an error to your inbox and won't retry that message. Use an `attach:` line
+instead for large content.

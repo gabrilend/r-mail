@@ -115,13 +115,13 @@ Missing or unknown `type` values are rejected with 400.
 
 ## Sync timing
 
-The daemon checks for outbox/inbox changes on an adaptive timer:
+The daemon checks for inbox changes on an adaptive timer:
 
--- should set the default to 5 minutes
-
-- Starts at **5 minutes** (currently set lower for development)
+- Starts at **5 minutes**
 - Had work: interval **shrinks** (floor: MIN_INTERVAL)
 - No work: interval **grows** (ceiling: MAX_INTERVAL)
+
+Outbox changes are detected immediately via Linux inotify — no timer needed.
 
 This means the daemon is responsive when you're actively messaging and backs
 off when idle.
@@ -130,6 +130,5 @@ Attachment chunk transfers bypass the sync timer — once a transfer is in
 progress, chunks are sent as fast as the connection allows within a single
 sync pass.
 
-A sync is triggered automatically when a file is created, modified, or deleted
-in the outbox directory (via Linux inotify). The regular interval-based sync
-still runs as a fallback for incoming messages and other sync operations.
+A sync is also triggered automatically when a file is created, modified, or
+deleted in the outbox directory (via Linux inotify).
