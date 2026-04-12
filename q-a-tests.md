@@ -28,6 +28,17 @@ jump around.
 - [ ] `rfield.sh` exists in `helpers/`
 - [ ] Docs and scripting tutorial reference the helpers/ location
 
+### rto / rattach helpers (#330, #331)
+- [ ] `rto.sh <file> <recipient>...` inserts `to:` lines after the existing header block
+- [ ] `rattach.sh <file> <path>...` inserts `attach:` lines after the existing header block
+- [ ] Empty/non-existent target file: helpers create it with just the new header lines
+- [ ] Existing `to:`/`attach:` ordering is preserved (new lines appended to block, not prepended)
+
+### raccept / rdeny helpers (#332)
+- [ ] `raccept.sh <consent-file>` leaves only the `accept` line in the consent file
+- [ ] `rdeny.sh <consent-file>` leaves only the `deny` line in the consent file
+- [ ] Daemon's `check_consent_pending()` acts on the resulting single-decision file
+
 ## 3. Sending messages (daemon outbox)
 
 ### Outbox file watching (inotify)
