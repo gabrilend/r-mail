@@ -147,27 +147,6 @@ missing fields cleanly.
 
 ---
 
-## shared.lua — bi-directional shared files
-
-`on_update` hook that mirrors living message edits into your outbox so two
-users can collaborate on the same file. Configure in `~/.config/rmail/config`:
-
-```
-on_update = /path/to/helpers/shared.lua
-```
-
-When a remote edit arrives, the hook passes the body through to stdout (so
-the inbox write proceeds normally) and mirrors it to the matching outbox file.
-Auto-creates the outbox file on first update with `to: <sender>`. Both users
-should edit their outbox copy — that's the file with the `to:` header, and
-the one the daemon watches for changes.
-
-Loop prevention: the hook only writes when the body has actually changed.
-The daemon's body checksum check is the second safety net — identical
-content never generates network traffic.
-
----
-
 ## checksum.sh — SHA-256 hash of a file
 
 ```

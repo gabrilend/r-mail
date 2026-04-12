@@ -9,15 +9,29 @@ on_receive     = /path/to/script.sh
 on_package     = /path/to/script.sh
 on_send        = /path/to/script.sh
 on_delete      = /path/to/script.sh
+on_update      = /path/to/script.sh
 ```
+
+## Table of contents
+
+- [Hook interface](#hook-interface)
+- [Examples](#examples) — ordered from simplest to most involved
+  - [Desktop notification on new message](#desktop-notification-on-new-message)
+  - [Wrap incoming messages to 80 columns](#wrap-incoming-messages-to-80-columns)
+  - [Prepend a disclaimer for a specific recipient](#prepend-a-disclaimer-for-a-specific-recipient)
+  - [Read contact fields in a hook](#read-contact-fields-in-a-hook)
+- [Using other languages](#using-other-languages)
+  - [Lua](#lua)
+  - [C](#c)
+- [Tips](#tips)
 
 ---
 
 ## Hook interface
 
 Each hook is a path to an executable. rmail calls it with shell arguments.
-For `on_receive_raw` and `on_send`, stdout is read back and replaces the
-message body. For all others, stdout is ignored.
+For `on_receive_raw`, `on_send`, and `on_update`, stdout is read back and
+replaces the message body. For all others, stdout is ignored.
 
 | Hook            | `$1`       | `$2`       | `$3`                  | stdout        |
 |-----------------|------------|------------|-----------------------|---------------|
@@ -25,6 +39,7 @@ message body. For all others, stdout is ignored.
 | `on_receive`    | sender     | subject    | path to inbox file    | ignored       |
 | `on_send`       | recipient  | subject    | message body          | replaces body |
 | `on_delete`     | other party| —          | —                     | ignored       |
+| `on_update`     | sender     | inbox path | new message body      | replaces body |
 | `on_package`    | sender     | filename   | path to saved file    | ignored       |
 
 **on_receive_raw** fires before the message is written to disk. Whatever your
@@ -44,11 +59,19 @@ you don't need to block delivery and can't transform the message anyway.
 Each call is independent — `$3` is the body as it will be sent to `$1`, and
 stdout replaces it for that recipient only. rmail calls the hook separately
 for each recipient with fresh arguments, so each transformation is isolated.
-Also synchronous.
+Also synchronous. Printing nothing passes the body through unchanged.
 
 **on_delete** fires when a message is deleted from either inbox or outbox. `$1`
 is the name of the other party — the sender for inbox deletions, the recipient
 for outbox deletions.
+
+**on_update** fires when a living message is updated — that is, when the sender
+edits an outbox file and the new body arrives at your end. `$2` is the path to
+the existing inbox file (still holding the old content), `$3` is the new body.
+Whatever your script prints to stdout becomes the body that gets saved, just
+like `on_receive_raw`. Synchronous. If no `on_update` hook is configured, the
+update is applied directly. Use it for diff logging or edit rejection (print
+the old body to reject an update).
 
 **on_package** fires after a received attachment is fully assembled and saved.
 `$1` is the sender's name, `$2` is the filename (useful for filetype detection),
@@ -56,7 +79,29 @@ for outbox deletions.
 
 ---
 
-## Bash examples
+## Examples
+
+Examples below use shell scripts for simplicity. Any executable works as a
+hook — see [Using other languages](#using-other-languages) for Lua and C.
+
+### Desktop notification on new message
+
+Uses `on_receive` — fires after the message is saved. About as simple as a
+hook gets: one `notify-send` call.
+
+```sh
+#!/bin/sh
+# ~/.config/rmail/hooks/notify.sh
+from="$1"
+subject="$2"
+# $3 is the inbox file path, not needed here
+
+notify-send "rmail" "New message from ${from}: ${subject}"
+```
+
+```
+on_receive = ~/.config/rmail/hooks/notify.sh
+```
 
 ### Wrap incoming messages to 80 columns
 
@@ -79,52 +124,6 @@ on_receive_raw = ~/.config/rmail/hooks/wrap.sh
 `fold -s` breaks on word boundaries. The wrapped text goes to stdout, which
 rmail saves as the message body. `$from` and `$subject` are available if you
 want to apply per-sender or per-subject rules.
-
-### Tally deleted messages per contact
-
-Uses `on_delete`.
-
-```sh
-#!/bin/sh
-# ~/.config/rmail/hooks/tally.sh
-contact="$1"
-tally_file="${HOME}/mail/.tally"
-
-# one pipe character per deletion: "alice: ||||"
-if grep -q "^${contact}:" "$tally_file" 2>/dev/null; then
-    sed -i "s/^${contact}: /&|/" "$tally_file"
-else
-    printf '%s: |\n' "$contact" >> "$tally_file"
-fi
-```
-
-```
-on_delete = ~/.config/rmail/hooks/tally.sh
-```
-
-Result in `~/mail/.tally`:
-```
-alice: ||||
-bob: ||
-```
-
-### Desktop notification on new message
-
-Uses `on_receive` — fires after the message is saved.
-
-```sh
-#!/bin/sh
-# ~/.config/rmail/hooks/notify.sh
-from="$1"
-subject="$2"
-# $3 is the inbox file path, not needed here
-
-notify-send "rmail" "New message from ${from}: ${subject}"
-```
-
-```
-on_receive = ~/.config/rmail/hooks/notify.sh
-```
 
 ### Prepend a disclaimer for a specific recipient
 
@@ -150,43 +149,86 @@ on_send = ~/.config/rmail/hooks/disclaimer.sh
 
 If the script prints nothing for a given recipient, the body is sent unchanged.
 
-### Read arbitrary contact fields
+### Read contact fields in a hook
 
-The `scripts/rfield.sh` helper reads contact fields by name (see
-[Reading contact data in hooks](#reading-contact-data-in-hooks) below for
-details). You can also use grep directly:
-
-If you store extra data in the contacts file (like `alice.phone = "555-1234"`),
-you can read it inside a hook using grep. This works in any hook — here shown
-in `on_send` to look up the recipient:
+Use `scripts/rfield.sh` to read arbitrary contact fields — see the
+[helper scripts](helper-scripts.md#rfieldsh--read-a-contact-field) reference.
+Here's a quick example in `on_send`:
 
 ```sh
 #!/bin/sh
 recipient="$1"
 subject="$2"
 body="$3"
-contacts="${HOME}/mail/contacts"
 
-phone=$(grep "^${recipient}\.phone" "$contacts" | sed 's/.*= *//' | tr -d '"')
-
-# do something with $phone, e.g. log it or include in body
-printf '%s\n\ncc: %s' "$body" "$phone"
+phone=$(scripts/rfield.sh "$recipient" phone 2>/dev/null)
+if [ -n "$phone" ]; then
+    printf '%s\n\ncc: %s' "$body" "$phone"
+else
+    printf '%s' "$body"
+fi
 ```
+
+Contact fields are arbitrary — store `phone`, `notify`, `nickname`, whatever
+you need alongside the required `ip`/`port`/`token`, and hooks can read them.
 
 ---
 
-## Lua examples
+## Using other languages
 
-Any executable works as a hook — not just shell scripts. For Lua:
+Any executable works as a hook. rmail doesn't care what language it's in —
+just that `chmod +x` succeeds and the file has a valid shebang. Below are
+the same kinds of examples in Lua and C.
+
+### Lua
+
+Point the shebang at rmail's bundled Lua interpreter — it's guaranteed to
+match the version rmail itself uses, and it's available on any machine
+where rmail is installed:
 
 ```lua
-#!/usr/bin/env lua
--- ~/.config/rmail/hooks/wrap.lua
--- Wrap incoming message body to 80 columns.
+#!/home/you/programs/email/deps/lua/bin/lua
+```
 
-local from    = arg[1]   -- sender name
-local subject = arg[2]   -- message subject
-local body    = arg[3]   -- message body text
+If your install doesn't bundle Lua (the install script only compiles one when
+no system Lua is detected), use `#!/usr/bin/env lua` instead; any Lua 5.1+
+or LuaJIT works.
+
+**Receiving data:** arguments map to `arg[1]`, `arg[2]`, `arg[3]` exactly as
+shown in the [interface table](#hook-interface). For hooks where `$3` is a
+file path (`on_receive`), read the file with `io.open(arg[3], "r")`.
+
+**Returning data:** write to stdout with `io.write()`. Prefer `io.write()`
+over `print()` for body-replacement hooks — `print()` appends a newline that
+will appear at the end of the saved message.
+
+#### Log received messages to a file
+
+```lua
+#!/home/you/programs/email/deps/lua/bin/lua
+local from    = arg[1]
+local subject = arg[2]
+local path    = arg[3]   -- path to saved inbox file
+
+local log = io.open(os.getenv("HOME") .. "/mail/.log", "a")
+if log then
+    log:write(os.date("%Y-%m-%d %H:%M") .. "  from=" .. from ..
+              "  subject=" .. subject .. "  file=" .. path .. "\n")
+    log:close()
+end
+```
+
+```
+on_receive = /home/you/.config/rmail/hooks/log.lua
+```
+
+#### Wrap incoming messages to 80 columns (Lua version)
+
+```lua
+#!/home/you/programs/email/deps/lua/bin/lua
+local from    = arg[1]
+local subject = arg[2]
+local body    = arg[3]
 
 local function wrap(text, width)
     local result = {}
@@ -204,43 +246,7 @@ end
 io.write(wrap(body, 80))
 ```
 
-```
-on_receive_raw = /home/you/.config/rmail/hooks/wrap.lua
-```
-
-**Receiving data:** arguments map to `arg[1]`, `arg[2]`, `arg[3]` exactly as
-shown in the interface table above. For hooks where `$3` is a file path
-(`on_receive`), read the file with `io.open(arg[3], "r")`.
-
-**Returning data:** write to stdout with `io.write()`. Prefer `io.write()` over
-`print()` for body-replacement hooks — `print()` appends a newline that will
-appear at the end of the saved message.
-
-### Lua example: log received messages to a file
-
-Uses `on_receive` — fires after the message lands on disk.
-
-```lua
-#!/usr/bin/env lua
-local from    = arg[1]
-local subject = arg[2]
-local path    = arg[3]   -- path to saved inbox file
-
-local log = io.open(os.getenv("HOME") .. "/mail/.log", "a")
-if log then
-    log:write(os.date("%Y-%m-%d %H:%M") .. "  from=" .. from ..
-              "  subject=" .. subject .. "  file=" .. path .. "\n")
-    log:close()
-end
-```
-
-```
-on_receive = /home/you/.config/rmail/hooks/log.lua
-```
-
----
-
-## C examples
+### C
 
 Compile a C program and point the config at the binary.
 
@@ -311,66 +317,18 @@ causes rmail to log a warning and keep the original body unchanged.
 ## Tips
 
 - Hook scripts must be **executable** (`chmod +x`).
-- For C hooks, compile the source and point the config at the **binary**, not
-  the `.c` file. For example:
+- For compiled languages, point the config at the **binary**, not the source.
+  For C:
   ```sh
   cc -O2 -o ~/.config/rmail/hooks/wrap ~/.config/rmail/hooks/wrap.c
   ```
   Then in config: `on_receive_raw = ~/.config/rmail/hooks/wrap`. Recompile
   after editing the source.
-- For `on_receive_raw` and `on_send`, printing nothing or exiting non-zero
-  preserves the original body. Your script does not need to handle every case —
-  just print nothing to pass the message through unchanged.
-- `on_receive_raw` and `on_send` are synchronous — rmail waits for them. Keep
-  them fast. `on_receive` and `on_package` run in the background so they can
-  take as long as they need.
 - Message bodies are capped at 128 KB. Larger content must be sent as an
-  attachment. This keeps `$3` in `on_receive_raw` and `on_send` a manageable
+  attachment — this keeps `$3` in `on_receive_raw` and `on_send` a manageable
   size that won't hit OS argument length limits.
-- Arbitrary contact fields (`ip`, `port`, `token`, plus anything you add) are
-  stored in `~/mail/contacts` but not passed to hooks automatically. Read them
-  with `scripts/rfield.sh` or directly with grep, as shown in the examples above.
-
----
-
-## Reading contact data in hooks
-
-Contacts can store arbitrary fields alongside the required `ip`, `port`, and `token`:
-
-```
-alice.ip    = 203.0.113.1
-alice.port  = 8025
-alice.token = "shared-secret"
-alice.phone = "555-1234"
-alice.notify = "email@example.com"
-```
-
-The `scripts/rfield.sh` utility reads these fields by name:
-
-```sh
-rfield alice phone     # → 555-1234
-rfield alice notify    # → email@example.com
-```
-
-This is useful in hooks. For example, an `on_receive` hook that sends an SMS notification:
-
-```sh
-#!/bin/sh
-# on_receive hook: send SMS when a message arrives
-sender="$1"
-subject="$2"
-
-phone=$(rfield "$sender" phone 2>/dev/null)
-if [ -n "$phone" ]; then
-    # replace this with your SMS provider's CLI
-    sms-send "$phone" "New message from $sender: $subject"
-fi
-```
-
-Configure it in `~/.config/rmail/config`:
-
-```
-on_receive = /path/to/notify-sms.sh
-```
-
-rfield exits 0 and prints the value if the field exists, or exits 1 silently if it doesn't — so wrapping it in an `if` or checking for empty output handles missing fields cleanly.
+- The `helpers/` directory handles common tasks you'd otherwise reimplement
+  in every hook: adding recipients, inserting attachments, accepting/denying
+  package requests, reading contact fields. Most hook scripts end up calling
+  one or two of them — see the [helper scripts](helper-scripts.md) reference
+  for what's available.
