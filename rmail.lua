@@ -206,14 +206,29 @@ end
 
 local inotify = require("rmail_inotify")
 
-local function start_outbox_watcher(outbox_dir)
+local function inotify_wrap(fd)
+    return setmetatable({}, {
+        __index = { getfd = function() return fd end }
+    })
+end
+
+local function start_dir_watcher(path)
     local fd = inotify.init()
     if not fd then error("inotify_init failed") end
     local mask = inotify.IN_CLOSE_WRITE + inotify.IN_CREATE +
                  inotify.IN_DELETE + inotify.IN_MOVED_TO
-    local wd = inotify.add_watch(fd, outbox_dir, mask)
-    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. outbox_dir) end
-    return fd
+    local wd = inotify.add_watch(fd, path, mask)
+    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. path) end
+    return fd, inotify_wrap(fd)
+end
+
+local function start_file_watcher(path)
+    local fd = inotify.init()
+    if not fd then error("inotify_init failed") end
+    local mask = inotify.IN_CLOSE_WRITE + inotify.IN_MODIFY
+    local wd = inotify.add_watch(fd, path, mask)
+    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. path) end
+    return fd, inotify_wrap(fd)
 end
 
 local function list_files(dir)
@@ -3722,9 +3737,11 @@ local function init_runtime()
     log("mail dir: %s", MAIL)
     log("AES-256-GCM encryption enabled")
 
-    -- Watch outbox for file changes — triggers immediate sync via inotify
-    rt.outbox_inotify_fd = start_outbox_watcher(OUTBOX)
+    -- Watch outbox and contacts for changes — triggers immediate sync via inotify
+    rt.outbox_inotify_fd, rt.outbox_inotify_sock = start_dir_watcher(OUTBOX)
     log("outbox inotify watcher active (fd %d)", rt.outbox_inotify_fd)
+    rt.contacts_inotify_fd, rt.contacts_inotify_sock = start_file_watcher(CONTACTS)
+    log("contacts inotify watcher active (fd %d)", rt.contacts_inotify_fd)
 
     pcall(nat.cleanup_old_mapping)
     pcall(nat.security_check, rt.my_name)
@@ -3905,8 +3922,9 @@ local function main()
     end
 
     while true do
-        -- Build socket lists for select
-        local recvt = {rt.server}
+        -- Build socket lists for select — includes inotify fd so the kernel
+        -- wakes us on outbox file changes without polling
+        local recvt = {rt.server, rt.outbox_inotify_sock, rt.contacts_inotify_sock}
         if rt.server6 then recvt[#recvt + 1] = rt.server6 end
         local sendt = {}
         for raw_sock, info in pairs(clients) do
@@ -3917,15 +3935,26 @@ local function main()
             end
         end
 
+        -- Sleep until: a socket has data, an outbox file changes, or it's
+        -- time for the next sync cycle.  No wasted wakeups.
+        local time_to_sync = math.max(0, rt.interval - (socket.gettime() - rt.last_sync))
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
-            0.5)
+            time_to_sync)
 
         -- Handle readable sockets
+        local outbox_changed = false
+        local contacts_changed = false
         if readable then
             for _, sock in ipairs(readable) do
-                if sock == rt.server or sock == rt.server6 then
+                if sock == rt.outbox_inotify_sock then
+                    inotify.read(rt.outbox_inotify_fd)
+                    outbox_changed = true
+                elseif sock == rt.contacts_inotify_sock then
+                    inotify.read(rt.contacts_inotify_fd)
+                    contacts_changed = true
+                elseif sock == rt.server or sock == rt.server6 then
                     local raw_client = sock:accept()
                     if raw_client then
                         local async_client = make_async_socket(raw_client)
@@ -3974,41 +4003,42 @@ local function main()
             end
         end
 
-        -- Clean up stale connections (idle > 30s)
+        -- Sync cycle: runs on outbox/contacts change OR when the interval expires
         local now = socket.gettime()
-        for raw_sock, info in pairs(clients) do
-            if now - info.last_activity > 30 then
-                pcall(function() raw_sock:close() end)
-                clients[raw_sock] = nil
-            end
+        if contacts_changed then
+            log("contacts file changed, re-aligning and syncing")
+            align_contacts()
+            -- Drain inotify events from our own align_contacts() write
+            inotify.read(rt.contacts_inotify_fd)
         end
-
-        -- UDP discovery (non-blocking)
-        pcall(poll_udp_cycle, rt)
-
-        -- Sync cycle (runs inline, not as a coroutine — simpler state management)
-        local outbox_events = inotify.read(rt.outbox_inotify_fd)
-        if outbox_events then
-            rt.last_sync = 0
+        if outbox_changed then
             log("outbox change detected, syncing")
         end
-        if now - rt.last_sync >= rt.interval then
+        if outbox_changed or contacts_changed or now - rt.last_sync >= rt.interval then
+            for raw_sock, info in pairs(clients) do
+                if now - info.last_activity > 30 then
+                    pcall(function() raw_sock:close() end)
+                    clients[raw_sock] = nil
+                end
+            end
+
             rt.lan.discovery_sent = {}
+            pcall(poll_udp_cycle, rt)
             local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
             rt.last_sync = now
-            -- Drain any inotify events caused by the sync cycle itself
-            -- (e.g. removing recipients from delivered files) to avoid a feedback loop
-            inotify.read(rt.outbox_inotify_fd)
-        end
 
-        -- NAT renewal
-        if rt.nat_mapping then
-            if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
-                local ok_r, res = pcall(nat.create_mapping, rt.port)
-                if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
-                rt.nat_mapping.last_renewed = now
+            if rt.nat_mapping then
+                if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
+                    local ok_r, res = pcall(nat.create_mapping, rt.port)
+                    if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
+                    rt.nat_mapping.last_renewed = now
+                end
             end
+
+            -- Drain any inotify events caused by the sync cycle itself
+            inotify.read(rt.outbox_inotify_fd)
+            inotify.read(rt.contacts_inotify_fd)
         end
     end
 end
