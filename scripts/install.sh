@@ -1172,6 +1172,47 @@ SERVICE
 fi
 
 # ============================================================
+# Generate docs from templates
+# ============================================================
+# docs/.templates/ holds the source-of-truth .md files with placeholder
+# paths.  Here we substitute real install paths and write the resulting
+# files to docs/, then remove the signpost file.  See
+# issues/350-docs-templates-and-install-time-generation.md.
+
+generate_docs() {
+    local templates_dir="$ROOT/docs/.templates"
+    local out_dir="$ROOT/docs"
+
+    [ -d "$templates_dir" ] || return 0
+
+    # Lua shebang target: bundled interpreter if it exists, system lua otherwise
+    local lua_shebang
+    if [ -x "$ROOT/deps/lua/bin/lua" ]; then
+        lua_shebang="$ROOT/deps/lua/bin/lua"
+    else
+        lua_shebang="/usr/bin/env lua"
+    fi
+
+    for tmpl in "$templates_dir"/*.md; do
+        [ -f "$tmpl" ] || continue
+        local name
+        name=$(basename "$tmpl")
+        sed \
+            -e "s|/home/you/programs/email/deps/lua/bin/lua|$lua_shebang|g" \
+            -e "s|/home/you/programs/email|$ROOT|g" \
+            -e "s|/home/you/.config/rmail|$CONFIG_DIR|g" \
+            -e "s|/home/you/mail|$MAIL_DIR|g" \
+            "$tmpl" > "$out_dir/$name"
+    done
+
+    # Remove the signpost file — real docs now exist
+    rm -f "$out_dir/looking-for-docs.md"
+}
+
+generate_docs
+ok "generated docs/ from docs/.templates/"
+
+# ============================================================
 # Summary
 # ============================================================
 

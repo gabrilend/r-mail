@@ -22,3 +22,7 @@ clients/android/local.properties
 clients/android/.gradle/
 clients/android/app/build/
 clients/android/build/
+
+# Generated docs (source of truth is docs/.templates/)
+docs/*.md
+!docs/looking-for-docs.md
