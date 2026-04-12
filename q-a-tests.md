@@ -115,6 +115,12 @@ jump around.
 - [ ] Hostname resolution cached ~5 minutes
 - [ ] LAN peer cache resolves hostnames before comparing IPs
 
+### Multiple IPs per contact (#347)
+- [ ] Contact with multiple `ip` lines: daemon tries each in order until one connects
+- [ ] Scattered `ip` entries for the same contact are grouped together on config load
+- [ ] Single `ip` field accepts IPv4, IPv6, and DNS hostname — type detected automatically
+- [ ] Stretch: successful non-first `ip` is promoted to the top of that contact's block
+
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4
 

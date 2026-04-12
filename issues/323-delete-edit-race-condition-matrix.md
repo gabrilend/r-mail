@@ -19,6 +19,10 @@ Columns = sender-side events/hooks (send, delete, update, etc.)
 Trace each interaction through the system to validate the behavior.
 Document which combinations are handled correctly and which need fixes.
 
+Record findings directly in this file. Do not mark this issue complete
+until every problematic combination has either been split into its own
+issue or explicitly closed as "not a problem".
+
 ## Source
 
 From `unsorted-issue-2`.

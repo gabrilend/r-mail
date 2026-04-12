@@ -11,7 +11,9 @@ messages for one offline contact).
 
 1. **Connection pre-check**: Before running operations, attempt to connect
    to each contact. If the connection fails, skip all operations for that
-   contact (single log line instead of N).
+   contact. Collect all unreachable contacts into a single log line per
+   cycle, e.g. `unreachable contacts: alice, bob, marty, kyle`.
+
 2. **Batch operations**: If connection succeeds, queue all pending
    operations for that contact and run them sequentially over the same
    connection.
@@ -25,6 +27,12 @@ messages for one offline contact).
   contact is reachable.
 - Successful packets should be padded to approximately match decoy size,
   with ~20% variability.
+
+Implement both of these as opt-in hook scripts / helpers rather than
+config switches. A config switch applies to the whole mailbox, but a
+hook can be scoped per-contact, per-time-of-day, or on any other
+criterion the user cares about. Mailbox-wide config options should be
+reserved for things that genuinely must apply uniformly.
 
 ## Source
 

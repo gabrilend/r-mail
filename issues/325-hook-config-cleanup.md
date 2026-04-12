@@ -29,10 +29,12 @@ examples, argument documentation mixed in, duplicate names.
   for separate purposes than to do complex control flow in a single hook.
 
 ### Variable expansion
-- Need to resolve `${RMAIL_DIR}` in config values. Options:
-  - Two-pass config parsing (gather directory first, then substitute)
-  - Shell-style expansion at parse time
-  - Relative paths from config file location
+
+`${RMAIL_DIR}` is known at install time, so the installer substitutes it
+when it writes the initial config file. The daemon itself does no
+variable expansion at parse time — config values are plain, absolute
+paths. Users who later move their install can re-run the installer (or
+edit the paths by hand).
 
 ## Source
 
