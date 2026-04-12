@@ -173,7 +173,7 @@ To find your **local IP** (for router port forwarding):
 ip addr show | grep 'inet '
 ```
 
-To find your **public IP** (what your contacts put in their file):
+To find your router's **public IP** (what your contacts put in their file):
 
 ```sh
 curl -s ifconfig.me           && echo "" || true
@@ -182,7 +182,7 @@ curl -s api.ipify.org         && echo "" || true
 curl -s checkip.amazonaws.com && echo "" || true
 ```
 
-All four should print the same IP. If they agree, that's your public IP.
+All four should print the same IP. If they agree, that's your router's public IP.
 
 ### Opening the firewall
 
@@ -208,6 +208,8 @@ tcp dport 8025 accept
 # iptables
 sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 ```
+
+Note that your router AND your OS must have an open port in their firewalls. There are two firewalls.
 
 To verify that the port is open, run this from a computer on the network:
 
