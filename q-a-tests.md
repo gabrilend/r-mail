@@ -108,6 +108,16 @@ jump around.
 - [ ] Consent/progress file overlaid by a same-named directory: handler treats the transfer as cancelled (expected)
 - [ ] Android attachments API doesn't surface subdirs as attachments
 - [ ] Directory in a watched dir logs a one-line warning the first time it's encountered; subsequent cycles stay silent until daemon restart
+- [ ] Outbox-dir warning tells the user how to send the directory as an attachment (provides an `attach: <path>` hint)
+- [ ] Inbox-dir warning makes clear the daemon didn't create the directory
+- [ ] Attachments-dir warning is generic (user-organised subfolders are legitimate)
+
+### Attachments survive inbox-message deletion (#355)
+- [ ] Sender-initiated delete: inbox file removed, attachments in paths.attachments untouched
+- [ ] User-local delete (sync_inbox detects missing file): attachments untouched, sender still gets /delete notification
+- [ ] Self-delete (`self_delete_from_inbox`): attachments untouched
+- [ ] Android `/api/inbox/delete` from phone: attachments untouched
+- [ ] `on_delete` hook still fires on every delete path
 
 ### Progress files in RAM (#328)
 - [ ] Receiver's progress file stored in tmpfs with symlink from inbox

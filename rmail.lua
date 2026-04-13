@@ -275,11 +275,12 @@ local function list_files(dir)
     -- message would block the delete-notify path in sync_inbox.
     --
     -- Directories found in a watched location are skipped *and*
-    -- logged once per session — the user's intent is unknowable
-    -- (we can't autoroute a directory of unknown recipients as a
-    -- message), but silently ignoring them would leave the user
-    -- wondering why nothing happens.  A log line gives them a
-    -- breadcrumb.
+    -- logged once per session.  The message is tailored by dir: the
+    -- outbox case tells the user how to send the directory as an
+    -- attachment (the most likely intent), the inbox case tells them
+    -- rmail doesn't write directories there, and the attachments
+    -- case just notes we're ignoring it — user-organised subfolders
+    -- under attachments/ are legitimate.
     local files = {}
     local handle = io.popen('ls -1p "' .. dir .. '" 2>/dev/null')
     if handle then
@@ -290,8 +291,21 @@ local function list_files(dir)
                     local key = dir .. "/" .. real
                     if not _listed_dir_warned[key] then
                         _listed_dir_warned[key] = true
-                        log("ignoring directory in %s: %s (rmail only " ..
-                            "processes regular files here)", dir, real)
+                        local abs = dir .. "/" .. real
+                        if OUTBOX and dir == OUTBOX then
+                            log("ignoring directory %s in outbox — rmail " ..
+                                "sends regular files.  To send the directory " ..
+                                "as an attachment, create a new outbox " ..
+                                "message with a line like:", abs)
+                            log("    attach: %s", abs)
+                        elseif INBOX and dir == INBOX then
+                            log("ignoring directory %s in inbox — rmail " ..
+                                "doesn't put directories there; your daemon " ..
+                                "didn't create this one", abs)
+                        else
+                            log("ignoring directory %s — rmail only " ..
+                                "processes regular files at this path", abs)
+                        end
                     end
                 else
                     files[#files + 1] = name
@@ -1253,15 +1267,13 @@ local function handle_deliver_update(data, sender)
     return 404, {error = "message not found"}
 end
 
-local function delete_inbox_attachments(meta)
-    if not meta.attachments then return end
-    for aname, ameta in pairs(meta.attachments) do
-        if ameta.path and file_exists(ameta.path) then
-            os.remove(ameta.path)
-            log("deleted attachment: %s", aname)
-        end
-    end
-end
+-- #355: we intentionally do NOT cascade inbox-message deletions into
+-- attachment-file deletions.  Attachments are files the user owns —
+-- deleting a message shouldn't vapourise its PDF or photo.  The
+-- previous helper (delete_inbox_attachments) was removed along with
+-- its four call sites.  If disk cleanup is ever needed we can add a
+-- separate user-invoked tool, but it shouldn't be automatic on
+-- message deletion.
 
 -- delete a zip if no other active transfer still references it
 local function release_zip(chunks, zip_id, compressed_path)
@@ -1380,7 +1392,8 @@ local function handle_delete(data, sender)
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
             end
-            delete_inbox_attachments(meta)
+            -- #355: attachments in paths.attachments intentionally left
+            -- alone; they're user-owned files.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             -- cancel any pending consent or in-progress chunks from this sender for this message
@@ -2741,7 +2754,7 @@ local function self_delete_from_inbox(my_name, message_id)
                 log("self-delete from inbox: %s", filename)
             end
             if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
-            delete_inbox_attachments(meta)
+            -- #355: attachments left in place — user owns them.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             return
@@ -3393,8 +3406,10 @@ local function sync_inbox(my_name)
     for name, meta in pairs(state) do
         if not current[name] then
             if not meta.pending_delete then
-                -- first time: clean up local attachments, mark pending
-                delete_inbox_attachments(meta)
+                -- first time: fire on_delete and mark pending.  #355:
+                -- we don't touch paths.attachments — the user owns
+                -- those files and may want to keep them even though
+                -- they cleared the message from their inbox.
                 if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true
                 did_work = true
@@ -3833,7 +3848,8 @@ local function handle_api_sync(data, caller_name, my_name)
                 if file_exists(INBOX .. "/" .. filename) then
                     os.remove(INBOX .. "/" .. filename)
                 end
-                delete_inbox_attachments(meta)
+                -- #355: attachments stay in paths.attachments; user
+                -- owns them.
                 if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true  -- sync_inbox will notify original sender
                 log("phone deleted inbox: %s (from %s)", filename, meta["from"] or "?")

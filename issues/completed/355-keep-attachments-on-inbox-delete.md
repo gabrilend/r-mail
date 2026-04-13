@@ -51,5 +51,25 @@ the consistency we want.
 
 ## Status
 
-Not started. Tied to a user preference — treat attachments as
-files the user owns, not daemon-managed artifacts.
+Shipped.
+
+- Removed the `delete_inbox_attachments` helper and all four call
+  sites: `handle_delete` (sender-initiated), `self_delete_from_inbox`,
+  `sync_inbox` (user-local delete), and the Android
+  `/api/inbox/delete` handler.
+- All delete paths now leave `paths.attachments` untouched. Deleting
+  an inbox message removes the inbox file + clears the state entry
+  + fires `on_delete` + notifies the sender as before; the
+  accompanying attachment files stay in place.
+- Inline and chunked attachments now behave consistently — neither
+  gets cascaded out on message deletion. Chunked attachments never
+  did (they weren't tracked in `inbox_state.attachments`); inline
+  ones were being deleted and now aren't. The surprising asymmetry
+  is gone.
+
+### Users who want the old behavior
+
+No built-in option. The fix is intentional: the daemon should not
+silently delete user data. A future helper script or CLI command
+could implement "delete message and its attachments" as an explicit
+opt-in action, but it's out of scope for this issue.
