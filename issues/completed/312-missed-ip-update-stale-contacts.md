@@ -26,15 +26,28 @@ If both sides use dynamic DNS, they can always resolve each other's hostname.
 This solves the problem for users who set up DDNS. But it introduces a
 dependency on a third-party DNS provider.
 
-### Retry with exponential backoff
-When a contact is unreachable, keep retrying the IP update at increasing
-intervals. If their server was just temporarily down, this catches them
-when they come back. Doesn't help if their IP also changed.
+### Retry indefinitely (no backoff)
+When a contact is unreachable, keep retrying the IP update at the
+regular sync interval — don't back off over time. Exponential backoff
+is tempting on paper ("be a good network citizen") but wrong for this
+use case: users have legitimate reasons to leave a server off for
+weeks or months (vacation, a laptop they only power on when back in
+town). A backed-off retry schedule could let messages wait hours,
+days, weeks, years before they get through. The retry cost is trivial
+— one packet per sync cycle to each unreachable contact — so just
+keep at it.
 
-Open question: from the retrying side, how do we distinguish "they're
-briefly offline" from "their IP changed and they're now elsewhere"? We
-can't, without another signal. Pragmatically we retry either way — the
-retry is cheap and handles the common case.
+Adjacent idea worth keeping: record a **last-connected timestamp** in
+the contacts file per entry. This is purely advisory for the user
+("haven't heard from alice in 47 days") and a starting point if we
+ever do want to make retry cadence adaptive without being
+user-hostile.
+
+Open question: from the retrying side, we still can't distinguish
+"they're briefly offline" from "their IP changed and they're now
+elsewhere" without another signal. Pragmatically, retry either way —
+the retry is cheap and handles both cases transparently the moment
+the peer does come back.
 
 ### Mutual contact recovery via known third party
 If Alice and Bob lose each other, but both still know Carol, Carol could
@@ -66,13 +79,23 @@ no-central-infrastructure design. Not considered further, even opt-in.
 Users manually share their new IP through another channel (text message,
 phone call, in person). Always works. Not automated.
 
+**This is the only option for the worst case.** Every other
+mechanism above either trades away rmail's privacy/no-infrastructure
+guarantees (Carol, relay) or only partially closes the window (DNS,
+IPv6, indefinite retry). Once both peers have lost each other's
+current address with no DNS fallback and both have changed IPs,
+there's no purely-peer-to-peer rediscovery that preserves the
+design constraints.
+
 ## What we know for sure
 
 - DNS is the cleanest fix for users willing to set it up
-- The retry-on-failure approach should be implemented regardless — it
-  handles the common case (contact was just offline briefly)
-- The "both sides change simultaneously" scenario has no clean peer-to-peer
-  solution without some form of rendezvous
+- Indefinite (non-backoff) retry should be implemented regardless —
+  it handles the common case (contact was just offline briefly,
+  even for a long "briefly")
+- The "both sides change simultaneously and neither uses DNS"
+  scenario has **no clean peer-to-peer solution** within rmail's
+  design constraints; sneakernet is the honest fallback
 
 ## Speculative: rendezvous via in-transit packets
 
@@ -104,5 +127,25 @@ at least the first two questions.
 
 ## Status
 
-Open problem. No known complete fix within rmail's design constraints.
-Collecting ideas.
+Closed as **unsolvable** within rmail's stated constraints.
+
+For the worst-case scenario (both peers change IP while neither is
+reachable, and neither uses DNS), there is no peer-to-peer
+rediscovery that preserves the privacy + no-central-infrastructure
+design. Sneakernet is the honest answer.
+
+What this does *not* mean: the near-common-case is unsolved. The
+other items in this thread are still worth implementing under their
+own issues:
+
+- **DNS hostnames in contacts** — issue #311, already filed.
+- **Indefinite (non-backoff) retry** on `/update-address`
+  — low-risk, small change.  Open a follow-up issue when this
+  moves to implementation.
+- **IPv6 caching and preference** — covered by #304.
+- **Last-connected timestamp in contacts** — adjacent quality-of-
+  life idea; can be a separate issue when someone wants it.
+
+Moved to `completed/` because this issue exists only to capture the
+design exploration for the worst case, and that exploration is
+done. Partial-mitigation work continues in the issues named above.
