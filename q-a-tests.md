@@ -235,7 +235,10 @@ jump around.
 ### Config writing
 - [ ] Config file written as soon as required fields are collected (name, port, mail dir, …) (#340)
 - [ ] Mail-directory option is present and correct in the generated config (#343)
-- [ ] Config paths are not mangled (no slashes replaced by dashes, no stray backslashes) on Arch (#344)
+- [ ] Re-running install with existing config: `mail` value appears as the `[bracket]` default (#343)
+- [ ] `set_config_value` appends a missing key and replaces a present one without touching other lines (#343)
+- [ ] Paths containing `|`, `\`, or `&` round-trip through both the config update and the docs-template expansion without mangling (#344)
+- [ ] Config filename is `~/.config/rmail/config-<slug>` where slug is the mail path with `/` → `-` (intentional, not a bug) (#344)
 
 ### Dependencies
 - [ ] Installer prompts before installing project-local luasocket (#342)

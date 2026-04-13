@@ -152,6 +152,41 @@ read_config_value() {
     grep "^${2}[[:space:]]*=" "$1" 2>/dev/null | sed 's/^[^=]*=[[:space:]]*//' | head -1
 }
 
+sed_escape_replacement() {
+    # Escape a value for safe use as the replacement side of `sed s|...|VAL|`
+    # — doubles backslashes, escapes | and &.  Without this, a path
+    # containing any of those characters either breaks the sed command or
+    # gets interpreted (backref `&` becomes the matched text; `\n`
+    # becomes a newline).  See #344.
+    printf '%s' "$1" | sed 's/[\\|&]/\\&/g'
+}
+
+set_config_value() {
+    # set_config_value FILE KEY VALUE
+    # Replaces the line "KEY = ..." in FILE with "KEY = VALUE", or appends
+    # it if no such line exists. Done via awk so arbitrary characters in
+    # VALUE (slashes, pipes, ampersands, backslashes) never trip a sed
+    # escape hazard — paths go through verbatim.
+    _file="$1"; _key="$2"; _val="$3"
+    if [ ! -f "$_file" ]; then
+        printf '%s = %s\n' "$_key" "$_val" >> "$_file"
+        return
+    fi
+    _tmp=$(mktemp)
+    awk -v key="$_key" -v val="$_val" '
+        BEGIN { done = 0 }
+        {
+            if (!done && match($0, "^[[:space:]]*" key "[[:space:]]*=") > 0) {
+                printf "%s = %s\n", key, val
+                done = 1
+            } else {
+                print
+            }
+        }
+        END { if (!done) printf "%s = %s\n", key, val }
+    ' "$_file" > "$_tmp" && mv "$_tmp" "$_file"
+}
+
 download() {
     # download URL OUTFILE
     if command -v wget >/dev/null 2>&1; then
@@ -186,9 +221,6 @@ gen_random_port() {
     done
 }
 
-# Mail directory first — everything derives from this
-DEFAULT_MAIL="${HOME}/mail"
-
 # Check for any existing config to pre-fill from (try the old location too)
 _find_existing_config() {
     # try old-style config first for migration
@@ -203,13 +235,25 @@ _find_existing_config() {
 }
 EXISTING_CONFIG=$(_find_existing_config)
 
+# Mail directory default — prefer a stored value from an existing config,
+# fall back to ~/mail.  This makes re-running install.sh show the current
+# mailbox path in the [brackets] instead of resetting to the default.
+DEFAULT_MAIL="${HOME}/mail"
+if [ -n "$EXISTING_CONFIG" ]; then
+    _existing_mail=$(read_config_value "$EXISTING_CONFIG" "mail")
+    [ -n "${_existing_mail:-}" ] && DEFAULT_MAIL="$_existing_mail"
+fi
 
 RMAIL_MAIL=$(ask_value "Mail directory" "$DEFAULT_MAIL")
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed 's|/*$||')  # strip trailing slashes
 MAIL_DIR="$RMAIL_MAIL"
 
-# Derive config filename from mail path: /home/ritz/mail -> config-home-ritz-mail
+# Derive config filename from mail path: /home/ritz/mail -> config-home-ritz-mail.
+# The dash-separated slug is intentional: one config file per mailbox, all
+# parked under ~/.config/rmail/, distinguishable by the original path
+# reflected in the filename.  (Re #344: slashes-to-dashes is this slug, not
+# a path-mangling bug in the config content.)
 CONFIG_SLUG=$(echo "$RMAIL_MAIL" | sed 's|^/||; s|/|-|g')
 CONFIG_FILE="$CONFIG_DIR/config-$CONFIG_SLUG"
 
@@ -263,6 +307,13 @@ name = $RMAIL_NAME
 # port rmail listens on for incoming messages
 port = $RMAIL_PORT
 
+# mailbox directory — where inbox/, outbox/, contacts, and .state/ live.
+# The daemon is currently launched with this path as a command-line
+# argument (see the service file); this field records it so install.sh
+# can pre-fill the prompt on re-run and so external tools have a single
+# source of truth.
+mail = $MAIL_DIR
+
 # extra lua module path — searched before the bundled libs/ directory.
 # use this if you installed luasocket/luasec/dkjson somewhere non-standard.
 # libs = /path/to/lua-libs
@@ -311,8 +362,9 @@ notify_ip_change = true
 CONFIG
     ok "created config: $CONFIG_FILE"
 else
-    sed -i "s|^name = .*|name = $RMAIL_NAME|" "$CONFIG_FILE"
-    sed -i "s|^port = .*|port = $RMAIL_PORT|" "$CONFIG_FILE"
+    set_config_value "$CONFIG_FILE" "name" "$RMAIL_NAME"
+    set_config_value "$CONFIG_FILE" "port" "$RMAIL_PORT"
+    set_config_value "$CONFIG_FILE" "mail" "$MAIL_DIR"
     ok "updated config: $CONFIG_FILE"
 fi
 
@@ -401,7 +453,10 @@ find_lua_system() {
         return 1
     fi
 
-    LUA_VER_STR="$lua_ver"
+    # Extract just "<name> <version>" from the first line of `lua -v`, which
+    # looks like "Lua 5.4.7  Copyright..." or "LuaJIT 2.1.0-beta3 -- Copyright..."
+    # Anything after the copyright blurb is noise for install output.
+    LUA_VER_STR=$(echo "$lua_ver" | awk 'NR==1 {print $1, $2}')
 
     # resolve symlinks to find the real prefix (works on NixOS)
     local real_bin
@@ -468,7 +523,8 @@ compile_lua() {
 if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
     LUA_INC="-I$DEPS/lua/include"
     LUA_LIB="-L$DEPS/lua/lib"
-    ok "found locally compiled: deps/lua/"
+    local_ver=$("$DEPS/lua/bin/lua" -v 2>&1 | awk 'NR==1 {print $1, $2}')
+    ok "found locally compiled: deps/lua/ ($local_ver)"
 elif find_lua_system; then
     ok "found system: $LUA_VER_STR"
     if ask_yn "Compile a local version instead? (recommended for reproducibility)"; then
@@ -1209,15 +1265,23 @@ generate_docs() {
         lua_shebang="/usr/bin/env lua"
     fi
 
+    # Escape replacement values so paths containing `|`, `\`, or `&` don't
+    # break the sed command or get interpreted as backreferences.  See #344.
+    local esc_shebang esc_root esc_cfg esc_mail
+    esc_shebang=$(sed_escape_replacement "$lua_shebang")
+    esc_root=$(sed_escape_replacement "$ROOT")
+    esc_cfg=$(sed_escape_replacement "$CONFIG_DIR")
+    esc_mail=$(sed_escape_replacement "$MAIL_DIR")
+
     for tmpl in "$templates_dir"/*.md; do
         [ -f "$tmpl" ] || continue
         local name
         name=$(basename "$tmpl")
         sed \
-            -e "s|/home/you/programs/email/deps/lua/bin/lua|$lua_shebang|g" \
-            -e "s|/home/you/programs/email|$ROOT|g" \
-            -e "s|/home/you/.config/rmail|$CONFIG_DIR|g" \
-            -e "s|/home/you/mail|$MAIL_DIR|g" \
+            -e "s|/home/you/programs/email/deps/lua/bin/lua|$esc_shebang|g" \
+            -e "s|/home/you/programs/email|$esc_root|g" \
+            -e "s|/home/you/.config/rmail|$esc_cfg|g" \
+            -e "s|/home/you/mail|$esc_mail|g" \
             "$tmpl" > "$out_dir/$name"
     done
 

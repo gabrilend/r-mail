@@ -21,3 +21,19 @@ the default shown in the `[ ]` brackets of the prompt.
 ## Source
 
 From `issues/new-issue-please-sort`.
+
+## Status
+
+Completed.
+- Config template now includes a `mail = <path>` line alongside `name`
+  and `port`.
+- Install-script re-runs read the existing `mail` value and use it as
+  the default shown in the `[brackets]` of the mail-directory prompt.
+- Update path replaced brittle sed substitutions with a new
+  `set_config_value` awk helper that appends the key if missing and
+  rewrites in place otherwise — works for any path content, no escape
+  gymnastics.
+- Daemon still takes the mailbox path from the command line (via the
+  service file). The config `mail` field is a record for tooling and
+  the installer; wiring the daemon to prefer it over argv is a
+  separate piece of work if we want it.
