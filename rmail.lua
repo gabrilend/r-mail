@@ -3006,12 +3006,34 @@ local function sync_inbox(my_name)
     return did_work
 end
 
+-- Services that return the querying client's public IP as plain text when
+-- fetched over HTTP.  Diversity matters: mixing operators and hosting
+-- providers reduces the chance a single outage blocks every service at
+-- once.  All return a bare IPv4 in the response body.
 local IP_SERVICES = {
     {host = "ifconfig.me",            path = "/"},
     {host = "icanhazip.com",          path = "/"},
     {host = "api.ipify.org",          path = "/"},
     {host = "checkip.amazonaws.com",  path = "/"},
+    {host = "ident.me",               path = "/"},
+    {host = "ipecho.net",             path = "/plain"},
+    {host = "ipinfo.io",              path = "/ip"},
+    {host = "api.my-ip.io",           path = "/ip"},
 }
+
+-- Return a shuffled copy of IP_SERVICES.  check_public_ip iterates in
+-- random order so no single service gets pinned as the primary — traffic
+-- spreads across the list and transient failures don't always hit the
+-- same host first.
+local function shuffled_ip_services()
+    local out = {}
+    for i, v in ipairs(IP_SERVICES) do out[i] = v end
+    for i = #out, 2, -1 do
+        local j = math.random(i)
+        out[i], out[j] = out[j], out[i]
+    end
+    return out
+end
 
 local function fetch_public_ip(service)
     local conn = socket.tcp()
@@ -3037,7 +3059,7 @@ local function fetch_public_ip(service)
 end
 
 local function check_public_ip()
-    for _, service in ipairs(IP_SERVICES) do
+    for _, service in ipairs(shuffled_ip_services()) do
         local ip = fetch_public_ip(service)
         if ip then return ip, service end
     end
@@ -3045,7 +3067,7 @@ local function check_public_ip()
 end
 
 local function verify_ip_change(new_ip, used_service)
-    for _, service in ipairs(IP_SERVICES) do
+    for _, service in ipairs(shuffled_ip_services()) do
         if service.host ~= used_service.host then
             local ip = fetch_public_ip(service)
             if ip then return ip == new_ip end
