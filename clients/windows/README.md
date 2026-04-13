@@ -5,6 +5,6 @@ See [docs/thin-client.md](../../docs/thin-client.md) for full setup and usage in
 Quick start:
 
 ```cmd
-install.bat
+install-thin-client-windows.bat
 run.bat --host YOUR_HOME_IP --port 8025 --token YOUR_TOKEN
 ```

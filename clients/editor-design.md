@@ -7,7 +7,8 @@ Written in Lua using direct terminal escape sequences. No curses dependency.
 
 ## Bootstrap
 
-Each client ships as a single `install.sh` script. The script:
+Each client ships as a single `install-thin-client-<platform>.sh` script
+(`install-thin-client-windows.bat` on Windows). The script:
 
 1. Asks the user for home daemon host, port, and device token (interactive
    prompts, skippable via `--host`, `--port`, `--token` flags)
@@ -350,8 +351,8 @@ clients/
     term.lua                <- terminal setup, input parsing, resize
     rmail_term.c            <- raw mode, SIGWINCH (platform-specific C)
   linux/
-    install.sh              <- bootstrap script
-    rmail-client.lua        <- entry point
+    install-thin-client-linux.sh   <- bootstrap script
+    rmail-client.lua               <- entry point
     lib/
       protocol.lua          <- wire protocol (frames, HTTP formatting)
       sync.lua              <- sync cycle (mirrors Android SyncManager)
