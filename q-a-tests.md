@@ -143,11 +143,15 @@ jump around.
 - [ ] All addresses unreachable: final result reports failure (no ok, no status)
 - [ ] `sync_outbox`, `sync_inbox`, consent-response, attachment-cancel, attachment-chunk, and update-address paths all use the fallback wrapper
 
-**Phase 3 (deferred, stretch):**
-- [ ] Successful non-first address is promoted to the top of that contact's block on disk
+**Phase 3 (shipped):**
+- [ ] Fallback win for a non-first address moves that address to the top of the contact's `ip` block on disk
+- [ ] `promote_contact_address` is a no-op when the winner is already first, the contact has fewer than two addresses, the address isn't in the list, or the resulting file text would be unchanged
+- [ ] Non-`ip` fields (port, token, etc.) stay at their original positions after promotion
+- [ ] Subsequent sync cycles after a promotion hit the new first address directly (no more fallback walk)
+- [ ] A malformed contacts file during promotion doesn't crash the sync cycle (pcall guard)
 
 **Per-IP ports (deferred, separate issue):**
-- [ ] Per-address port syntax supported (endpoint-form or parallel list)
+- [ ] Per-address port syntax: `HOST:PORT`, `[IPv6]:PORT`, bare `HOST` inherits `contact.port`
 
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4

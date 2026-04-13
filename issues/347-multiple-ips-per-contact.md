@@ -76,7 +76,8 @@ From `issues/new-issue-todo`.
 
 ## Status
 
-**Phases 1 and 2 complete. Phase 3 (stretch) and per-IP ports deferred.**
+**Phases 1, 2, and 3 complete. Per-IP ports designed, deferred to a
+follow-up issue when a user needs it.**
 
 Landed in this pass:
 
@@ -110,21 +111,55 @@ Landed in this pass:
   attachment-chunk sender, `sync_outbox`'s main batch,
   `sync_inbox`'s deletion notifier, and the update-address push.
 
-Deferred:
+Phase 3 (this pass):
 
-- **Phase 3 (stretch): promote the winning address.** When a
-  non-first address succeeds, rewrite the contacts file so that
-  address is first for future connections. Needs a multi-value-aware
-  write path — `write_contact_fields` currently assumes one value
-  per field, and `align_contacts` is the other surface that touches
-  IP ordering.
-- **Per-IP ports.** `contact.port` is still a single scalar that
-  applies to every address in `contact.ips`. A contact whose LAN and
-  WAN endpoints listen on different ports can't be expressed today.
-  Probable syntax: either embedded in the ip line
-  (`name.ip = 192.168.1.5:22`, parsed off the last `:` with IPv6
-  bracket-form for disambiguation) or a parallel list of ports.
-  Track as a separate issue when a user needs it.
+- **`promote_contact_address(name, addr)`** rewrites the contacts
+  file so the winning address lives at the top of that contact's `ip`
+  block. Only the `ip` lines are reordered; `port`, `token`, and
+  other fields stay in place. No-op when the winner is already
+  first, when the contact has fewer than two addresses, when the
+  address isn't found, or when the write would produce identical
+  content (that last check also keeps the contacts inotify watcher
+  from firing spuriously).
+- **`http_post_batch_with_fallback` triggers promotions.** After
+  all retries complete, the wrapper dedupes the winning addresses
+  across the batch, loads contacts once, and calls
+  `promote_contact_address` for each. Wrapped in `pcall` so a
+  malformed contacts file can't take down the sync cycle.
+- With Phase 3 in place, the "every sync cycle keeps trying the dead
+  first IP" behavior self-corrects on the first fallback — the dead
+  address drops to the back of the list, the live one moves to the
+  front, and subsequent cycles hit it first.
 
-Re-open this issue when ready to tackle Phase 3, or spawn a new issue
-for per-IP ports.
+Deferred to a separate issue (per-IP ports):
+
+- **Problem.** `contact.port` is a single scalar shared across every
+  address in `contact.ips`. A contact whose LAN interface listens on
+  port 22 and whose WAN port-forward lands on 8025 can't be
+  expressed today.
+- **Proposed syntax.** Embed the port in the `ip` value:
+  - `alice.ip = 192.168.1.5:22`          (IPv4 + port)
+  - `alice.ip = alice.duckdns.org:8025`  (hostname + port)
+  - `alice.ip = [2001:db8::1]:8025`      (IPv6 + port, brackets
+     required to distinguish from bare IPv6)
+  - `alice.ip = 192.168.1.5`             (inherits `alice.port`)
+- **Parser.** A small `parse_endpoint(value, default_port)`:
+  1. Match `[IPv6]:port` → (addr, port).
+  2. Match `[IPv6]` → (addr, default_port).
+  3. Otherwise: if the value contains `:` but looks like a bare
+     IPv6 (multiple `:` or `::`), treat the whole thing as the
+     address with default_port. Else split on the last `:` and use
+     the numeric tail as the port.
+  4. If none of the above matches, treat as host-only with
+     default_port.
+- **Shape of the data structure.** `contact.endpoints` becomes a
+  list of `{addr, port}` pairs. `contact.ips` stays (addresses only)
+  for callers that still need just the address list. `contact_hosts()`
+  today returns a string list; an `contact_endpoints()` variant
+  would return the pairs for callers that need the port too.
+- **Migration.** A contacts file with no `HOST:PORT` syntax and a
+  `name.port = ...` line keeps working identically. Users opt in
+  per-line.
+- **Scope note.** Not implementing now — the daemon currently works
+  for single-port setups, which covers the common case. Spawn a new
+  issue when someone wants this.

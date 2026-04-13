@@ -512,6 +512,64 @@ local function contact_hosts(contact)
     return out
 end
 
+-- #347 Phase 3: promote a non-first address to the top of its contact's
+-- block on disk.  Called after the fallback layer sees a successful
+-- retry so future cycles hit the live address first.
+--
+-- Only the `ip` lines for this contact are reordered; non-`ip` fields
+-- (port, token, etc.) stay at their original positions.  A no-op when
+-- the winner is already first or when the contact has fewer than two
+-- addresses.  A no-op when the file wouldn't actually change — that
+-- keeps the inotify watcher from firing and triggering a redundant
+-- sync cycle.
+local function promote_contact_address(name, winning_addr)
+    if not name or not winning_addr or winning_addr == "" then return end
+    local text = read_file(CONTACTS)
+    if not text then return end
+
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    -- Collect ip-line positions and their parsed values (with quotes
+    -- stripped) for matching purposes.  Keep the original line text
+    -- around so we can put it back verbatim after reordering.
+    local ip_positions, ip_entries = {}, {}
+    for i, line in ipairs(lines) do
+        local lname, lfield, lvalue = line:match("^%s*([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+        if lname == name and lfield == "ip" and lvalue then
+            local val = lvalue:match("^%s*(.-)%s*$")
+            local unquoted = val:match('^"(.*)"$')
+            if unquoted then val = unquoted end
+            ip_positions[#ip_positions + 1] = i
+            ip_entries[#ip_entries + 1] = { line = line, value = val }
+        end
+    end
+
+    if #ip_entries < 2 then return end
+
+    local winner_idx
+    for k, e in ipairs(ip_entries) do
+        if e.value == winning_addr then winner_idx = k; break end
+    end
+    if not winner_idx or winner_idx == 1 then return end
+
+    -- Move the winner to position 1, keep the others in original order.
+    local winner = table.remove(ip_entries, winner_idx)
+    table.insert(ip_entries, 1, winner)
+
+    for k, pos in ipairs(ip_positions) do
+        lines[pos] = ip_entries[k].line
+    end
+
+    local new_text = table.concat(lines, "\n")
+    if new_text ~= text then
+        write_file(CONTACTS, new_text)
+        log("promoted %s for %s", winning_addr, name)
+    end
+end
+
 -- write or update specific fields for one contact in the contacts file,
 -- preserving all comments, blank lines, and other contacts untouched
 local function write_contact_fields(name, fields)
@@ -1628,6 +1686,7 @@ end
 -- the entries that actually failed, which are usually a small minority.
 local function http_post_batch_with_fallback(requests)
     local results = http_post_batch(requests)
+    local promotions = {}  -- addr -> true, deduped across the batch
     for i, req in ipairs(requests) do
         local hosts = req.hosts
         if results[i] and not results[i].ok and hosts and #hosts > 1 then
@@ -1645,6 +1704,7 @@ local function http_post_batch_with_fallback(requests)
                     if r and r.ok then
                         log("fallback to %s succeeded for %s", hosts[k], req.path or "?")
                         results[i] = r
+                        promotions[hosts[k]] = true
                         break
                     elseif r and r.status then
                         results[i] = r
@@ -1654,6 +1714,32 @@ local function http_post_batch_with_fallback(requests)
             end
         end
     end
+
+    -- Phase 3: rewrite contacts so each winning address jumps to the top
+    -- of its contact's block, so subsequent cycles skip the dead entries
+    -- they had to walk past this time.  Done once per batch after all
+    -- retries complete, scanning contacts once regardless of how many
+    -- requests promoted.  pcall'd so a bad contacts file can't take down
+    -- the sync cycle.
+    if next(promotions) then
+        pcall(function()
+            local cs = load_contacts()
+            for addr in pairs(promotions) do
+                for cname, c in pairs(cs) do
+                    if c.ips then
+                        for _, a in ipairs(c.ips) do
+                            if a == addr then
+                                promote_contact_address(cname, addr)
+                                goto next_addr
+                            end
+                        end
+                    end
+                end
+                ::next_addr::
+            end
+        end)
+    end
+
     return results
 end
 
@@ -3066,25 +3152,131 @@ local function sync_inbox(my_name)
     return did_work
 end
 
--- Services that return the querying client's public IP as plain text when
--- fetched over HTTP.  Diversity matters: mixing operators and hosting
--- providers reduces the chance a single outage blocks every service at
--- once.  All return a bare IPv4 in the response body.
+-- ---- Public-IP discovery via DNS --------------------------------------
+--
+-- Three well-known DNS providers (OpenDNS/Cisco, Cloudflare, Google) will
+-- answer a special query with the client's observed source IP.  UDP to
+-- port 53 is almost never blocked (breaking it breaks everything), the
+-- round-trip is ~5ms versus 50-200ms for HTTP, and the operators already
+-- terminate DNS traffic by design — there's no third-party "what's my
+-- IP" service snooping on the request.
+--
+-- socket.dns.toip() can't do this because it uses the system resolver
+-- and we need to pick the server.  So we craft the DNS packet ourselves.
+
+local function uint16_be(n)
+    return string.char(math.floor(n / 256) % 256, n % 256)
+end
+
+local function parse_uint16_be(s, pos)
+    local a, b = string.byte(s, pos, pos + 1)
+    return a * 256 + b
+end
+
+-- Encode a dotted hostname as DNS length-prefixed labels plus null terminator.
+local function encode_dns_name(name)
+    local out = {}
+    for label in (name .. "."):gmatch("([^.]*)%.") do
+        if #label > 0 then
+            out[#out + 1] = string.char(#label)
+            out[#out + 1] = label
+        end
+    end
+    out[#out + 1] = "\0"
+    return table.concat(out)
+end
+
+-- Send a DNS query to resolver_ip:53 and return the first answer.
+-- qtype is 1 (A) or 16 (TXT).  qclass is usually 1 (IN); Cloudflare's
+-- whoami uses 3 (CHAOS).  For A the return is a dotted-quad string; for
+-- TXT it's the raw contents of the first TXT string.  Returns nil on any
+-- failure (network, malformed reply, unsupported record type).
+local function dns_query_public_ip(name, qtype, qclass, resolver_ip)
+    local udp = socket.udp()
+    if not udp then return nil end
+    udp:settimeout(2)
+    local ok = udp:setpeername(resolver_ip, 53)
+    if not ok then udp:close(); return nil end
+
+    local id = math.random(0, 0xffff)
+    local query = uint16_be(id)           -- transaction ID
+        .. uint16_be(0x0100)              -- flags: standard query, recursion desired
+        .. uint16_be(1)                   -- QDCOUNT
+        .. uint16_be(0)                   -- ANCOUNT
+        .. uint16_be(0)                   -- NSCOUNT
+        .. uint16_be(0)                   -- ARCOUNT
+        .. encode_dns_name(name)
+        .. uint16_be(qtype)               -- QTYPE
+        .. uint16_be(qclass)              -- QCLASS
+
+    udp:send(query)
+    local reply = udp:receive()
+    udp:close()
+    if not reply or #reply < 12 then return nil end
+    if parse_uint16_be(reply, 1) ~= id then return nil end
+    if parse_uint16_be(reply, 7) == 0 then return nil end  -- ANCOUNT
+
+    -- skip the question section (name + qtype + qclass)
+    local pos = 13
+    while pos <= #reply and reply:byte(pos) ~= 0 do
+        pos = pos + reply:byte(pos) + 1
+    end
+    pos = pos + 1 + 4  -- null terminator + qtype + qclass
+
+    -- first answer: name is usually a compressed pointer (2 bytes starting with 0xc0)
+    if pos > #reply then return nil end
+    if reply:byte(pos) >= 0xc0 then
+        pos = pos + 2
+    else
+        while pos <= #reply and reply:byte(pos) ~= 0 do
+            pos = pos + reply:byte(pos) + 1
+        end
+        pos = pos + 1
+    end
+
+    if pos + 10 > #reply then return nil end
+    local rtype = parse_uint16_be(reply, pos); pos = pos + 2
+    pos = pos + 2  -- rclass
+    pos = pos + 4  -- ttl
+    local rdlen = parse_uint16_be(reply, pos); pos = pos + 2
+
+    if rtype == 1 and rdlen == 4 and pos + 3 <= #reply then
+        local a, b, c, d = string.byte(reply, pos, pos + 3)
+        return string.format("%d.%d.%d.%d", a, b, c, d)
+    elseif rtype == 16 and rdlen >= 1 and pos < #reply then
+        -- TXT record: first byte of RDATA is a length, then that many bytes
+        -- of string.  The IP-reporting services always put the IP in a single
+        -- TXT string.
+        local txtlen = reply:byte(pos)
+        if pos + txtlen > #reply then return nil end
+        return reply:sub(pos + 1, pos + txtlen)
+    end
+    return nil
+end
+
+-- Providers that will return the querying client's IP in a DNS response.
+-- Listed with redundant resolver IPs per provider so a single unreachable
+-- anycast endpoint doesn't kill the whole provider's option.  verify_ip_change
+-- uses `provider` to ensure cross-provider confirmation, not just cross-IP.
+-- qclass: 1 = IN (Internet — the standard class), 3 = CH (CHAOS class,
+-- which Cloudflare uses for its whoami query by convention).
 local IP_SERVICES = {
-    {host = "ifconfig.me",            path = "/"},
-    {host = "icanhazip.com",          path = "/"},
-    {host = "api.ipify.org",          path = "/"},
-    {host = "checkip.amazonaws.com",  path = "/"},
-    {host = "ident.me",               path = "/"},
-    {host = "ipecho.net",             path = "/plain"},
-    {host = "ipinfo.io",              path = "/ip"},
-    {host = "api.my-ip.io",           path = "/ip"},
+    -- OpenDNS (Cisco) — A record in IN class, simplest
+    {provider = "opendns",    name = "myip.opendns.com",        qtype = 1,  qclass = 1, resolver = "208.67.222.222"},
+    {provider = "opendns",    name = "myip.opendns.com",        qtype = 1,  qclass = 1, resolver = "208.67.220.220"},
+    -- Cloudflare — TXT record in CHAOS class
+    {provider = "cloudflare", name = "whoami.cloudflare",       qtype = 16, qclass = 3, resolver = "1.1.1.1"},
+    {provider = "cloudflare", name = "whoami.cloudflare",       qtype = 16, qclass = 3, resolver = "1.0.0.1"},
+    -- Google — TXT record in IN class on Google's authoritative nameservers
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.32.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.34.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.36.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.38.10"},
 }
 
--- Return a shuffled copy of IP_SERVICES.  check_public_ip iterates in
--- random order so no single service gets pinned as the primary — traffic
--- spreads across the list and transient failures don't always hit the
--- same host first.
+-- Return a shuffled copy of IP_SERVICES.  check_public_ip iterates in random
+-- order so one resolver doesn't get pinned as the primary; traffic spreads
+-- across the list and transient failures don't always hit the same host.
 local function shuffled_ip_services()
     local out = {}
     for i, v in ipairs(IP_SERVICES) do out[i] = v end
@@ -3096,24 +3288,7 @@ local function shuffled_ip_services()
 end
 
 local function fetch_public_ip(service)
-    local conn = socket.tcp()
-    conn:settimeout(5)
-    local ok, err = conn:connect(service.host, 80)
-    if not ok then conn:close(); return nil end
-    conn:send("GET " .. service.path .. " HTTP/1.0\r\n" ..
-        "Host: " .. service.host .. "\r\nConnection: close\r\n\r\n")
-
-    local status_line = conn:receive("*l")
-    if not status_line or not status_line:find(" 200 ") then conn:close(); return nil end
-
-    while true do
-        local line = conn:receive("*l")
-        if not line or line == "" then break end
-    end
-
-    local ip = conn:receive("*l")
-    conn:close()
-    if ip then ip = ip:match("^%s*(.-)%s*$") end
+    local ip = dns_query_public_ip(service.name, service.qtype, service.qclass, service.resolver)
     if ip and ip:match("^%d+%.%d+%.%d+%.%d+$") then return ip end
     return nil
 end
@@ -3126,9 +3301,12 @@ local function check_public_ip()
     return nil
 end
 
+-- Confirm a detected IP with a *different provider* — not just a different
+-- resolver IP.  Two Cloudflare anycast endpoints would always agree whether
+-- the answer is right or wrong; genuine verification needs independent paths.
 local function verify_ip_change(new_ip, used_service)
     for _, service in ipairs(shuffled_ip_services()) do
-        if service.host ~= used_service.host then
+        if service.provider ~= used_service.provider then
             local ip = fetch_public_ip(service)
             if ip then return ip == new_ip end
         end
@@ -3154,9 +3332,9 @@ local function detect_ip_change(my_name, port)
         return
     end
 
-    -- verify with a second service before notifying
+    -- verify with a different provider before notifying
     if not verify_ip_change(new_ip, service) then
-        log("public IP change not confirmed (%s reported %s)", service.host, new_ip)
+        log("public IP change not confirmed (%s reported %s)", service.provider, new_ip)
         return
     end
 
