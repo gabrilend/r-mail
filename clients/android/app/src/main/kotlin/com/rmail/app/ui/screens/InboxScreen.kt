@@ -283,16 +283,12 @@ fun InboxScreen(
                         }
                     }
                     if (currentPanel == Panel.WRITE) {
-                        // New (clear) button
-                        IconButton(onClick = {
-                            draftRecipients = listOf("")
-                            draftAttachments.clear()
-                            draftSubject = ""
-                            draftBody = ""
-                        }) {
-                            Icon(Icons.Default.Add, contentDescription = "New message")
-                        }
-                        // Send button
+                        // #319: the old "+" (clear-form) action was removed.
+                        // With an empty draft it looked like it did nothing,
+                        // and with a filled draft it silently wiped work —
+                        // both surprising.  Users who want a fresh draft can
+                        // just tap the fields to edit or navigate away and
+                        // back.  Only the Send button stays here.
                         IconButton(onClick = {
                             val validRecipients = draftRecipients.filter { it.isNotBlank() }
                             if (validRecipients.isEmpty()) return@IconButton

@@ -215,9 +215,9 @@ jump around.
 - [ ] `saveOutboxFile()` triggers immediate sync
 - [ ] Error banner persists during sync, clears only on success (#305)
 
-### Error display (#317)
-- [ ] "Failed to connect" error stays visible during sync attempt
-- [ ] Error clears only when sync succeeds
+### Error display (#317) — verified by code inspection
+- [x] "Failed to connect" error stays visible during sync attempt (no code path clears `_syncError` on sync start)
+- [x] Error clears only when sync succeeds (one of two explicit clears: success branch + mailbox switch)
 
 ### "Read timed out" (#320)
 - [ ] Root cause identified (server delay, network, or client timeout)
@@ -269,7 +269,13 @@ jump around.
 - [ ] Width preference persists across sessions
 
 ### Orphan + button (#319)
-- [ ] + button either has a clear function or is removed
+- [ ] Write panel's top-bar no longer has a "+" button (only Send)
+- [ ] Outbox panel's "+" still jumps to the Write panel
+- [ ] Contacts panel's "+" still opens the contact editor
+- [ ] Files panel's "+" still opens the file picker via Write panel
+- [ ] Contact-editor in-body "+" still adds a custom field row
+- [ ] Composer in-body "+" still adds a recipient and "+" still attaches a file
+- [ ] Mailbox list "+" still adds a new mailbox
 
 ## 11. Android — contacts and settings
 
