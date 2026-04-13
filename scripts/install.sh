@@ -63,11 +63,12 @@ validate_version() {
 # ---- Install-time option store --------------------------------------------
 #
 # Every interactive prompt has a stable "key" (e.g. mail_dir, compile_lua).
-# A CLI flag (--mail-dir=PATH, --compile-lua, --no-compile-lua) or env var
-# (RMAIL_INSTALL_MAIL_DIR, RMAIL_INSTALL_COMPILE_LUA) can preset the key
-# and skip the prompt.  --silent refuses to prompt at all; --yes answers
-# every boolean prompt as yes unless an explicit --no-<flag> overrides.
-# Precedence: CLI > env > interactive prompt > built-in default.
+# A CLI flag (--mail-dir=PATH, --compile-lua, --no-compile-lua) can preset
+# the key and skip the prompt.  --silent refuses to prompt at all; --yes
+# answers every boolean prompt as yes unless an explicit --no-<flag>
+# overrides.  Values come from CLI only — environment variables are
+# intentionally ignored, since stale exports from earlier sessions tend
+# to produce surprising installs.  Precedence: CLI > prompt > default.
 
 SILENT=false
 ALL_YES=false
@@ -104,19 +105,9 @@ _parse_bool() {
 }
 
 # Option keys the installer recognises.  Value keys need a string, yn keys
-# take a boolean.  Used by _import_env_opts and show_help.
+# take a boolean.  Used by show_help and the CLI parser.
 OPT_VALUE_KEYS="mail_dir name port"
 OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service"
-
-_import_env_opts() {
-    for _k in $OPT_VALUE_KEYS $OPT_YN_KEYS; do
-        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
-        eval "_val=\${$_env:-}"
-        if [ -n "${_val:-}" ]; then
-            _set_opt "$_k" "$_val"
-        fi
-    done
-}
 
 show_help() {
     cat <<'HELP'
@@ -126,7 +117,7 @@ Generic:
   -h, --help              Show this help and exit
   --force                 Force recompile of all locally-built dependencies
   --silent                Fail instead of prompting.  Every required value
-                          must be supplied via a flag or env var.
+                          must be supplied via a CLI flag.
   --yes, -y               Answer yes to every boolean prompt unless the
                           matching --no-<flag> is also given
   --version dep=x.y.z     Pin a dependency version (lua, luasocket, openssl,
@@ -148,21 +139,15 @@ Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
   --user-service          When setting up a service, use a user-level one
                           (no root required)
 
-Environment variables (alternative to --flags):
-  RMAIL_INSTALL_MAIL_DIR, RMAIL_INSTALL_NAME, RMAIL_INSTALL_PORT,
-  RMAIL_INSTALL_COMPILE_LUA, RMAIL_INSTALL_COMPILE_OPENSSL,
-  RMAIL_INSTALL_COMPILE_LUASOCKET, RMAIL_INSTALL_COMPILE_UPNP,
-  RMAIL_INSTALL_COMPILE_NATPMP, RMAIL_INSTALL_COMPILE_ZIP,
-  RMAIL_INSTALL_SETUP_SERVICE, RMAIL_INSTALL_USER_SERVICE
-
 Fully unattended example:
   scripts/install.sh --silent --yes \
       --mail-dir=/srv/rmail/alice --name=alice --port=54321
+
+Values are only read from CLI flags.  Environment variables are
+intentionally ignored — a stale RMAIL_* export from an earlier session
+shouldn't silently change what the installer does.
 HELP
 }
-
-# Import env vars before CLI parsing so --flags take precedence.
-_import_env_opts
 
 # Extract "key" and "value" from a --key=value or --key-with-dashes flag.
 # Populates _cli_key (underscore form) and _cli_val.  For --no-* flags,
@@ -327,9 +312,8 @@ ask_yn() {
     if $ALL_YES; then return 0; fi
     if $SILENT; then
         _flag=$(echo "$_k" | tr '_' '-')
-        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
         err "--silent: $_k not set"
-        err "  supply --$_flag / --no-$_flag, or export \$$_env"
+        err "  supply --$_flag or --no-$_flag"
         exit 1
     fi
     printf "  %s [y/N] " "$_prompt"
@@ -355,9 +339,8 @@ ask_value() {
     fi
     if $SILENT; then
         _flag=$(echo "$_k" | tr '_' '-')
-        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
         err "--silent: $_k not set"
-        err "  supply --$_flag=VALUE, or export \$$_env"
+        err "  supply --$_flag=VALUE"
         exit 1
     fi
     printf "  %s [%s]: " "$_prompt" "$_default" >/dev/tty
