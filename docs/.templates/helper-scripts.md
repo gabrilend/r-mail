@@ -116,18 +116,17 @@ esac
 
 ## rfield.sh — read a contact field
 
-Reads an arbitrary field from the contacts file by name. Located in
-`scripts/` (not `helpers/`) but used the same way.
+Reads an arbitrary field from the contacts file by name.
 
 ```
-scripts/rfield.sh <name> <field>
+helpers/rfield.sh <name> <field>
 ```
 
 **Examples:**
 
 ```sh
-scripts/rfield.sh alice phone     # → 555-1234
-scripts/rfield.sh alice notify    # → email@example.com
+helpers/rfield.sh alice phone     # → 555-1234
+helpers/rfield.sh alice notify    # → email@example.com
 ```
 
 Contacts can store any fields you like alongside the required `ip`, `port`,

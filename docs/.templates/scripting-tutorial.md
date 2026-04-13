@@ -151,7 +151,7 @@ If the script prints nothing for a given recipient, the body is sent unchanged.
 
 ### Read contact fields in a hook
 
-Use `scripts/rfield.sh` to read arbitrary contact fields — see the
+Use `helpers/rfield.sh` to read arbitrary contact fields — see the
 [helper scripts](helper-scripts.md#rfieldsh--read-a-contact-field) reference.
 Here's a quick example in `on_send`:
 
@@ -161,7 +161,7 @@ recipient="$1"
 subject="$2"
 body="$3"
 
-phone=$(scripts/rfield.sh "$recipient" phone 2>/dev/null)
+phone=$(helpers/rfield.sh "$recipient" phone 2>/dev/null)
 if [ -n "$phone" ]; then
     printf '%s\n\ncc: %s' "$body" "$phone"
 else

@@ -230,7 +230,7 @@ DEFAULT_PORT=$(gen_random_port)
 
 # prompt for name
 while true; do
-    RMAIL_NAME=$(ask_value "Your name (shown to contacts)" "$DEFAULT_NAME")
+    RMAIL_NAME=$(ask_value "Your own name (used locally, not transmitted)" "$DEFAULT_NAME")
     if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
         break
     fi
@@ -255,7 +255,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
 # ---- identity ----
 
-# your name as it appears to contacts (must match your key in the contacts file)
+# your own name — used locally so the daemon can tell "me" from "everyone else"
+# in your contacts file.  Never transmitted; each contact sees you by whatever
+# name they assigned you in their own contacts file.
 name = $RMAIL_NAME
 
 # port rmail listens on for incoming messages
@@ -853,20 +855,34 @@ _compile_unzip() {
 ZIP_VERSION="3.0"
 UNZIP_VERSION="6.0"
 
-if [ -x "$BIN/zip" ] && [ -x "$BIN/unzip" ] && ! $FORCE; then
+# zip and unzip ship as separate packages on most distros; detect them
+# independently so a user who has one but not the other doesn't get asked
+# to compile both.
+_have_zip()   { [ -x "$BIN/zip" ]   || command -v zip   >/dev/null 2>&1; }
+_have_unzip() { [ -x "$BIN/unzip" ] || command -v unzip >/dev/null 2>&1; }
+
+if $FORCE; then
+    # --force: always use project-local compiled versions
+    _compile_zip && _compile_unzip || exit 1
+elif ! _have_zip || ! _have_unzip; then
+    # at least one is missing: list missing tools, offer to compile only those
+    missing=""
+    _have_zip   || missing="$missing zip"
+    _have_unzip || missing="$missing unzip"
+    warn "missing for attachment transfer:$missing"
+    if ask_yn "Compile missing tool(s) locally from Info-ZIP source?"; then
+        _have_zip   || _compile_zip   || exit 1
+        _have_unzip || _compile_unzip || exit 1
+    else
+        err "zip and unzip are both required — cannot continue without them"
+        exit 1
+    fi
+elif [ -x "$BIN/zip" ] && [ -x "$BIN/unzip" ]; then
     ok "found locally compiled: deps/bin/zip, deps/bin/unzip"
-elif command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+else
     ok "found system: zip/unzip"
     if ask_yn "Compile local versions instead? (recommended for reproducibility)"; then
         _compile_zip && _compile_unzip
-    fi
-else
-    warn "zip/unzip not found — required for attachment transfer"
-    if ask_yn "Compile Info-ZIP locally? (zip ${ZIP_VERSION} / unzip ${UNZIP_VERSION})"; then
-        _compile_zip && _compile_unzip
-    else
-        err "zip and unzip are required — cannot continue without them"
-        exit 1
     fi
 fi
 
@@ -1224,8 +1240,6 @@ echo "  libs/socket/core.so    — luasocket"
 echo "  libs/mime/core.so      — luasocket mime"
 echo "  libs/rmail_crypto.so   — AES-256-GCM encryption"
 echo "  libs/rmail_inotify.so  — outbox file-change watcher"
-echo ""
-echo "AES-256-GCM encryption is active — no configuration needed."
 if $NAT_INSECURE; then
     echo ""
     warn "NOTE: insecure NAT protocols detected on your router (see warnings above)"

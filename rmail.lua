@@ -1572,10 +1572,21 @@ end
 
 local function handle_attachment_request(data, sender)
     local att_id = data.attachment_id
-    local filename = (data.filename or "unknown"):gsub("[\n\r]", "")
+    -- Fully sanitize: any path separators or wacky characters in the sender's
+    -- filename become safe for use as a local inbox/attachments path. The
+    -- sanitized name is what the user sees in the consent form and what the
+    -- saved attachment will actually be called.
+    local filename = sanitize_filename(data.filename or "")
     local expected_size = tonumber(data.expected_size) or 0
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
+
+    local pending = load_state("consent-pending.json")
+    -- Idempotent: if we already have an entry for this att_id, a retry from
+    -- the sender must not clobber the user's in-progress decision.
+    if pending[att_id] then
+        return 200, {ok = true}
+    end
 
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local avail, total = check_disk_space(paths.attachments)
@@ -1585,10 +1596,23 @@ local function handle_attachment_request(data, sender)
     if total and total > 0 then
         pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
     end
-    local subject = (data.subject or ""):gsub("[\n\r]", "")
-    local base = subject ~= "" and subject or filename:gsub("%.[^%.]+$", "")
-    if base == "" then base = filename end
+    -- Key the consent file by attachment filename (not outbox subject) so
+    -- two attachments on the same outbox message get distinct files. On
+    -- collision (same filename already in inbox or tracked by another
+    -- pending entry), append a short att_id prefix to disambiguate.
+    local base = filename ~= "" and filename or "attachment"
     local consent_file = sanitize_filename(base .. "-consent-to-download-form")
+    local function name_in_use(name)
+        if file_exists(INBOX .. "/" .. name) then return true end
+        for other_id, entry in pairs(pending) do
+            if other_id ~= att_id and entry.inbox_file == name then return true end
+        end
+        return false
+    end
+    if name_in_use(consent_file) then
+        consent_file = sanitize_filename(
+            base .. "-" .. att_id:sub(1, 8) .. "-consent-to-download-form")
+    end
     write_file(INBOX .. "/" .. consent_file, string.format(
         "%s wants to send you an attachment.\n\n" ..
         "  File:          %s\n" ..
@@ -1598,7 +1622,6 @@ local function handle_attachment_request(data, sender)
         "Delete one line and leave your choice behind for the system to read:\n\naccept\ndeny",
         sender, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
 
-    local pending = load_state("consent-pending.json")
     pending[att_id] = {
         inbox_file  = consent_file,
         ["from"]    = sender,
@@ -1610,6 +1633,18 @@ local function handle_attachment_request(data, sender)
     save_state("consent-pending.json", pending)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
     return 200, {ok = true}
+end
+
+-- True if the inbox consent/progress file is missing, or any line in it
+-- reads exactly "deny". Lets the user bail on an in-progress transfer by
+-- writing "deny" as well as by deleting the file.
+local function consent_cancelled(inbox_file)
+    local content = read_file(INBOX .. "/" .. inbox_file)
+    if not content then return true end
+    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+        if line:match("^%s*(.-)%s*$") == "deny" then return true end
+    end
+    return false
 end
 
 local function check_consent_pending()
@@ -1645,9 +1680,10 @@ local function check_consent_pending()
                 changed = true
             end
         elseif entry.status == "receiving" then
-            if not file_exists(INBOX .. "/" .. entry.inbox_file) then
+            if consent_cancelled(entry.inbox_file) then
                 os.execute('rm -rf ' .. shell_quote(
                     paths.pending .. "/.pending/" .. att_id))
+                os.remove(INBOX .. "/" .. entry.inbox_file)
                 entry.status = "cancel_pending"
                 changed = true
                 log("attachment transfer cancelled by user: %s from %s", att_id, entry["from"])
@@ -1698,8 +1734,9 @@ local function send_consent_responses(my_name)
                     entry.status = "receiving"
                     entry.start_time = os.time()
                 else
-                    write_file(INBOX .. "/" .. entry.inbox_file,
-                        "You declined " .. entry["from"] .. "'s attachment " .. entry.filename .. ".")
+                    -- User declined — clear the consent file off their
+                    -- inbox so they don't have to think about it again.
+                    os.remove(INBOX .. "/" .. entry.inbox_file)
                     pending[resp.attachment_id] = nil
                 end
             end
@@ -1761,7 +1798,6 @@ local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
     local total_chunks = tonumber(data.total_chunks)
-    local filename = data.filename or "unknown"
     local chunk_checksum = data.chunk_checksum
     local total_checksum = data.total_checksum
     if not att_id or chunk_index == nil or not total_chunks or not data.data then
@@ -1770,10 +1806,16 @@ local function handle_attachment_chunk(data, sender)
     local raw = mime.unb64(data.data)
     if not raw then return 400, {error = "invalid base64"} end
 
-    -- Check cancellation before storing anything
+    -- Require matching request state. Without an attachment_request + user
+    -- consent, we have no business accepting or extracting chunks, and we
+    -- mustn't trust a per-chunk filename for any local path.
     local cprog = load_state("consent-pending.json")
     local cpe = cprog[att_id]
-    if cpe and cpe.status == "cancel_pending" then
+    if not cpe then
+        return 404, {error = "unknown attachment_id"}
+    end
+    local filename = cpe.filename  -- sanitized at request time
+    if cpe.status == "cancel_pending" then
         return 200, {ok = false, cancelled = true}
     end
 
@@ -1781,10 +1823,63 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(pending_dir))
     local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
 
-    if chunk_checksum and sha256_of_bytes(raw) ~= chunk_checksum then
+    local valid = not chunk_checksum or sha256_of_bytes(raw) == chunk_checksum
+    if not valid then
         -- discard bad chunk; it stays missing in the response
         log("chunk %d checksum mismatch from %s for %s", chunk_index, sender, filename)
     else
+        -- Enforce the sender's declared expected_size.  Without this check, a
+        -- malicious or buggy sender could advertise a small attachment in the
+        -- consent prompt and then stream arbitrary amounts of data, exhausting
+        -- the recipient's disk after consent was already granted.
+        if cpe and cpe.expected_size and cpe.expected_size > 0 then
+            -- Lazy-initialise bytes_received from any existing on-disk chunks,
+            -- so a transfer started before this check was added gets a correct
+            -- running total the first time it arrives.
+            if cpe.bytes_received == nil then
+                local sum = 0
+                for i = 0, (total_chunks or 0) - 1 do
+                    local f = io.open(pending_dir .. "/chunk-" .. tostring(i), "rb")
+                    if f then
+                        f:seek("end"); sum = sum + f:seek(); f:close()
+                    end
+                end
+                cpe.bytes_received = sum
+            end
+
+            -- If this chunk overwrites an existing one (sender retry), only the
+            -- size delta counts.
+            local existing = 0
+            local f_old = io.open(chunk_path, "rb")
+            if f_old then
+                f_old:seek("end"); existing = f_old:seek(); f_old:close()
+            end
+            local projected = cpe.bytes_received + (#raw - existing)
+
+            -- 10% headroom plus a 4KB floor: zipping incompressible data (jpg,
+            -- mp3, already-compressed files) can inflate slightly due to zip
+            -- metadata.  The floor covers tiny attachments where 10% rounds
+            -- to almost nothing.
+            local limit = math.floor(cpe.expected_size * 1.1) + 4096
+            if projected > limit then
+                log("oversize transfer from %s: %s declared %s, " ..
+                    "cumulative would reach %s (limit %s) — rejecting",
+                    sender, filename, fmt_bytes(cpe.expected_size),
+                    fmt_bytes(projected), fmt_bytes(limit))
+                os.execute('rm -rf ' .. shell_quote(pending_dir))
+                os.remove(INBOX .. "/" .. cpe.inbox_file)
+                cpe.status = "cancel_pending"
+                cpe.rejection_reason = "oversize"
+                cprog[att_id] = cpe
+                save_state("consent-pending.json", cprog)
+                return 200, {ok = false, cancelled = true}
+            end
+
+            cpe.bytes_received = projected
+            cprog[att_id] = cpe
+            save_state("consent-pending.json", cprog)
+        end
+
         write_file_binary(chunk_path, raw)
     end
 
@@ -1796,11 +1891,13 @@ local function handle_attachment_chunk(data, sender)
         end
     end
 
-    if cpe and cpe.status == "receiving" then
-        -- Check if user deleted the progress file (cancellation during transfer)
-        if not file_exists(INBOX .. "/" .. cpe.inbox_file) then
+    if cpe.status == "receiving" then
+        -- User cancelled mid-transfer: either deleted the progress file or
+        -- wrote "deny" into it.
+        if consent_cancelled(cpe.inbox_file) then
             os.execute('rm -rf ' .. shell_quote(
                 paths.pending .. "/.pending/" .. att_id))
+            os.remove(INBOX .. "/" .. cpe.inbox_file)
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
             save_state("consent-pending.json", cprog)
@@ -1817,7 +1914,7 @@ local function handle_attachment_chunk(data, sender)
             end
         end
         write_file(INBOX .. "/" .. cpe.inbox_file, string.format(
-            "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nDelete this file to cancel and clean up partial downloads.",
+            "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nTo cancel: delete this file, or add a line that reads: deny",
             filename, sender, received, total_chunks,
             math.floor(received / total_chunks * 100), avg_str))
     end
@@ -1885,9 +1982,10 @@ local function handle_attachment_chunk(data, sender)
 
     if cprog[att_id] then
         if cprog[att_id].status ~= "cancel_pending" then
-            write_file(INBOX .. "/" .. cprog[att_id].inbox_file, string.format(
-                "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
-                sender, filename, target))
+            -- Transfer finished successfully; the attachment lives in
+            -- paths.attachments. The inbox consent/progress file has done
+            -- its job — remove it so completed transfers don't pile up.
+            os.remove(INBOX .. "/" .. cprog[att_id].inbox_file)
         end
         cprog[att_id] = nil
         save_state("consent-pending.json", cprog)
