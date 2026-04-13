@@ -44,3 +44,23 @@ So two bugs that may be one underlying bug:
 ## Source
 
 From `issues/new-issue-please-sort`.
+
+## Status
+
+Completed. Fixes in `rmail.lua`:
+- `handle_attachment_request` is idempotent on retries, keys the consent
+  file by sanitized attachment filename (not outbox subject) with
+  `att_id`-suffix disambiguation on collision, and fully sanitizes the
+  incoming filename.
+- `handle_attachment_chunk` rejects chunks with an unknown `att_id` and
+  uses only the filename stored at request time — per-chunk
+  `data.filename`/`data.subject` are no longer trusted.
+- Completed, declined, and mid-transfer-cancelled transfers all remove
+  the inbox consent/progress file.
+- Mid-transfer cancel now also recognises the user writing a `deny`
+  line, not just deleting the file. Detection lives in
+  `consent_cancelled()` and runs in both the sync cycle and on each
+  chunk.
+
+Paired with narrow updates to #348 (PII window for attachment state is
+now bounded to the active transfer period).

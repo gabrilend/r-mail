@@ -93,9 +93,16 @@ jump around.
 
 ### Consent form regeneration bug (#346)
 - [ ] Consent form file is removed from inbox after the attachment it gated is delivered
+- [ ] Consent form file is removed from inbox after the recipient declines it
 - [ ] Sending a second attachment creates its own consent form (not a rewrite of the first)
 - [ ] Second consent form shows the correct sender/filename/metadata for its own file
 - [ ] User edits to a consent form (e.g. deleting `deny`) are not overwritten by a later sync
+- [ ] Mid-transfer cancel by writing "deny" into the progress file works
+- [ ] Mid-transfer cancel by deleting the progress file works
+- [ ] Progress file is removed from inbox after a mid-transfer cancel
+- [ ] Chunk arriving with an unknown `attachment_id` is rejected with 404
+- [ ] Filename path separators in an attachment request are sanitized (no traversal)
+- [ ] Per-chunk filename/subject fields are ignored; the request-time sanitized filename is used throughout
 
 ## 6. Sync and networking
 
