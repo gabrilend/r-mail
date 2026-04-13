@@ -950,11 +950,15 @@ end
 -- random salt in STATE, but that adds moving parts for a modest gain;
 -- deferred.
 
-local function hash_contact_name(name)
-    local bytes = crypto.sha256("rmail:contact:" .. name)
+local function hex_sha256(data)
+    local bytes = crypto.sha256(data)
     local hex = ""
     for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
     return hex
+end
+
+local function hash_contact_name(name)
+    return hex_sha256("rmail:contact:" .. name)
 end
 
 -- In-place migration of a state table whose keys were plaintext contact
@@ -1100,6 +1104,37 @@ local function save_consent_responses(state)
         snapshot[i] = copy
     end
     write_file(STATE .. "/" .. _CRESP_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
+end
+
+-- outbox.json carries per-recipient tokens in meta.recipients[name].token
+-- pre-#348.  The token is a literal duplicate of the contact's token from
+-- the contacts file and is the shared secret for that peer — storing it
+-- in .state/ meant a copy of every shared secret leaked into a second
+-- file.  save_outbox_state strips the .token field from every recipient
+-- record on write; new writes already stopped adding it.  Legacy tokens
+-- in loaded state get scrubbed on the next save.
+local _OUTBOX_PATH = "outbox.json"
+
+local function save_outbox_state(state)
+    local snapshot = {}
+    for fname, meta in pairs(state) do
+        local meta_copy = {}
+        for k, v in pairs(meta) do meta_copy[k] = v end
+        if type(meta.recipients) == "table" then
+            local rcopy = {}
+            for rname, rmeta in pairs(meta.recipients) do
+                local rc = {}
+                for rk, rv in pairs(rmeta) do
+                    if rk ~= "token" then rc[rk] = rv end
+                end
+                rcopy[rname] = rc
+            end
+            meta_copy.recipients = rcopy
+        end
+        snapshot[fname] = meta_copy
+    end
+    write_file(STATE .. "/" .. _OUTBOX_PATH,
         json.encode(snapshot, {indent = true}) .. "\n")
 end
 
@@ -1731,7 +1766,7 @@ local function handle_delete(data, sender)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_state("outbox.json", outbox_state)
+                    save_outbox_state(outbox_state)
                     -- cancel any outgoing chunk transfers to this recipient for this message
                     local att_state = load_chunks_outgoing()
                     local att_changed = false
@@ -3112,7 +3147,7 @@ local function self_delete_from_outbox(my_name, message_id)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_state("outbox.json", outbox_state)
+                    save_outbox_state(outbox_state)
                     return
                 end
             end
@@ -3157,19 +3192,31 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- detect contact renames via stored token
-    local contact_by_token = {}
+    -- detect contact renames via stored token fingerprint.  Pre-#348 this
+    -- matched against rmeta.token (the raw shared secret duplicated into
+    -- state).  Post-#348 we only persist hash_token(token) as token_hash,
+    -- so the lookup table is keyed by that same hash.  Legacy entries
+    -- still carrying .token keep working during the transition because
+    -- we also populate the lookup from plaintext tokens.
+    local contact_by_token_hash = {}
+    local contact_by_token_plain = {}
     for cname, contact in pairs(contacts) do
         if cname ~= my_name and contact.token then
-            contact_by_token[contact.token] = cname
+            contact_by_token_hash[hex_sha256(contact.token)] = cname
+            contact_by_token_plain[contact.token] = cname
         end
     end
     for fname, fmeta in pairs(state) do
         if fmeta.recipients then
             local renames = {}
             for rname, rmeta in pairs(fmeta.recipients) do
-                if rmeta.token and not contacts[rname] then
-                    local new_name = contact_by_token[rmeta.token]
+                if not contacts[rname] then
+                    local new_name = nil
+                    if rmeta.token_hash then
+                        new_name = contact_by_token_hash[rmeta.token_hash]
+                    elseif rmeta.token then
+                        new_name = contact_by_token_plain[rmeta.token]
+                    end
                     if new_name and not fmeta.recipients[new_name] then
                         renames[rname] = new_name
                     end
@@ -3654,9 +3701,19 @@ local function sync_outbox(my_name)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
+                        -- #348: store only the hex sha256 of the token,
+                        -- not the token itself.  The rename-detection
+                        -- path still works (it hashes contacts' tokens
+                        -- into the same space) and .state/ no longer
+                        -- duplicates shared secrets out of the contacts
+                        -- file.
+                        local thash = nil
+                        if op.contact and op.contact.token then
+                            thash = hex_sha256(op.contact.token)
+                        end
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
-                            token = op.contact.token,
+                            token_hash = thash,
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
@@ -3733,7 +3790,7 @@ local function sync_outbox(my_name)
     end
 
     if att_state_changed then save_chunks_outgoing(att_state) end
-    save_state("outbox.json", state)
+    save_outbox_state(state)
     return did_work
 end
 
@@ -4160,10 +4217,7 @@ local function serialize_contacts_canonical()
 end
 
 local function canonical_contacts_hash()
-    local bytes = crypto.sha256(serialize_contacts_canonical())
-    local hex = ""
-    for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
-    return hex
+    return hex_sha256(serialize_contacts_canonical())
 end
 
 -- GET /peer-address — return the caller's stored address (ip/port) from our contacts file.
