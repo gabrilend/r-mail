@@ -19,6 +19,24 @@ no relay, no registry, no rendezvous server. Each daemon only knows its
 contacts' last-known IPs. If both sides lose track of each other, there's no
 third party to ask.
 
+This is an inherent trade-off of the home-server model. Central services
+(classic email, Signal, etc.) solve this trivially because the server's
+address never changes. rmail trades that convenience for independence.
+The practical question is whether there's a middle ground — some
+minimal, opt-in mechanism — that preserves the spirit of the design
+while making recovery possible. The sections below are the exploration;
+the conclusion is "not really, beyond sneakernet."
+
+## Real-world triggers for the worst case
+
+- Both users change ISPs or routers around the same time.
+- One user moves; the other's ISP rotates their IP before the first
+  comes back online.
+- Extended multi-week outage on both sides during which ISPs recycle
+  both addresses.
+- Simultaneous power outages affecting both networks (e.g. the same
+  storm).
+
 ## Partial mitigations (none fully solve it)
 
 ### DNS (issue #311)
