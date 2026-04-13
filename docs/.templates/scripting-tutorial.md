@@ -321,7 +321,14 @@ causes rmail to log a warning and keep the original body unchanged.
 Hooks combine with living messages (see #306) to build behaviours rmail
 doesn't ship natively.  The one worked out below is a **periodic** — a
 self-scheduling task that ticks down each sync cycle and fires when the
-timer hits zero.
+timer hits zero.  Two other substantial pattern collections live in
+separate docs:
+
+- [defensive-patterns.md](defensive-patterns.md) — traffic-analysis
+  mitigation (cover-traffic heartbeat, size padding, timing jitter,
+  decoy recipients, Tor integration) plus defensive idioms like
+  rate-limiting and tamper-evident audit logs.  The heartbeat pattern
+  there builds on the periodic pattern below.
 
 ### Periodic tasks via self-addressed messages
 

@@ -147,96 +147,12 @@ They **cannot**:
 
 ## Mitigating traffic analysis
 
-Even though message content is encrypted, an observer can learn things from
-*when* you communicate and *how much* data you exchange. The following hook-
-based techniques can make traffic analysis harder. None of them require
-modifying rmail itself — they're just scripts you configure in your config file.
-
-### Decoy traffic (on_send hook)
-
-If you're worried about an observer noticing when you send real messages, you
-can set up a cron job that periodically creates small outbox files addressed
-to a cooperating contact. The contact's `on_receive` hook silently deletes
-them. From the outside, there's a steady stream of traffic at all hours, and
-real messages hide in the noise.
-
-```sh
-# crontab: send a decoy every 10 minutes
-*/10 * * * * echo "to: alice\n\nping" > ~/mail/outbox/decoy-$(date +\%s)
-```
-
-On Alice's side, an `on_receive` hook checks for and discards decoy messages:
-
-```sh
-#!/bin/sh
-# on_receive hook: $1=sender $2=subject $3=path
-if grep -q "^ping$" "$3"; then rm "$3"; fi
-```
-
--- ideally, they'd be sending similar traffic elsewhere, including back to you.
-
-### Message padding (on_send hook)
-
-The random wire padding helps, but if you want even more size obfuscation,
-an `on_send` hook can pad every message body to a fixed length:
-
-```sh
-#!/bin/sh
-# on_send hook: $1=recipient $2=subject $3=body, stdout replaces body
-body="$3"
-target=4096
-current=${#body}
-if [ "$current" -lt "$target" ]; then
-    padding=$(head -c $(( target - current )) /dev/urandom | base64)
-    echo "${body}"
-    echo "---padding---"
-    echo "${padding}"
-else
-    echo "${body}"
-fi
-```
-
-The receiver's `on_receive_raw` hook strips the padding:
-
-```sh
-#!/bin/sh
-# on_receive_raw hook: $1=sender $2=subject $3=body, stdout replaces body
-echo "$3" | sed '/^---padding---$/,$d'
-```
-
--- how does this work if the message is longer than the amount we're padding to?
-   should we recommend writing the messages separately and attach:ing them instead,
-   with large padding amounts added to normalize their size? We could even do it
-   with text manipulation in the hook, so an outgoing message is replaced with
-   the same message included as an attachment with a: "
-
-   -------------------------------------------------------------------------------
-       end of encrypted message. what follows is random data with no meaning.
-   -------------------------------------------------------------------------------
-   " style message, not in the message body, but rather in the attached file, which
-   is then zipped and sent as fixed-size chunks.
-
-### IP address hiding
-
-If you don't want your contacts (or an observer) to know your real IP address,
-you can route rmail traffic through **Tor** using `torsocks`:
-
-```sh
-# In your service file, wrap the rmail command:
-ExecStart=torsocks lua /path/to/rmail.lua /path/to/mailbox
-```
-
-This hides your IP from the contacts you communicate with (they see a Tor exit
-node instead). It adds latency but is effective. Note that your contacts'
-IP addresses are still visible to you in your contacts file.
-
--- should we add a simple setup guide for tor? idk, I think it's pretty complex.
-   maybe we could offer a separate document for it?
-
-For a more advanced approach, multiple rmail instances could form a relay chain
-where messages hop through intermediaries before reaching the final
-destination — similar to how Tor works, but using rmail's own hook system. This
-is an area for future development.
+Even though message content is encrypted, an observer can learn things
+from *when* you communicate and *how much* data you exchange.
+Hook-based techniques — cover traffic, size padding, timing jitter,
+decoy recipients, Tor — can make this much harder without any daemon
+changes.  The full treatment, including worked examples for each
+pattern, lives in [defensive-patterns.md](defensive-patterns.md).
 
 ---
 
