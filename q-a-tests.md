@@ -150,8 +150,17 @@ jump around.
 - [ ] Subsequent sync cycles after a promotion hit the new first address directly (no more fallback walk)
 - [ ] A malformed contacts file during promotion doesn't crash the sync cycle (pcall guard)
 
-**Per-IP ports (deferred, separate issue):**
-- [ ] Per-address port syntax: `HOST:PORT`, `[IPv6]:PORT`, bare `HOST` inherits `contact.port`
+### Per-IP ports (#354)
+- [ ] `alice.ip = 192.168.1.5:22` resolves to addr `192.168.1.5`, port `22`
+- [ ] `alice.ip = alice.duckdns.org:8025` resolves to addr `alice.duckdns.org`, port `8025`
+- [ ] `alice.ip = [2001:db8::1]:8025` resolves to addr `2001:db8::1`, port `8025`
+- [ ] `alice.ip = [2001:db8::1]` resolves to addr `2001:db8::1`, port inherited from `alice.port`
+- [ ] `alice.ip = 2001:db8::1` (bare IPv6, multi-colon) inherits port without trying to split
+- [ ] `alice.ip = 192.168.1.5` inherits port from `alice.port`
+- [ ] `contact.endpoints` preserves the raw line value for each entry (so promote can match it verbatim)
+- [ ] All six batch call sites send via `endpoints = contact_endpoints(c)`
+- [ ] Retry fallback uses the per-endpoint port, not a shared port
+- [ ] Promote preserves `HOST:PORT` syntax on the reordered line (no silent rewrite to bare HOST)
 
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4

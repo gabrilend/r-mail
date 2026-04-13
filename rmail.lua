@@ -418,6 +418,35 @@ local function log(fmt, ...)
     io.stderr:flush()
 end
 
+-- #354 Parse an `ip` line's value into (address, port).
+--
+--  alice.ip = 192.168.1.5:22         → addr 192.168.1.5, port 22
+--  alice.ip = alice.duckdns.org:8025 → addr alice.duckdns.org, port 8025
+--  alice.ip = [2001:db8::1]:8025     → addr 2001:db8::1, port 8025
+--  alice.ip = [2001:db8::1]          → addr 2001:db8::1, port default
+--  alice.ip = 2001:db8::1            → addr 2001:db8::1, port default
+--      (bare IPv6 literal keeps working: two-or-more colons means don't
+--       try to split off a port)
+--  alice.ip = 192.168.1.5            → addr 192.168.1.5, port default
+--
+-- "default" is the contact's `port` field; if that's also unset the
+-- caller gets nil and is expected to skip the contact as unreachable,
+-- same as it would for a missing port today.
+local function parse_endpoint(value, default_port)
+    if not value or value == "" then return nil, default_port end
+    local addr, port = value:match("^%[([^%]]+)%]:(%d+)$")
+    if addr then return addr, tonumber(port) end
+    addr = value:match("^%[([^%]]+)%]$")
+    if addr then return addr, default_port end
+    -- Count colons to distinguish bare IPv6 from HOST:PORT.
+    local colons = 0
+    for _ in value:gmatch(":") do colons = colons + 1 end
+    if colons >= 2 then return value, default_port end
+    addr, port = value:match("^(.-):(%d+)$")
+    if addr and port then return addr, tonumber(port) end
+    return value, default_port
+end
+
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
@@ -467,6 +496,14 @@ local function load_contacts()
                     if not contacts[name].ips then contacts[name].ips = {} end
                     contacts[name].ips[#contacts[name].ips + 1] = value
                     if not contacts[name].ip then contacts[name].ip = value end
+                    -- Per-IP ports (#354): keep the raw value around so
+                    -- we can reconnect (addr+port) and so promote_contact
+                    -- _address can locate the exact line to reorder.
+                    -- The port resolution happens after the full load
+                    -- so `contact.port` (the data-level default) is
+                    -- available.
+                    if not contacts[name]._ip_raw then contacts[name]._ip_raw = {} end
+                    contacts[name]._ip_raw[#contacts[name]._ip_raw + 1] = value
                 else
                     contacts[name][field] = value
                 end
@@ -490,7 +527,33 @@ local function load_contacts()
             c.ips = c.ips or {}
             local seen = false
             for _, v in ipairs(c.ips) do if v == c.ipv6 then seen = true; break end end
-            if not seen then c.ips[#c.ips + 1] = c.ipv6 end
+            if not seen then
+                c.ips[#c.ips + 1] = c.ipv6
+                c._ip_raw = c._ip_raw or {}
+                c._ip_raw[#c._ip_raw + 1] = c.ipv6
+            end
+        end
+    end
+    -- Per-IP ports (#354): resolve each raw value into (addr, port) now
+    -- that `contact.port` (the data-level default) is known.  `endpoints`
+    -- is the list call sites should use; `ips` stays around for callers
+    -- that just need addresses (DNS comparison, LAN cache).  Strip each
+    -- ips entry to just the address component so address-only consumers
+    -- don't get confused by a `host:port` string in what they expected
+    -- to be a host.
+    for _, c in pairs(contacts) do
+        if c._ip_raw then
+            local default_port = tonumber(c.port)
+            c.endpoints = {}
+            local addr_only = {}
+            for i, raw in ipairs(c._ip_raw) do
+                local addr, port = parse_endpoint(raw, default_port)
+                c.endpoints[i] = { addr = addr, port = port, raw = raw }
+                addr_only[i] = addr
+            end
+            c.ips = addr_only
+            if c.endpoints[1] then c.ip = c.endpoints[1].addr end
+            c._ip_raw = nil
         end
     end
     return contacts
@@ -508,6 +571,27 @@ local function contact_hosts(contact)
     if contact.ipv6 then out[#out + 1] = contact.ipv6 end
     if contact.ip and contact.ip ~= contact.ipv6 then
         out[#out + 1] = contact.ip
+    end
+    return out
+end
+
+-- #354: return a list of { addr, port, raw } for a contact, in preferred
+-- order.  `port` reflects any per-line override parsed out of the raw
+-- value, or falls back to `contact.port`.  `raw` is the original line
+-- value and is used by promote_contact_address to locate the exact
+-- line on disk when reordering.  Call sites that want to send to a
+-- contact should use this instead of contact_hosts() + contact.port.
+local function contact_endpoints(contact)
+    if type(contact.endpoints) == "table" and #contact.endpoints > 0 then
+        return contact.endpoints
+    end
+    -- Fallback for call paths that built a contact ad-hoc without going
+    -- through load_contacts (mostly tests and legacy migration code).
+    local out = {}
+    local default_port = tonumber(contact.port)
+    local hosts = contact_hosts(contact)
+    for i, h in ipairs(hosts) do
+        out[i] = { addr = h, port = default_port, raw = h }
     end
     return out
 end
@@ -1685,51 +1769,83 @@ end
 -- First-attempt parallelism is preserved; fallback is only serial for
 -- the entries that actually failed, which are usually a small minority.
 local function http_post_batch_with_fallback(requests)
+    -- #354: if a request carries `endpoints` (list of {addr, port, raw}),
+    -- that's the source of truth for both the primary attempt and each
+    -- fallback.  The first endpoint's addr/port is used for the primary
+    -- dispatch; subsequent endpoints are walked on connection failure.
+    -- Legacy call shape (host + hosts + port) still works unchanged.
+    for _, req in ipairs(requests) do
+        if req.endpoints and req.endpoints[1] then
+            req.host = req.endpoints[1].addr
+            req.port = req.endpoints[1].port
+        end
+    end
+
     local results = http_post_batch(requests)
-    local promotions = {}  -- addr -> true, deduped across the batch
+    local promotions = {}  -- raw -> true, deduped across the batch
     for i, req in ipairs(requests) do
-        local hosts = req.hosts
-        if results[i] and not results[i].ok and hosts and #hosts > 1 then
-            -- A status value means we got an HTTP response, i.e. the
-            -- peer is reachable.  Don't walk the fallback list in that
-            -- case — the error is application-level, not network.
-            if not results[i].status then
-                for k = 2, #hosts do
-                    if not hosts[k] or hosts[k] == "" then break end
+        if results[i] and not results[i].ok and not results[i].status then
+            local eps = req.endpoints
+            if eps and #eps > 1 then
+                for k = 2, #eps do
+                    local ep = eps[k]
+                    if not ep or not ep.addr or ep.addr == "" then break end
                     local single = {
-                        host = hosts[k], port = req.port, path = req.path,
+                        host = ep.addr, port = ep.port, path = req.path,
                         payload = req.payload, psk_key = req.psk_key,
                     }
                     local r = http_post_batch({single})[1]
                     if r and r.ok then
-                        log("fallback to %s succeeded for %s", hosts[k], req.path or "?")
+                        log("fallback to %s:%s succeeded for %s",
+                            ep.addr, tostring(ep.port), req.path or "?")
                         results[i] = r
-                        promotions[hosts[k]] = true
+                        promotions[ep.raw or ep.addr] = true
                         break
                     elseif r and r.status then
                         results[i] = r
                         break
                     end
                 end
+            else
+                local hosts = req.hosts
+                if hosts and #hosts > 1 then
+                    for k = 2, #hosts do
+                        if not hosts[k] or hosts[k] == "" then break end
+                        local single = {
+                            host = hosts[k], port = req.port, path = req.path,
+                            payload = req.payload, psk_key = req.psk_key,
+                        }
+                        local r = http_post_batch({single})[1]
+                        if r and r.ok then
+                            log("fallback to %s succeeded for %s",
+                                hosts[k], req.path or "?")
+                            results[i] = r
+                            promotions[hosts[k]] = true
+                            break
+                        elseif r and r.status then
+                            results[i] = r
+                            break
+                        end
+                    end
+                end
             end
         end
     end
 
-    -- Phase 3: rewrite contacts so each winning address jumps to the top
-    -- of its contact's block, so subsequent cycles skip the dead entries
-    -- they had to walk past this time.  Done once per batch after all
-    -- retries complete, scanning contacts once regardless of how many
-    -- requests promoted.  pcall'd so a bad contacts file can't take down
-    -- the sync cycle.
+    -- Phase 3 (#347): rewrite contacts so each winning address jumps to
+    -- the top of its contact's block, so subsequent cycles skip the
+    -- dead entries they had to walk past this time.  Matching is done
+    -- against the raw line value (which may include a :port suffix)
+    -- so HOST:PORT lines are preserved verbatim.
     if next(promotions) then
         pcall(function()
             local cs = load_contacts()
-            for addr in pairs(promotions) do
+            for raw in pairs(promotions) do
                 for cname, c in pairs(cs) do
-                    if c.ips then
-                        for _, a in ipairs(c.ips) do
-                            if a == addr then
-                                promote_contact_address(cname, addr)
+                    if c.endpoints then
+                        for _, ep in ipairs(c.endpoints) do
+                            if (ep.raw or ep.addr) == raw then
+                                promote_contact_address(cname, raw)
                                 goto next_addr
                             end
                         end
@@ -2037,8 +2153,8 @@ local function send_consent_responses(my_name)
         if c and c.ip then
             valid[#valid + 1] = resp
             requests[#requests + 1] = {
-                host = contact_addr(c), hosts = contact_hosts(c),
-                port = c.port, path = "/deliver",
+                endpoints = contact_endpoints(c),
+                path = "/deliver",
                 payload = json.encode({
                     type = "attachment_response",
                     attachment_id = resp.attachment_id,
@@ -2098,8 +2214,8 @@ local function send_attachment_cancellations(my_name)
         if c and c.ip then
             valid[#valid + 1] = item
             requests[#requests + 1] = {
-                host = contact_addr(c), hosts = contact_hosts(c),
-                port = c.port, path = "/delete",
+                endpoints = contact_endpoints(c),
+                path = "/delete",
                 payload = json.encode({
                     message_id = item.entry.message_id,
                 }),
@@ -2492,8 +2608,8 @@ local function send_next_chunks(my_name)
                 aborted = true; break
             end
             local results = http_post_batch_with_fallback({{
-                host = contact_addr(contact), hosts = contact_hosts(contact),
-                port = contact.port, path = "/deliver",
+                endpoints = contact_endpoints(contact),
+                path = "/deliver",
                 payload = json.encode({
                     type = "attachment_chunk",
                     attachment_id = att_id,
@@ -2964,8 +3080,7 @@ local function sync_outbox(my_name)
             if not op.skip then
                 local j = #requests + 1
                 requests[j] = {
-                    host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
-                    port = op.contact.port,
+                    endpoints = contact_endpoints(op.contact),
                     path = path, payload = json.encode(data),
                     psk_key = op.contact.token,
                 }
@@ -3127,8 +3242,7 @@ local function sync_inbox(my_name)
         local requests = {}
         for i, op in ipairs(ops) do
             requests[i] = {
-                host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
-                port = op.contact.port,
+                endpoints = contact_endpoints(op.contact),
                 path = "/delete",
                 payload = json.encode({
                     message_id = op.message_id,
@@ -3430,8 +3544,7 @@ local function sync_address_notifications(my_name)
     local requests = {}
     for i, op in ipairs(ops) do
         requests[i] = {
-            host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
-            port = op.contact.port,
+            endpoints = contact_endpoints(op.contact),
             path = "/update-address",
             payload = json.encode({
                 ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
