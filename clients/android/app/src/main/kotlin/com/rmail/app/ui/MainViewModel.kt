@@ -90,6 +90,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return d
     }
 
+    // #322: "I just hit Send" animation state.  The composable watches
+    // `sendingBar` and phases itself: dots countdown → hold-at-3 until
+    // sync completes → slide off + success/failure text → gone.
+    //
+    // The dot count is fixed small (15) and ticks quickly (5/s) so the
+    // animation is decorative, not a literal timer.  Actual delivery
+    // status drives the phase transitions via syncStatus updates.
+    data class SendingBar(
+        val startedAtMs: Long,
+        val outboxFilename: String
+    )
+    private val _sendingBar = MutableStateFlow<SendingBar?>(null)
+    val sendingBar: StateFlow<SendingBar?> = _sendingBar
+    fun markSendingStart(filename: String) {
+        _sendingBar.value = SendingBar(System.currentTimeMillis(), filename)
+    }
+    fun clearSendingBar() { _sendingBar.value = null }
+
     init {
         // Run migration from old single-mailbox layout
         registry.migrateFromLegacy()

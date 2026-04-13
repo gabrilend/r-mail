@@ -246,11 +246,15 @@ jump around.
 - [ ] Typing below keyboard scrolls by ~3 lines, not 1
 
 ### Sending progress animation (#322)
-- [ ] Green notification bar slides in with "sending..." after send
-- [ ] Dot progress bar counts down to sync (1 dot/sec, 30 dots)
-- [ ] Dots disappear randomly, last 3 disappear last
-- [ ] Final 3 seconds: last 3 dots slide off right edge
-- [ ] Text becomes "sent" (delivered) or "ready" (offline/unreachable)
+- [ ] Green bar appears at the top of the Inbox panel after Send
+- [ ] Text starts as "sending…", 15 white dots visible
+- [ ] Dots disappear in random order from the left 12 positions (~5/sec)
+- [ ] Rightmost 3 dots stay lit during the countdown
+- [ ] When sync finishes successfully, the last 3 dots slide off the right edge (not fade)
+- [ ] Text changes to "sent" at the end of a successful send
+- [ ] "sent" auto-dismisses after ~1.5 s
+- [ ] When sync fails (daemon unreachable), text changes to "ready" and the bar persists
+- [ ] Repeat send: new animation replaces the previous one cleanly
 
 ## 9. Android — reading and editing outbox messages
 

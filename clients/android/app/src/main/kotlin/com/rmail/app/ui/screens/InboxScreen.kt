@@ -7,6 +7,10 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,6 +20,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.layout.*
@@ -329,6 +334,8 @@ fun InboxScreen(
                             sb.append(draftBody)
                             vm.saveOutboxFile(filename, sb.toString())
                             vm.uploadAttachmentsInBackground(filename, draftAttachments.map { it.uri })
+                            // #322: trigger the top-bar sending animation
+                            vm.markSendingStart(filename)
                             draftRecipients = listOf("")
                             draftAttachments.clear()
                             draftSubject = ""
@@ -431,6 +438,10 @@ fun InboxScreen(
                         modifier = Modifier.padding(8.dp), color = MaterialTheme.colorScheme.error)
                 }
             }
+            // #322: post-Send animation bar — renders only when there's
+            // an in-flight send, shows dots counting down, then reports
+            // "sent" (delivered) or "ready" (queued, will retry).
+            SendingProgressBar(vm)
             // Action bar: clear/save for contacts or settings (hidden when keyboard is open)
             if (!isKeyboardOpen) {
                 val showContactsActions = currentPanel == Panel.CONTACTS && contactsModified &&
@@ -1806,5 +1817,119 @@ private fun SwipeToDismissMessageItem(filename: String, onDelete: () -> Unit, on
         }
     }) {
         Surface(color = MaterialTheme.colorScheme.background) { MessageListItem(filename, onClick) }
+    }
+}
+
+// ── #322 Sending progress bar ──────────────────────────────────────────────
+//
+// Green bar slides in when the user hits Send.  A row of 15 dots empties
+// out left-to-right (randomised among positions 0..11) at 5 dots/sec,
+// ~2.4 s total.  The rightmost 3 dots stay visible while sync is still
+// running.  When syncStatus reports done, the last 3 slide off the
+// right edge and the text settles on "sent" (success) or "ready"
+// (failure — message queued locally, will retry).  Bar auto-dismisses
+// 1.5 s after the final text appears so it doesn't pile up on repeat
+// sends.
+@Composable
+private fun SendingProgressBar(vm: MainViewModel) {
+    val bar by vm.sendingBar.collectAsState()
+    val syncStatus by vm.syncStatus.collectAsState()
+    val b = bar ?: return
+
+    val totalDots = 15
+    val safeTail = 3  // last N dots reserved for the "still working" hold
+    val tickMs = 200L
+
+    // Ticks ~5 times per second, driving both the countdown state and
+    // the final-slide timing.
+    var tick by remember(b.startedAtMs) { mutableStateOf(0) }
+    LaunchedEffect(b.startedAtMs) {
+        while (true) {
+            kotlinx.coroutines.delay(tickMs)
+            tick += 1
+        }
+    }
+
+    // Which dots have been hidden so far.  Picked randomly from the
+    // first (totalDots - safeTail) positions each tick until that pool
+    // is exhausted; after that we wait for the sync to settle.
+    val hidden = remember(b.startedAtMs) { mutableStateListOf<Int>() }
+    LaunchedEffect(tick) {
+        if (hidden.size < totalDots - safeTail) {
+            val candidates = (0 until totalDots - safeTail).filter { it !in hidden }
+            if (candidates.isNotEmpty()) hidden.add(candidates.random())
+        }
+    }
+
+    val countdownDone = hidden.size >= totalDots - safeTail
+    val syncSettled = syncStatus == SyncStatus.IDLE ||
+                      syncStatus == SyncStatus.ERROR
+    val finalPhase = countdownDone && syncSettled
+    val text = when {
+        !finalPhase -> "sending…"
+        syncStatus == SyncStatus.ERROR -> "ready"
+        else -> "sent"
+    }
+
+    // Auto-dismiss 1.5 s after we've settled (unless it's "ready" —
+    // keep that visible so the user knows the message is queued
+    // locally).
+    LaunchedEffect(finalPhase, syncStatus) {
+        if (finalPhase && syncStatus != SyncStatus.ERROR) {
+            kotlinx.coroutines.delay(1500)
+            vm.clearSendingBar()
+        }
+    }
+
+    Surface(color = Color(0xFF2E7D32), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text,
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(end = 12.dp).widthIn(min = 64.dp)
+            )
+            Row(
+                modifier = Modifier.weight(1f).clipToBounds(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (i in 0 until totalDots) {
+                    val isTail = i >= totalDots - safeTail
+                    // During the countdown, non-tail dots disappear
+                    // (alpha fades out) as their index is added to
+                    // `hidden`; tail dots stay lit.  In the final
+                    // phase, tail dots physically slide off the right
+                    // edge (kept at alpha 1 so the exit is visible),
+                    // while the already-hidden non-tail dots just stay
+                    // invisible.
+                    val visible = isTail || i !in hidden
+                    val slideOff = finalPhase && isTail
+                    val offset by animateDpAsState(
+                        targetValue = if (slideOff) 240.dp else 0.dp,
+                        animationSpec = tween(
+                            durationMillis = 550,
+                            delayMillis = (i - (totalDots - safeTail)).coerceAtLeast(0) * 120
+                        ),
+                        label = "dot-slide"
+                    )
+                    val alpha by animateFloatAsState(
+                        targetValue = if (visible) 1f else 0f,
+                        animationSpec = tween(durationMillis = 150),
+                        label = "dot-alpha"
+                    )
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .offset(x = offset)
+                            .graphicsLayer { this.alpha = alpha }
+                            .background(Color.White, androidx.compose.foundation.shape.CircleShape)
+                    )
+                }
+            }
+        }
     }
 }
