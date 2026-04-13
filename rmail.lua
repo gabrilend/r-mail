@@ -525,6 +525,37 @@ local function log(fmt, ...)
     io.stderr:flush()
 end
 
+-- ---- Per-cycle reachability tracking (#324) -----------------------------
+--
+-- Without this, one offline contact produces N separate "failed to notify
+-- X" lines per sync cycle (one per queued op).  Each op site now reports
+-- its outcome here instead; run_sync_cycle flushes a single
+-- "unreachable contacts: a, b, c" line at the end.  A contact is called
+-- unreachable only if every op for them failed — one success anywhere in
+-- the cycle keeps them off the summary.
+
+local _cycle_contact_stats = {}
+
+local function note_contact_result(contact, ok)
+    if not contact or contact == "" then return end
+    local s = _cycle_contact_stats[contact]
+    if not s then s = {ok = 0, fail = 0}; _cycle_contact_stats[contact] = s end
+    if ok then s.ok = s.ok + 1 else s.fail = s.fail + 1 end
+end
+
+local function flush_unreachable_summary()
+    local unreachable = {}
+    for name, s in pairs(_cycle_contact_stats) do
+        if s.fail > 0 and s.ok == 0 then
+            unreachable[#unreachable + 1] = name
+        end
+    end
+    _cycle_contact_stats = {}
+    if #unreachable == 0 then return end
+    table.sort(unreachable)
+    log("unreachable contacts this cycle: %s", table.concat(unreachable, ", "))
+end
+
 -- #354 Parse an `ip` line's value into (address, port).
 --
 --  alice.ip = 192.168.1.5:22         → addr 192.168.1.5, port 22
@@ -2294,6 +2325,7 @@ local function send_consent_responses(my_name)
     local remaining = {}
     local pending = load_state("consent-pending.json")
     for i, resp in ipairs(valid) do
+        note_contact_result(resp.to, results[i].ok)
         if results[i].ok then
             log("sent consent %s to %s", resp.consent and "accepted" or "declined", resp.to)
             local entry = pending[resp.attachment_id]
@@ -2318,7 +2350,8 @@ local function send_consent_responses(my_name)
             end
         else
             remaining[#remaining + 1] = resp
-            log("failed to send consent response to %s (will retry)", resp.to)
+            -- The per-op failure detail is captured in the unreachable
+            -- summary at cycle end (#324); no per-contact log here.
         end
     end
     save_state("consent-pending.json", pending)
@@ -2360,12 +2393,12 @@ local function send_attachment_cancellations(my_name)
     end
     local results = http_post_batch_with_fallback(requests)
     for i, item in ipairs(valid) do
+        note_contact_result(item.entry["from"], results[i].ok)
         if results[i].ok then
             pending[item.att_id] = nil
             log("notified %s of attachment cancellation: %s", item.entry["from"], item.att_id)
-        else
-            log("failed to notify %s of attachment cancellation (will retry)", item.entry["from"])
         end
+        -- failure: detail rolls into the unreachable summary (#324)
     end
     save_state("consent-pending.json", pending)
     return true
@@ -2772,14 +2805,19 @@ local function send_next_chunks(my_name)
                 if type(new_missing) == "table" then
                     transfer.missing = new_missing
                 end
+                note_contact_result(transfer.to, true)
                 changed = true; did_work = true
                 if #transfer.missing == 0 then break end
             elseif resp.cancelled then
+                -- Cancelled by receiver is reachability success from our
+                -- perspective — we heard back.
+                note_contact_result(transfer.to, true)
                 log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
                 cancelled = true; break
             else
-                log("chunk %d/%d failed for %s -> %s, will retry",
-                    chunk_index + 1, transfer.total_chunks, transfer.filename, transfer.to)
+                note_contact_result(transfer.to, false)
+                -- Chunk-specific detail dropped; reachability rolls into
+                -- the unreachable summary (#324).
                 aborted = true; break
             end
         end
@@ -3381,6 +3419,13 @@ local function sync_outbox(my_name)
 
         -- Phase 3: process results
         for i, op in ipairs(ops) do
+            -- Record contact reachability for the cycle-end summary (#324).
+            -- 404 counts as reachable — we heard back, the recipient just
+            -- said "already done on my end".
+            if not op.skip then
+                local reachable = results[i].ok or results[i].status == 404
+                note_contact_result(op.recipient, reachable)
+            end
             if op.skip then
                 -- already handled in Phase 2
             elseif op.type == "notify_removal" then
@@ -3391,9 +3436,8 @@ local function sync_outbox(my_name)
                         log("notified %s of removal: %s", op.recipient, op.filename)
                         did_work = true
                     end
-                else
-                    log("failed to notify %s of removal: %s (will retry)", op.recipient, op.filename)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
@@ -3404,9 +3448,8 @@ local function sync_outbox(my_name)
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
                     did_work = true
-                else
-                    log("failed to send %s to %s", op.filename, op.recipient)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             elseif op.type == "update" then
                 if results[i].ok then
                     log("updated: %s -> %s", op.filename, op.recipient)
@@ -3418,9 +3461,8 @@ local function sync_outbox(my_name)
                     end
                     log("update 404: %s removed %s from inbox", op.recipient, op.filename)
                     did_work = true
-                else
-                    log("failed to update %s for %s (will retry)", op.filename, op.recipient)
                 end
+                -- other failures: roll into the unreachable summary (#324)
             elseif op.type == "attachment_request" then
                 if results[i].ok then
                     log("sent attachment request to %s: %s", op.recipient, op.att_filename)
@@ -3433,7 +3475,8 @@ local function sync_outbox(my_name)
                         release_zip(att_state, transfer.zip_id, transfer.compressed_path)
                         att_state_changed = true
                     end
-                    log("failed to send attachment request to %s (will retry)", op.recipient)
+                    -- the release-and-cleanup is the action; reachability
+                    -- detail rolls into the unreachable summary (#324)
                 end
             elseif op.type == "notify_deletion" then
                 if results[i].ok or results[i].status == 404 then
@@ -3442,9 +3485,8 @@ local function sync_outbox(my_name)
                     end
                     log("notified %s of deletion: %s", op.recipient, op.filename)
                     did_work = true
-                else
-                    log("failed to notify %s of deletion: %s (will retry)", op.recipient, op.filename)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             end
         end
     end
@@ -3538,13 +3580,14 @@ local function sync_inbox(my_name)
         end
         local results = http_post_batch_with_fallback(requests)
         for i, op in ipairs(ops) do
-            if results[i].ok or results[i].status == 404 then
+            local reachable = results[i].ok or results[i].status == 404
+            note_contact_result(op.sender, reachable)
+            if reachable then
                 state[op.filename] = nil
                 log("notified %s of inbox deletion: %s", op.sender, op.filename)
                 did_work = true
-            else
-                log("failed to notify %s of inbox deletion: %s (will retry)", op.sender, op.filename)
             end
+            -- failure: rolls into the unreachable summary (#324)
         end
     end
 
@@ -3842,13 +3885,13 @@ local function sync_address_notifications(my_name)
     local results = http_post_batch_with_fallback(requests)
     local did_work = false
     for i, op in ipairs(ops) do
+        note_contact_result(op.name, results[i].ok)
         if results[i].ok then
             pending[op.name] = nil
             log("notified %s of address change", op.name)
             did_work = true
-        else
-            log("failed to notify %s of address change (will retry)", op.name)
         end
+        -- failure: rolls into the unreachable summary (#324)
     end
 
     save_state("pending-address.json", pending)
@@ -4633,6 +4676,9 @@ local function run_sync_cycle(rt)
     local w6 = send_next_chunks(rt.my_name)
     local w7 = send_attachment_cancellations(rt.my_name)
     write_transfers_file(load_state("chunks-outgoing.json"))
+    -- One summary log for contacts whose every op failed this cycle
+    -- (#324), instead of a separate "failed to X" line per queued op.
+    flush_unreachable_summary()
     if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
         rt.interval = math.max(rt.min_interval, rt.interval - 240)
         log("had work, interval -> %ds", rt.interval)

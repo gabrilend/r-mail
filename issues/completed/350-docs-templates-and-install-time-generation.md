@@ -136,4 +136,9 @@ One-shot:
 
 ## Status
 
-In progress — being executed in the same commit as the plan finalization.
+Complete.  Landed in 3fd6b32 (initial system + migration); every
+install.sh run since then regenerates docs/*.md from the templates.
+`docs/looking-for-docs.md` stays in place alongside the generated
+files (no longer deleted by generate_docs — that was the one
+deviation from the plan above, to keep `git status` clean after
+install).
