@@ -72,6 +72,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var serverLanIp: String? = null
 
+    // #358: Pending compose draft delivered from ReadScreen (forward /
+    // reply actions).  InboxScreen consumes it when it appears, fills
+    // draftRecipients/draftSubject/draftBody, and clears the pending
+    // value.  Null means "nothing queued."
+    data class PendingDraft(
+        val recipients: List<String>,
+        val subject: String,
+        val body: String
+    )
+    private val _pendingDraft = MutableStateFlow<PendingDraft?>(null)
+    val pendingDraft: StateFlow<PendingDraft?> = _pendingDraft
+    fun queuePendingDraft(draft: PendingDraft) { _pendingDraft.value = draft }
+    fun consumePendingDraft(): PendingDraft? {
+        val d = _pendingDraft.value
+        _pendingDraft.value = null
+        return d
+    }
+
     init {
         // Run migration from old single-mailbox layout
         registry.migrateFromLegacy()
@@ -206,6 +224,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val s = store ?: return null
         return try { MailMessage(filename, s.readInbox(filename)) }
         catch (_: Exception) { null }
+    }
+
+    // #358: the sender of an inbox message lives in sync-state, not in
+    // the message body.  Used by ReadScreen's Reply flow to pre-address
+    // the composer.  The sync-state map is keyed by message id, so we
+    // scan by filename.
+    fun senderOfInbox(filename: String): String {
+        val s = store ?: return ""
+        return try {
+            s.readSyncState().inbox.values
+                .firstOrNull { it.filename == filename }
+                ?.from ?: ""
+        } catch (_: Exception) { "" }
+    }
+
+    // #357: enumerate things on this device that the home server doesn't
+    // have a known-good copy of yet.  Used by the delete-mailbox
+    // confirmation dialog so the user can see what they might lose by
+    // severing the connection now.
+    //
+    // "Unsynced" here means:
+    //   - local outbox files that the server hasn't confirmed
+    //     delivery of
+    //   - (future) in-flight chunked attachment uploads
+    //   - (future) contacts edits not yet pushed
+    //
+    // Currently conservative: we report every local outbox file as
+    // potentially unsynced because the phone's sync-state doesn't
+    // separately track per-file delivery confirmation.  Better to
+    // over-warn than under-warn on a destructive action.
+    fun unsyncedSummary(): List<String> {
+        val s = store ?: return emptyList()
+        val items = mutableListOf<String>()
+        s.listOutbox().forEach { items.add("outbox/$it") }
+        return items
+    }
+
+    // #357: fully remove a mailbox: drop it from the registry, delete
+    // the local mailbox directory (MailStore), and deselect if this was
+    // the active mailbox.  Caller is responsible for navigating away.
+    fun removeMailbox(id: String) {
+        if (_activeMailboxId.value == id) {
+            deselectMailbox()
+        }
+        registry.remove(id)
+        _mailboxes.value = registry.loadAll()
     }
 
     fun loadOutboxMessage(filename: String): MailMessage? {

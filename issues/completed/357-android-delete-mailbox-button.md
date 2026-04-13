@@ -51,4 +51,21 @@ From `issues/android-123`.
 
 ## Status
 
-Not started.
+Shipped.
+
+- New `Danger zone` section at the bottom of the Settings panel
+  with an outlined red **Delete mailbox** button.
+- Tapping it opens an `AlertDialog` explaining that severing the
+  connection does not touch the home server, then lists anything
+  on the device that hasn't been round-tripped to the server yet.
+  Today that's the local outbox contents (conservative: every
+  local outbox file is reported, since the phone's sync-state
+  doesn't yet track per-file delivery confirmation — better to
+  over-warn than silently lose).
+- `MainViewModel.unsyncedSummary()` produces the list;
+  `MainViewModel.removeMailbox(id)` deselects if active, removes
+  the config from `MailboxRegistry`, and the registry's own
+  `remove()` deletes the on-device mailbox directory.
+- On confirm, the dialog closes, the mailbox is removed, and the
+  Inbox screen calls `onBack()` to navigate to the mailbox list.
+- Cancel closes the dialog without touching anything.

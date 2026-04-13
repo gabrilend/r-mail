@@ -134,6 +134,20 @@ fun InboxScreen(
     var draftSubject by remember { mutableStateOf("") }
     var draftBody by remember { mutableStateOf("") }
 
+    // #358: pick up a forward/reply draft queued by ReadScreen, seed the
+    // composer state with it, and jump to the Write panel.  Consume the
+    // pending value so a back-and-forth navigation doesn't refill again.
+    val pendingDraft by vm.pendingDraft.collectAsState()
+    LaunchedEffect(pendingDraft) {
+        val d = pendingDraft ?: return@LaunchedEffect
+        draftRecipients = d.recipients.ifEmpty { listOf("") }
+        draftSubject = d.subject
+        draftBody = d.body
+        draftAttachments.clear()
+        currentPanel = Panel.WRITE
+        vm.consumePendingDraft()
+    }
+
     // Contacts state
     var contactsContent by remember { mutableStateOf(vm.readContacts()) }
     val savedContacts = remember { mutableStateOf(vm.readContacts()) }
@@ -211,21 +225,34 @@ fun InboxScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = {
-                        if (showContactEditor) {
-                            showContactEditor = false
-                        } else {
-                            onBack()
+                    // #359: only show the ← arrow when it truly means
+                    // "back one step" — i.e. the contact-editor sub-view.
+                    // At the top level, tapping the mailbox name (title)
+                    // jumps to the mailbox list; an arrow there misled
+                    // users into thinking it meant "previous screen".
+                    if (showContactEditor) {
+                        IconButton(onClick = { showContactEditor = false }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to contacts")
                         }
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = if (showContactEditor) "Back to contacts" else "Mailboxes")
                     }
                 },
                 title = {
                     val activeId by vm.activeMailboxId.collectAsState()
                     val config = activeId?.let { vm.registry.get(it) }
-                    Text(config?.name?.ifBlank { null } ?: config?.host ?: "Mailbox")
+                    val label = config?.name?.ifBlank { null } ?: config?.host ?: "Mailbox"
+                    if (showContactEditor) {
+                        Text(label)
+                    } else {
+                        // #359: title doubles as the "go to mailbox list"
+                        // tap target.  A subtle underline signals it's
+                        // interactive without shouting about it.
+                        Text(
+                            label,
+                            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+                            modifier = Modifier.clickable(onClick = onBack)
+                        )
+                    }
                 },
                 actions = {
                     // Only show refresh on data panels (inbox, outbox, files)
@@ -546,7 +573,14 @@ fun InboxScreen(
                 }
                 Panel.SETTINGS -> SettingsPanel(vm,
                     onModified = { settingsModified = true },
-                    onSaved = { settingsModified = false })
+                    onSaved = { settingsModified = false },
+                    onDeleteMailbox = {
+                        val id = vm.activeMailboxId.value
+                        if (id != null) {
+                            vm.removeMailbox(id)
+                            onBack()
+                        }
+                    })
                 Panel.WRITE -> ComposePanel(
                     vm = vm,
                     recipients = draftRecipients,
@@ -1019,7 +1053,12 @@ private fun IpAddressField(
 // ── Settings panel ──────────────────────────────────────────────────────────
 
 @Composable
-private fun SettingsPanel(vm: MainViewModel, onModified: () -> Unit, onSaved: () -> Unit) {
+private fun SettingsPanel(
+    vm: MainViewModel,
+    onModified: () -> Unit,
+    onSaved: () -> Unit,
+    onDeleteMailbox: () -> Unit
+) {
     val activeConfig = vm.activeMailboxId.collectAsState().value?.let { vm.registry.get(it) }
     var host by remember(activeConfig) { mutableStateOf(activeConfig?.host ?: "") }
     var port by remember(activeConfig) { mutableStateOf(activeConfig?.port?.toString() ?: "8025") }
@@ -1115,6 +1154,79 @@ private fun SettingsPanel(vm: MainViewModel, onModified: () -> Unit, onSaved: ()
         ColorField("Background color", bgColor) { bgColor = it; markModified() }
         ColorField("Text color", fgColor) { fgColor = it; markModified() }
         ColorField("Accent color", accentColor) { accentColor = it; markModified() }
+
+        // #357: destructive action — delete the mailbox from this device.
+        // Placed at the very bottom and wrapped in a confirmation dialog
+        // that enumerates unsynced items so the user knows what (if
+        // anything) they'd lose by disconnecting now.
+        if (activeConfig != null) {
+            Spacer(Modifier.height(16.dp))
+            Text("Danger zone", style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.error)
+            var showDeleteDialog by remember { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = { showDeleteDialog = true },
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp, MaterialTheme.colorScheme.error
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Delete mailbox")
+            }
+            if (showDeleteDialog) {
+                val unsynced = remember { vm.unsyncedSummary() }
+                AlertDialog(
+                    onDismissRequest = { showDeleteDialog = false },
+                    title = { Text("Delete this mailbox?") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("This will permanently sever your connection " +
+                                "to your mailbox from this device. It will not " +
+                                "delete anything on the home server.")
+                            if (unsynced.isEmpty()) {
+                                Text("Your mailbox files are safe on the home " +
+                                    "server.",
+                                    style = MaterialTheme.typography.bodyMedium)
+                            } else {
+                                Text("Your mailbox files should be safe on the " +
+                                    "home server, unless they haven't synced " +
+                                    "yet. Here are the files that haven't " +
+                                    "synced yet:",
+                                    style = MaterialTheme.typography.bodyMedium)
+                                Column(
+                                    modifier = Modifier.padding(start = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    unsynced.forEach {
+                                        Text("  $it",
+                                            style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showDeleteDialog = false
+                                onDeleteMailbox()
+                            },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) { Text("Delete") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showDeleteDialog = false }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+        }
     }
 }
 

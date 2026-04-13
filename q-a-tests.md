@@ -273,6 +273,28 @@ jump around.
 - [ ] +/- control adjusts width in increments of 20 (60, 80, 100, 120)
 - [ ] Width preference persists across sessions
 
+### Delete mailbox (#357)
+- [ ] Settings panel shows a "Danger zone" section with a red "Delete mailbox" button
+- [ ] Tapping it opens a confirmation dialog
+- [ ] Dialog says the deletion is local-only and doesn't touch the home server
+- [ ] If everything is in sync, dialog shows "Your mailbox files are safe on the home server"
+- [ ] If the outbox has unsynced files, dialog lists them as "outbox/<filename>"
+- [ ] Confirm removes the mailbox from the registry, deletes the on-device mailbox directory, and navigates back to the mailbox list
+- [ ] Cancel leaves everything unchanged
+
+### Reply / Forward (#358)
+- [ ] Opening an inbox message and tapping Reply switches to the Write panel with recipient = sender, subject = "Re: <original>", body = quoted original
+- [ ] Opening the overflow menu and tapping Forward switches to Write with recipient = empty, subject = "Fwd: <original>", body = quoted original
+- [ ] Re-forwarding a "Fwd: foo" message still yields "Fwd: foo" (no stacking)
+- [ ] Re-replying to a "Re: foo" message still yields "Re: foo"
+- [ ] Forward from the outbox-read screen works identically (recipient empty, Fwd: subject, quoted body)
+- [ ] Reply on the outbox-read screen is a no-op (no own-message replies)
+
+### Tappable mailbox title (#359)
+- [ ] Top-level mailbox view has no "←" arrow in the top-left
+- [ ] The mailbox name (title) is underlined and tappable, jumping to the mailbox list
+- [ ] Inside the contact editor sub-view, the "←" arrow still appears and returns to the contacts panel
+
 ### Orphan + button (#319)
 - [ ] Write panel's top-bar no longer has a "+" button (only Send)
 - [ ] Outbox panel's "+" still jumps to the Write panel

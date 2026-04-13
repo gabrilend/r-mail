@@ -52,4 +52,28 @@ From `issues/android-123`.
 
 ## Status
 
-Not started.
+Shipped. Reply wired up in the same pass.
+
+- `ReadScreen`'s `onReply` / `onForward` callback signatures now
+  carry `(sender, subject, body)` / `(subject, body)` respectively,
+  with body being the `| `-quoted content from the old
+  `buildReply`/`buildForward` helpers (consolidated into a single
+  `buildQuoted`).
+- `MainViewModel.senderOfInbox(filename)` looks up the sender from
+  `sync-state.inbox`.
+- `MainActivity`'s NavHost wires both callbacks to
+  `vm.queuePendingDraft(...)` and `navController.popBackStack()`:
+    - **Reply** — `recipients = listOf(sender)`,
+      `subject = "Re: " + original` (existing `Re:`/`Fwd:` prefix
+      stripped to avoid stacking).
+    - **Forward** — `recipients = listOf("")`,
+      `subject = "Fwd: " + original` (same dedup).
+    - On the outbox `ReadScreen`, Reply is a no-op (you don't
+      reply to your own outgoing messages); Forward behaves the
+      same as the inbox forward.
+- `MainViewModel.pendingDraft: StateFlow<PendingDraft?>` is
+  observed by `InboxScreen`; a `LaunchedEffect` fills
+  `draftRecipients` / `draftSubject` / `draftBody`, switches
+  `currentPanel` to `WRITE`, and calls
+  `vm.consumePendingDraft()` so bouncing between panels doesn't
+  re-populate.

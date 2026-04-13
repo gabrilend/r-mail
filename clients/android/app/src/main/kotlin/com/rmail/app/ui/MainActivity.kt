@@ -110,7 +110,33 @@ class MainActivity : ComponentActivity() {
                         ReadScreen(
                             filename = filename, vm = vm,
                             onBack = { navController.popBackStack() },
-                            onReply = {}, onForward = {}
+                            onReply = { sender, subject, body ->
+                                // #358: Reply seeds the composer with the
+                                // sender as recipient, Re: prefix on the
+                                // subject, and the quoted body the Read
+                                // screen already built.
+                                vm.queuePendingDraft(MainViewModel.PendingDraft(
+                                    recipients = listOf(sender),
+                                    subject = "Re: " + subject.removePrefix("Re: ")
+                                        .removePrefix("Fwd: "),
+                                    body = body
+                                ))
+                                navController.popBackStack()
+                            },
+                            onForward = { subject, body ->
+                                // #358: Forward seeds with an empty
+                                // recipient slot, Fwd: prefix on the
+                                // subject (deduped so repeated forwards
+                                // don't stack "Fwd: Fwd: Fwd:"), and the
+                                // quoted body.
+                                vm.queuePendingDraft(MainViewModel.PendingDraft(
+                                    recipients = listOf(""),
+                                    subject = "Fwd: " + subject.removePrefix("Fwd: ")
+                                        .removePrefix("Re: "),
+                                    body = body
+                                ))
+                                navController.popBackStack()
+                            }
                         )
                     }
 
@@ -119,7 +145,16 @@ class MainActivity : ComponentActivity() {
                         ReadScreen(
                             filename = filename, vm = vm, isOutbox = true,
                             onBack = { navController.popBackStack() },
-                            onReply = {}, onForward = {}
+                            onReply = { _, _, _ -> /* no reply on own outbox */ },
+                            onForward = { subject, body ->
+                                vm.queuePendingDraft(MainViewModel.PendingDraft(
+                                    recipients = listOf(""),
+                                    subject = "Fwd: " + subject.removePrefix("Fwd: ")
+                                        .removePrefix("Re: "),
+                                    body = body
+                                ))
+                                navController.popBackStack()
+                            }
                         )
                     }
                 }

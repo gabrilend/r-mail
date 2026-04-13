@@ -22,8 +22,12 @@ fun ReadScreen(
     vm: MainViewModel,
     isOutbox: Boolean = false,
     onBack: () -> Unit,
-    onReply: (String) -> Unit,
-    onForward: (String) -> Unit
+    // #358: signatures carry enough context for the caller to seed a
+    // composer draft — sender (for Reply's "to:"), subject (for the
+    // Re:/Fwd: prefix), and the pre-quoted body built by buildReply /
+    // buildForward on this screen.
+    onReply: (sender: String, subject: String, body: String) -> Unit,
+    onForward: (subject: String, body: String) -> Unit
 ) {
     // For outbox files, re-read periodically to show upload progress
     var message by remember(filename) {
@@ -79,7 +83,9 @@ fun ReadScreen(
                             Icon(Icons.Default.Delete, contentDescription = "Delete")
                         }
                     } else {
-                        IconButton(onClick = { onReply(buildReply(msg)) }) {
+                        IconButton(onClick = {
+                            onReply(vm.senderOfInbox(filename), filename, buildQuoted(msg))
+                        }) {
                             Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Reply")
                         }
                         Box {
@@ -94,7 +100,7 @@ fun ReadScreen(
                                     text = { Text("Forward") },
                                     onClick = {
                                         menuExpanded = false
-                                        onForward(buildForward(msg))
+                                        onForward(filename, buildQuoted(msg))
                                     }
                                 )
                                 DropdownMenuItem(
@@ -206,14 +212,12 @@ private fun ConsentView(
     }
 }
 
-private fun buildReply(msg: MailMessage): String {
-    val from = msg.content.lines()
-        .firstOrNull { it.startsWith("from:") }
-        ?.removePrefix("from:")?.trim() ?: ""
-    return "to: $from\n\n"
-}
-
-private fun buildForward(msg: MailMessage): String {
+// #358: single helper that produces the "quoted original" portion of a
+// reply or forward.  Recipients and subject are handled by the caller
+// (MainActivity wires the ReadScreen callbacks to seed the composer's
+// draftRecipients and draftSubject directly), so this only needs to
+// return the body content.
+private fun buildQuoted(msg: MailMessage): String {
     val quoted = msg.content.lines().joinToString("\n") { "| $it" }
-    return "to: \n\n\n\n$quoted"
+    return "\n\n$quoted"
 }

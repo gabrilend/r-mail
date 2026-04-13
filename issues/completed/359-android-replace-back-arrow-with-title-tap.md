@@ -48,4 +48,15 @@ From `issues/android-123`.
 
 ## Status
 
-Not started.
+Shipped.
+
+- `InboxScreen`'s `navigationIcon` slot is empty when at the
+  mailbox top level; the back arrow only appears in the
+  contact-editor sub-view (where "back one step" matches the
+  visual affordance).
+- The mailbox-name title is now rendered with
+  `TextDecoration.Underline` and a `clickable { onBack() }`
+  modifier. Tapping it navigates to the mailbox list — same
+  destination as the old arrow, same physical tap target.
+- No change to the Contact editor back-arrow or to any other
+  screen's `← arrow` affordance.
