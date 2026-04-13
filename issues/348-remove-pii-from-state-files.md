@@ -158,7 +158,61 @@ and anyone auditing `.state/` for what rmail retains.
 
 ## Status
 
-Partially started by #346 (attachment-consent flow hardening). Remaining
-scope is large enough that it should be split into per-file migrations,
-starting with the simplest (nat/address state) and working up to the big
-ones (inbox.json, outbox.json). Pick one file per PR.
+Partially complete.  Split into per-file migrations as the issue
+recommended; five commits landed so far:
+
+- **step 1** (7d11b30) — `nat_security_warned.json` and
+  `pending-address.json` now key by SHA-256("rmail:contact:" || name)
+  rather than plaintext contact names.  `migrate_hashed_state()`
+  one-shot upgrades legacy files on load.  Also dropped the dead
+  per-contact timestamp value in `nat_security_warned.json` (it was
+  never read back; a truthy check was the only use).
+- **step 2** (bundled into 07681da) — `chunks-outgoing.json` dropped
+  the `compressed_path` field; new `zip_path_for(zip_id)` helper
+  derives it from the stored `zip_id` instead.  One less filesystem
+  path in state.
+- **step 3** (ecb03fc) — `chunks-outgoing.json` hashes the `.to`
+  (recipient contact) field.  New `load_chunks_outgoing()` /
+  `save_chunks_outgoing()` wrappers translate at the disk boundary
+  (hash on save, resolve to name on load from current contacts) so
+  consumer code keeps using plaintext names in memory.
+- **step 4** (b0be14f) — `consent-pending.json` hashes the `.from`
+  field, `consent-responses.json` hashes the `.to` field.  Same
+  wrapper pattern as step 3.
+- **step 5** (3cd723c) — `outbox.json` no longer stores plaintext
+  shared-secret tokens in `recipients[name].token`.  Replaced with
+  `token_hash = hex_sha256(token)`; rename-detection code hashes
+  contacts' tokens into the same space so it still works.
+  `save_outbox_state()` wrapper strips legacy `.token` fields on
+  write, so pre-#348 state entries get scrubbed on their next save.
+
+Shared infrastructure landed during step 5: `hex_sha256(data)` helper
+consolidates the three sites that previously had hand-rolled
+bytes→hex loops (`hash_contact_name`, `canonical_contacts_hash`, and
+the rename-detection path).
+
+## Still outstanding
+
+The big structural change — **re-key `inbox.json` and `outbox.json`
+by `message_id` instead of filename (= subject)** — is the remaining
+work flagged by this issue.  It's deliberately out of scope for the
+steps above: touches every handler that reads/writes those files,
+breaks the O(1) filename lookup that most code relies on, and
+involves designing a secondary index or accepting O(n) scans.
+
+Also outstanding:
+
+- `chunks-outgoing.json` still stores `.original_path` (user filesystem
+  path), `.filename` (attachment name), `.outbox_file` (message
+  subject).  Of these, filename is on the wire anyway; original_path
+  is tightly coupled to dedup, cleanup, and attach-line removal; the
+  outbox_file link makes sense only once the outbox.json restructure
+  lands.  Revisit after the inbox/outbox re-key.
+- `consent-pending.json` still stores `.filename` and `.inbox_file`.
+  Same "on the wire anyway" trade-off for filename; `.inbox_file` is
+  the path of a user-visible file so its leakage is redundant rather
+  than additive.
+- `inbox.json` entries still include `.from` (contact name).  Could
+  be hashed like the other files using the same wrapper pattern;
+  deliberately deferred to the inbox re-key so we only touch those
+  call sites once.
