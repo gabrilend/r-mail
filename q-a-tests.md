@@ -89,8 +89,9 @@ jump around.
 
 ### Auto-body: oversized message bodies (#349)
 - [ ] Body ≤ 128 KB: normal deliver, no attachment pipeline involved
-- [ ] Body > 128 KB: daemon writes `<outbox>-body.txt` under pending/, compresses, queues attachment_request with auto_body=true, sends stub as the message body
-- [ ] Stub body text mentions the attachment filename (e.g. "delivered as attachment my-note-body.txt")
+- [ ] Body > 128 KB: daemon writes a copy under pending/ named after the subject, compresses, queues attachment_request with auto_body=true, sends stub as the message body
+- [ ] Stub body text mentions the attachment filename (e.g. "delivered as attachment my-note")
+- [ ] Auto-body attachment lands on receiver at `~/mail/attachments/<subject>` (same name as the inbox stub, different directory)
 - [ ] Receiver sees a normal consent form for the body attachment (not a bypass)
 - [ ] Retry after a failed deliver reuses the existing att_id (no duplicate compression)
 - [ ] Retry continues until receiver consents; after consent, chunk-sender takes over

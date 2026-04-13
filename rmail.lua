@@ -3091,11 +3091,14 @@ local function sync_outbox(my_name)
                         end
                     else
                         -- Name the source file after the outbox
-                        -- message so the receiver sees a descriptive
-                        -- filename in the consent form and in their
-                        -- attachments dir (e.g. "my-note-body.txt").
+                        -- message itself so it lands in the
+                        -- receiver's attachments dir under the same
+                        -- name as the subject they saw in their
+                        -- inbox.  No suffix needed — the attachments
+                        -- dir is a separate namespace from inbox, so
+                        -- there's no collision.
                         local body_fn = sanitize_filename(
-                            (op.filename or "message") .. "-body.txt")
+                            op.filename or "message")
                         local tmp_path = paths.pending .. "/" .. body_fn
                         os.execute('mkdir -p ' .. shell_quote(paths.pending))
                         write_file(tmp_path, op.body or "")
