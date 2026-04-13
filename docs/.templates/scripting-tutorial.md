@@ -329,10 +329,11 @@ No `on_tick` hook exists.  To run something every N seconds you'd
 normally want a cron job, but rmail can already approximate one with
 three ingredients it already has:
 
-1. **Self-addressed outbox message.** A contact entry with `own = true`
-   and your own name lets you put `to: <your-name>` in an outbox file.
-   The daemon self-delivers it — the inbox gets a copy without any
-   network traffic.
+1. **Self-addressed outbox message.** Put your own configured name (the
+   `name = ...` line from your config) in the `to:` header of an outbox
+   file.  The daemon detects that the recipient is yourself and writes
+   the body directly to your own inbox with no network traffic and no
+   contact entry required.
 2. **Living messages.** Editing the outbox body re-delivers it as an
    update (via `on_update`), fired once per sync cycle.
 3. **The outbox body as state.** Whatever timer and payload you need
@@ -348,28 +349,24 @@ pattern for sub-second timing.
 
 #### Minimal example: log a tick every 30 seconds
 
-**Step 1.** Add yourself to `~/mail/contacts` with `own = true`:
+**Step 1.** Create `~/mail/outbox/heartbeat` with your own configured
+name in the `to:` line.  If your config has `name = alice`, this looks
+like:
 
 ```
-me.ip    = 127.0.0.1
-me.port  = 0
-me.token = "any-non-empty-string"
-me.own   = true
-```
-
-(The ip/port aren't used for self-delivery, but the fields are required
-for a valid contact.)
-
-**Step 2.** Create `~/mail/outbox/heartbeat`:
-
-```
-to: me
+to: alice
 remaining_ms: 30000
 last_tick: 0
 tick count: 0
 ```
 
-**Step 3.** Hook script at `/home/you/.config/rmail/hooks/heartbeat.sh`:
+The daemon sees `to: alice`, recognises it as itself, and self-delivers
+the body to `~/mail/inbox/heartbeat` — no network round-trip, no
+contacts entry needed.  (Self-delivery is a separate code path from
+contact delivery; `own = true` in a contacts entry is unrelated — that
+flag marks thin-client contacts that can call `/api/*` endpoints.)
+
+**Step 2.** Hook script at `/home/you/.config/rmail/hooks/heartbeat.sh`:
 
 ```sh
 #!/bin/sh
@@ -411,7 +408,7 @@ subject=$(basename "$inbox_path")
 printf 'to: %s\n%s' "$sender" "$new_body" > ~/mail/outbox/"$subject"
 ```
 
-**Step 4.** Wire it up in `~/.config/rmail/config`:
+**Step 3.** Wire it up in `~/.config/rmail/config`:
 
 ```
 on_update = /home/you/.config/rmail/hooks/heartbeat.sh
