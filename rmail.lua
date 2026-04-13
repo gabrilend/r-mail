@@ -934,6 +934,46 @@ local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
 end
 
+-- ---- PII helpers (#348) -------------------------------------------------
+--
+-- Several state files key their entries by contact name (nat warnings,
+-- pending address notifications).  Persisting the name in plaintext is
+-- a PII leak: anyone with read access to .state/ learns who the user
+-- talks to.  Hashing the name keeps the lookup working (same input
+-- → same key) while hiding the identity.
+--
+-- The hash isn't cryptographically secret by itself — an attacker with
+-- the contacts file can just rehash every contact to reverse the map.
+-- The threat model is "attacker has .state/ but not contacts" (backups
+-- split across machines, forensic snapshots, etc.); for that case,
+-- hashing is enough.  A stronger defence would store a per-install
+-- random salt in STATE, but that adds moving parts for a modest gain;
+-- deferred.
+
+local function hash_contact_name(name)
+    local bytes = crypto.sha256("rmail:contact:" .. name)
+    local hex = ""
+    for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
+    return hex
+end
+
+-- In-place migration of a state table whose keys were plaintext contact
+-- names pre-#348.  New keys are 64-character hex (sha256 digest); anything
+-- else is assumed legacy and rehashed.  Safe to call on already-hashed
+-- state — it's a no-op in that case.
+local function migrate_hashed_state(state)
+    if type(state) ~= "table" then return {} end
+    local migrated = {}
+    for k, v in pairs(state) do
+        if type(k) == "string" and #k == 64 and k:match("^%x+$") then
+            migrated[k] = v
+        elseif type(k) == "string" then
+            migrated[hash_contact_name(k)] = v
+        end
+    end
+    return migrated
+end
+
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
 -- ============================================================
@@ -1085,8 +1125,9 @@ function nat.create_mapping(port)
 end
 
 function nat.security_check(my_name)
-    local warned = load_state("nat_security_warned.json")
-    if type(warned) ~= "table" then warned = {} end
+    -- Warned contacts are tracked by hashed name (#348) so the .state
+    -- file doesn't leak the contact list in plaintext.
+    local warned = migrate_hashed_state(load_state("nat_security_warned.json"))
 
     local vulnerabilities = {}
 
@@ -1111,7 +1152,7 @@ function nat.security_check(my_name)
             local contacts = load_contacts()
             local recipients = {}
             for name, c in pairs(contacts) do
-                if name ~= my_name and not c.own and warned[name] then
+                if name ~= my_name and not c.own and warned[hash_contact_name(name)] then
                     recipients[#recipients + 1] = name
                 end
             end
@@ -1148,7 +1189,7 @@ function nat.security_check(my_name)
     local contacts = load_contacts()
     local recipients = {}
     for name, c in pairs(contacts) do
-        if name ~= my_name and not c.own and not warned[name] then
+        if name ~= my_name and not c.own and not warned[hash_contact_name(name)] then
             recipients[#recipients + 1] = name
         end
     end
@@ -1169,10 +1210,12 @@ function nat.security_check(my_name)
             "This is an automated message from rmail's security check."
         write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
         log("security warning sent to %d new contact(s)", #recipients)
-        -- record that these contacts were warned
-        local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+        -- Record presence only (#348).  Pre-#348 stored a timestamp value
+        -- here, but it was never read back — the lookup was `warned[name]`
+        -- (truthy check) everywhere.  Using `true` instead of a timestamp
+        -- drops one more piece of when-did-they-talk metadata from .state.
         for _, name in ipairs(recipients) do
-            warned[name] = timestamp
+            warned[hash_contact_name(name)] = true
         end
         save_state("nat_security_warned.json", warned)
     end
@@ -3784,12 +3827,13 @@ local function detect_ip_change(my_name, port)
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
     write_file(STATE .. "/public_ip", new_ip)
 
-    -- write pending notifications for all contacts
+    -- write pending notifications for all contacts.  Keyed by hashed
+    -- name (#348) so .state/ doesn't carry the contact list verbatim.
     local contacts = load_contacts()
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     for name, contact in pairs(contacts) do
         if name ~= my_name and contact.ip then
-            pending[name] = {ip = new_ip, port = port}
+            pending[hash_contact_name(name)] = {ip = new_ip, port = port}
         end
     end
     save_state("pending-address.json", pending)
@@ -3833,35 +3877,44 @@ local function detect_ipv6_change(my_name, port)
     log("public IPv6 changed: %s -> %s", stored_ip, new_ip)
     write_file(STATE .. "/public_ipv6", new_ip)
 
-    -- Queue notifications for contacts that have an ipv6 field
+    -- Queue notifications for contacts that have an ipv6 field.  Same
+    -- hashed-name keying as the IPv4 path (#348).
     local contacts = load_contacts()
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     for name, contact in pairs(contacts) do
         if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip)) then
-            pending[name] = pending[name] or {}
-            pending[name].ipv6 = new_ip
-            pending[name].port = port
+            local k = hash_contact_name(name)
+            pending[k] = pending[k] or {}
+            pending[k].ipv6 = new_ip
+            pending[k].port = port
         end
     end
     save_state("pending-address.json", pending)
 end
 
 local function sync_address_notifications(my_name)
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     if not next(pending) then return false end
 
     local contacts = load_contacts()
-    local ops = {}
+    -- The file keys are hashed contact names (#348); build a lookup
+    -- on the fly.  A few contacts' worth of sha256 is cheap.
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
 
-    for name, info in pairs(pending) do
-        if contacts[name] and contacts[name].ip then
+    local ops = {}
+    for hash, info in pairs(pending) do
+        local name = hash_to_name[hash]
+        if name and contacts[name] and contacts[name].ip then
             ops[#ops + 1] = {
-                name = name, contact = contacts[name],
+                name = name, hash = hash, contact = contacts[name],
                 ip = info.ip, port = info.port,
             }
         else
             -- contact removed, drop the pending notification
-            pending[name] = nil
+            pending[hash] = nil
         end
     end
 
@@ -3887,7 +3940,7 @@ local function sync_address_notifications(my_name)
     for i, op in ipairs(ops) do
         note_contact_result(op.name, results[i].ok)
         if results[i].ok then
-            pending[op.name] = nil
+            pending[op.hash] = nil  -- file is keyed by hash (#348)
             log("notified %s of address change", op.name)
             did_work = true
         end
