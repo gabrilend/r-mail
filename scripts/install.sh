@@ -490,6 +490,9 @@ find_lua_system() {
         return 1
     fi
 
+    # Promote discovery results to globals so later stages (luasocket check,
+    # service-file generation) can reuse them.
+    LUA_BIN="$lua_bin"
     # Extract just "<name> <version>" from the first line of `lua -v`, which
     # looks like "Lua 5.4.7  Copyright..." or "LuaJIT 2.1.0-beta3 -- Copyright..."
     # Anything after the copyright blurb is noise for install output.
@@ -532,6 +535,7 @@ find_lua_system() {
 }
 
 LUA_VER_STR=""
+LUA_BIN=""
 
 compile_lua() {
     echo "  Downloading lua-$LUA_VERSION..."
@@ -554,13 +558,15 @@ compile_lua() {
     cd "$ROOT"
     LUA_INC="-I$DEPS/lua/include"
     LUA_LIB="-L$DEPS/lua/lib"
+    LUA_BIN="$DEPS/lua/bin/lua"
     ok "done (deps/lua/)"
 }
 
 if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
     LUA_INC="-I$DEPS/lua/include"
     LUA_LIB="-L$DEPS/lua/lib"
-    local_ver=$("$DEPS/lua/bin/lua" -v 2>&1 | awk 'NR==1 {print $1, $2}')
+    LUA_BIN="$DEPS/lua/bin/lua"
+    local_ver=$("$LUA_BIN" -v 2>&1 | awk 'NR==1 {print $1, $2}')
     ok "found locally compiled: deps/lua/ ($local_ver)"
 elif find_lua_system; then
     ok "found system: $LUA_VER_STR"
@@ -759,10 +765,37 @@ install_luasocket() {
     ok "done (libs/socket/core.so, libs/mime/core.so)"
 }
 
+# Does the chosen Lua interpreter already have luasocket available — either
+# from a system install or from a previous project-local build whose libs/
+# directory is already on its cpath?  Trust the interpreter's own answer
+# rather than probing filesystem paths.
+_have_luasocket() {
+    [ -n "$LUA_BIN" ] && \
+        "$LUA_BIN" -e 'require("socket.core"); require("mime.core")' 2>/dev/null
+}
+
 if [ -f "$LIBS/socket/core.so" ] && ! $FORCE; then
     ok "found in libs/socket/core.so"
-else
+elif $FORCE; then
     install_luasocket
+elif _have_luasocket; then
+    # System (or otherwise-discoverable) luasocket works for this Lua.
+    # Offer a project-local install but don't force it.
+    ok "found: $LUA_BIN can require('socket') and require('mime')"
+    if ask_yn "Install a project-local copy into libs/ anyway?"; then
+        install_luasocket
+    else
+        info "using system luasocket — rmail adds libs/ to cpath at startup"
+        info "so a project-local copy will still take precedence if present"
+    fi
+else
+    warn "luasocket not found — required for network operations"
+    if ask_yn "Compile project-local luasocket from source?"; then
+        install_luasocket
+    else
+        err "luasocket is required — cannot continue without it"
+        exit 1
+    fi
 fi
 
 # ============================================================
