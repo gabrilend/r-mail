@@ -449,7 +449,18 @@ local function load_contacts()
                 local unquoted = value:match('^"(.*)"$')
                 if unquoted then value = unquoted end
                 if not contacts[name] then contacts[name] = {} end
-                contacts[name][field] = value
+                if field == "ip" then
+                    -- Multi-IP support (#347): every `name.ip = ...` line is
+                    -- appended to a list; the first one stays at `.ip` as the
+                    -- preferred address so every existing consumer keeps
+                    -- working without changes.  A fallback/retry layer that
+                    -- walks the full list on connection failure is Phase 2.
+                    if not contacts[name].ips then contacts[name].ips = {} end
+                    contacts[name].ips[#contacts[name].ips + 1] = value
+                    if not contacts[name].ip then contacts[name].ip = value end
+                else
+                    contacts[name][field] = value
+                end
             else
                 -- bare name line: create empty entry as a placeholder
                 local bare = line:match("^([%w_%-]+)$")
@@ -457,7 +468,34 @@ local function load_contacts()
             end
         end
     end
+    -- Fold a legacy `.ipv6` field into the address list so Phase 2 retry
+    -- logic has a single source of addresses to walk.  `.ipv6` remains set
+    -- for back-compat with existing call sites (contact_addr prefers it).
+    for _, c in pairs(contacts) do
+        if c.ipv6 then
+            c.ips = c.ips or {}
+            local seen = false
+            for _, v in ipairs(c.ips) do if v == c.ipv6 then seen = true; break end end
+            if not seen then c.ips[#c.ips + 1] = c.ipv6 end
+        end
+    end
     return contacts
+end
+
+-- All addresses for a contact, in preferred order.  Returns at least one
+-- entry if the contact has any address set; empty list otherwise.  Meant
+-- for Phase 2 of #347 (retry-on-failure loops); callers that only need a
+-- single address should keep using contact_addr().
+local function contact_hosts(contact)
+    if type(contact.ips) == "table" and #contact.ips > 0 then
+        return contact.ips
+    end
+    local out = {}
+    if contact.ipv6 then out[#out + 1] = contact.ipv6 end
+    if contact.ip and contact.ip ~= contact.ipv6 then
+        out[#out + 1] = contact.ip
+    end
+    return out
 end
 
 -- write or update specific fields for one contact in the contacts file,
@@ -501,7 +539,11 @@ local function write_contact_fields(name, fields)
     write_file(CONTACTS, table.concat(lines, "\n") .. "\n")
 end
 
--- align the = signs within each contact's block; run once at startup
+-- Normalise the contacts file:
+--   1. Scattered lines for the same contact are grouped together at the
+--      position of that contact's first line (#347 auto-grouping).
+--   2. The = signs within each grouped block are aligned.
+-- Runs at startup and whenever the contacts file changes.
 local function align_contacts()
     local text = read_file(CONTACTS)
     if not text then return end
@@ -511,24 +553,64 @@ local function align_contacts()
         lines[#lines + 1] = line
     end
 
+    -- Pass 1: discover which contact each line belongs to and gather
+    -- every line's index per contact, in file order.  first_index[n] is
+    -- where we'll emit all of contact n's lines together.
+    local line_owner = {}     -- line index -> contact name (nil if not a contact line)
+    local per_contact = {}    -- name -> list of line indices in file order
+    local first_index = {}    -- name -> earliest index for that contact
+    for i, line in ipairs(lines) do
+        local n = line:match("^([%w_%-]+)%.")
+        if n then
+            line_owner[i] = n
+            if not per_contact[n] then
+                per_contact[n] = {}
+                first_index[n] = i
+            end
+            per_contact[n][#per_contact[n] + 1] = i
+        end
+    end
+
+    -- Pass 2: emit.  Non-contact lines (comments, blanks, section
+    -- headers) stay at their original position.  The first time we see
+    -- a contact's first line, we emit every one of that contact's
+    -- lines at that point and mark them so their original later
+    -- positions produce nothing.
+    local emitted = {}
+    local grouped = {}
+    for i, line in ipairs(lines) do
+        local n = line_owner[i]
+        if n then
+            if i == first_index[n] then
+                for _, idx in ipairs(per_contact[n]) do
+                    grouped[#grouped + 1] = lines[idx]
+                    emitted[idx] = true
+                end
+            end
+            -- else: already emitted with its first-index sibling; skip
+        else
+            grouped[#grouped + 1] = line
+        end
+    end
+
+    -- Pass 3: align = signs within each contiguous contact block.
+    -- Because Pass 2 grouped everything, blocks are now contiguous by
+    -- construction.
     local result = {}
     local i = 1
-    while i <= #lines do
-        local name = lines[i]:match("^([%w_%-]+)%.")
+    while i <= #grouped do
+        local name = grouped[i]:match("^([%w_%-]+)%.")
         if name then
-            -- collect all consecutive lines for this contact
             local block, j = {}, i
-            while j <= #lines and lines[j]:match("^([%w_%-]+)%.") == name do
-                block[#block + 1] = lines[j]
+            while j <= #grouped and grouped[j]:match("^([%w_%-]+)%.") == name do
+                block[#block + 1] = grouped[j]
                 j = j + 1
             end
-            -- find max key length (everything before the =)
             local max_pre = 0
             for _, bline in ipairs(block) do
                 local pre = bline:match("^(.-)%s*=")
                 if pre then max_pre = math.max(max_pre, #pre) end
             end
-            -- reformat with aligned =
             for _, bline in ipairs(block) do
                 local pre, val = bline:match("^(.-)%s*=%s*(.+)$")
                 if pre and val then
@@ -539,7 +621,7 @@ local function align_contacts()
             end
             i = j
         else
-            result[#result + 1] = lines[i]
+            result[#result + 1] = grouped[i]
             i = i + 1
         end
     end
@@ -1173,8 +1255,13 @@ local function handle_update_address(data, sender)
     -- We still accept a port change, and still invalidate the cached lookup
     -- so the next comparison picks up the new IP immediately.
     local preserve_hostname = is_hostname(contacts[sender].ip)
+    -- If the contact is configured with multiple IPs (#347), the user is
+    -- managing that list explicitly.  A single address update can't know
+    -- which of the N addresses was superseded, so leave all of them alone
+    -- and just take the port update if any.
+    local has_multi = type(contacts[sender].ips) == "table" and #contacts[sender].ips > 1
     local fields = {}
-    if not preserve_hostname then fields.ip = new_ip end
+    if not preserve_hostname and not has_multi then fields.ip = new_ip end
     if new_port then fields.port = new_port end
     if next(fields) then write_contact_fields(sender, fields) end
 
@@ -1186,18 +1273,13 @@ local function handle_update_address(data, sender)
         log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
     end
 
-    -- drop a notification in inbox if the sender requested it
-    if data.notify ~= false then
+    -- drop a notification in inbox if the sender requested it.
+    -- Hostname contacts don't need a notification — DNS re-resolution handles
+    -- IP churn invisibly, which is exactly why the user chose a hostname.
+    if data.notify ~= false and not preserve_hostname then
         local filename = "address-update-" .. sender
-        local body
-        if preserve_hostname then
-            body = sender .. "'s underlying IP changed to " .. new_ip .. ":" .. tostring(new_port) ..
-                ".\nYour contacts file still points at the hostname '" .. contacts[sender].ip ..
-                "', which will re-resolve automatically."
-        else
-            body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
-                ".\nYour contacts file has been updated automatically."
-        end
+        local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
+            ".\nYour contacts file has been updated automatically."
         write_file(INBOX .. "/" .. filename, body)
     end
     return 200, {ok = true}

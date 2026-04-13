@@ -125,10 +125,23 @@ jump around.
 - [ ] LAN peer cache resolves hostnames before comparing IPs
 
 ### Multiple IPs per contact (#347)
-- [ ] Contact with multiple `ip` lines: daemon tries each in order until one connects
-- [ ] Scattered `ip` entries for the same contact are grouped together on config load
+
+**Phase 1 (shipped):**
+- [ ] `load_contacts` collects every `name.ip = …` line into `contact.ips` (list); `contact.ip` is set to the first entry
+- [ ] Legacy `name.ipv6 = …` is folded into `contact.ips` (appears in `contact_hosts()` output)
+- [ ] `align_contacts` groups scattered lines for the same contact at the contact's first position
+- [ ] `align_contacts` preserves non-contact lines (comments, blanks, section headers) in place
+- [ ] Multi-IP contact receives an inbound `/update-address`: list is **not** overwritten; port still updates
+- [ ] Single-IP contact's update-address flow still rewrites `.ip` as before
+- [ ] `contact_hosts()` returns at least one entry for any contact with an IP; empty list otherwise
 - [ ] Single `ip` field accepts IPv4, IPv6, and DNS hostname — type detected automatically
-- [ ] Stretch: successful non-first `ip` is promoted to the top of that contact's block
+
+**Phase 2 (deferred):**
+- [ ] Daemon tries each address in `contact_hosts()` order until one connects
+- [ ] Application-level errors (404, etc.) do not trigger fallback; only connection failures do
+
+**Phase 3 (deferred, stretch):**
+- [ ] Successful non-first address is promoted to the top of that contact's block on disk
 
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4
