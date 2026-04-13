@@ -2728,14 +2728,27 @@ local function sync_outbox(my_name)
     -- clean up completed transfers: remove attach: lines from outbox files
     for att_id, transfer in pairs(att_state) do
         if transfer.status == "complete" then
-            local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
-            if file_exists(outbox_path) then
-                remove_attach_from_file(outbox_path, transfer.original_path)
+            if transfer.auto_body then
+                -- #349: no outbox attach: line to strip (the body came
+                -- from op.body, not a user-visible attach line), but
+                -- the /tmp auto-body source file needs cleaning up.
+                if transfer.original_path
+                   and file_exists(transfer.original_path) then
+                    os.remove(transfer.original_path)
+                end
+                log("auto-body transfer complete to %s (%s)",
+                    transfer.to, transfer.outbox_file)
+            else
+                local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
+                if file_exists(outbox_path) then
+                    remove_attach_from_file(outbox_path, transfer.original_path)
+                end
+                log("attachment transfer complete, removed attach: %s",
+                    transfer.filename)
             end
             att_state[att_id] = nil
             att_state_changed = true
             did_work = true
-            log("attachment transfer complete, removed attach: %s", transfer.filename)
         end
     end
 
@@ -3031,24 +3044,133 @@ local function sync_outbox(my_name)
             if op.type == "deliver" then
                 local body_size = #(op.body or "")
                 if body_size > 131072 then
+                    -- #349 auto-body-to-attachment.  The deliver payload
+                    -- is capped at 128 KB; larger bodies get re-routed
+                    -- through the standard attachment pipeline so the
+                    -- send succeeds instead of failing with an error
+                    -- file.  The receiver sees the normal consent form
+                    -- for an attachment named body.txt; acceptance
+                    -- delivers the full body to their attachments dir.
+                    -- A short stub is sent as the message body so the
+                    -- inbox message isn't empty.
                     local kb = math.floor(body_size / 1024)
-                    local err_body = string.format(
-                        "error sending \"%s\": message body is too large (%d KB).\n" ..
-                        "The maximum message body size is 128 KB.\n" ..
-                        "To send large content, use an attach: line in your outbox file instead.",
-                        op.subject or op.filename or "untitled", kb)
-                    write_file(INBOX .. "/error-" .. sanitize_filename(op.subject or op.filename or "untitled"), err_body)
-                    -- mark state to prevent retry
-                    if state[op.filename] then
-                        state[op.filename].recipients[op.recipient] = {error = "body_too_large"}
+                    -- Reuse an existing in-flight entry on retries so a
+                    -- second sync cycle doesn't produce a duplicate
+                    -- attachment_id for the same (recipient, message).
+                    local existing_att_id
+                    for aid, t in pairs(att_state) do
+                        if t.auto_body and t.to == op.recipient
+                           and t.message_id == op.message_id then
+                            existing_att_id = aid
+                            break
+                        end
                     end
-                    log("body too large (%d KB), not sending %s to %s", kb, op.filename, op.recipient)
-                    did_work = true
-                    op.skip = true
+                    local att_id_to_send, expected_for_request, display_filename
+                    if existing_att_id then
+                        local existing = att_state[existing_att_id]
+                        -- Only keep re-issuing the request while the
+                        -- receiver hasn't consented yet.  Once the
+                        -- receiver accepts (status → sending) or the
+                        -- transfer is otherwise past consent, the
+                        -- chunk-sender takes over.
+                        if existing.status == "awaiting_consent" then
+                            att_id_to_send = existing_att_id
+                            expected_for_request = existing.expected_size
+                            display_filename = existing.filename
+                        end
+                    else
+                        -- Name the source file after the outbox
+                        -- message so the receiver sees a descriptive
+                        -- filename in the consent form and in their
+                        -- attachments dir (e.g. "my-note-body.txt").
+                        local body_fn = sanitize_filename(
+                            (op.filename or "message") .. "-body.txt")
+                        local tmp_path = paths.pending .. "/" .. body_fn
+                        os.execute('mkdir -p ' .. shell_quote(paths.pending))
+                        write_file(tmp_path, op.body or "")
+                        local att_id = uuid()
+                        local zip_path, checksum, comp_size =
+                            compress_attachment(tmp_path, att_id)
+                        if zip_path and comp_size then
+                            local total_chunks = math.max(1,
+                                math.ceil(comp_size / cfg.chunk_size))
+                            att_state[att_id] = {
+                                to = op.recipient, outbox_file = op.filename,
+                                original_path = tmp_path, filename = body_fn,
+                                zip_id = att_id,
+                                compressed_path = zip_path,
+                                total_chunks = total_chunks,
+                                total_checksum = checksum,
+                                expected_size = body_size,
+                                message_id = op.message_id,
+                                status = "awaiting_consent",
+                                auto_body = true,
+                            }
+                            att_state_changed = true
+                            att_id_to_send = att_id
+                            expected_for_request = body_size
+                            display_filename = body_fn
+                            log("auto-body: %s to %s (%d KB queued as %s)",
+                                op.filename, op.recipient, kb, body_fn)
+                        else
+                            local err_body = string.format(
+                                "error sending \"%s\": message body is too " ..
+                                "large (%d KB) and the daemon could not " ..
+                                "compress it for attachment delivery.\n" ..
+                                "Use an attach: line in your outbox file " ..
+                                "instead.",
+                                op.subject or op.filename or "untitled", kb)
+                            write_file(INBOX .. "/error-" .. sanitize_filename(
+                                op.subject or op.filename or "untitled"),
+                                err_body)
+                            if state[op.filename] then
+                                state[op.filename].recipients[op.recipient] =
+                                    {error = "body_too_large"}
+                            end
+                            log("auto-body conversion failed for %s to %s",
+                                op.filename, op.recipient)
+                            did_work = true
+                            op.skip = true
+                        end
+                    end
+                    -- Queue (or re-queue) the attachment_request when
+                    -- it's still awaiting consent.  Deliberately not
+                    -- tied to this op via req_to_op — it shouldn't
+                    -- gate the deliver's success tracking, and the
+                    -- receiver's handler is idempotent on a repeat
+                    -- att_id (#346).
+                    if att_id_to_send then
+                        requests[#requests + 1] = {
+                            endpoints = contact_endpoints(op.contact),
+                            path = "/deliver",
+                            payload = json.encode({
+                                type = "attachment_request",
+                                attachment_id = att_id_to_send,
+                                message_id = op.message_id,
+                                filename = display_filename,
+                                subject = op.filename,
+                                expected_size = expected_for_request,
+                            }),
+                            psk_key = op.contact.token,
+                        }
+                    end
+                    -- Replace the body with a short stub (fits well
+                    -- under 128 KB).
+                    if not op.skip then
+                        op.body = string.format(
+                            "[body too large for a single message — " ..
+                            "%d KB delivered as attachment %s]",
+                            kb, display_filename or "body.txt")
+                    end
                 end
                 if not op.skip then
                     path = "/deliver"
                     local send_body = op.body
+                    -- on_send gets the body we're actually sending.
+                    -- For auto-body messages that's the stub; the
+                    -- hook can still inspect/transform it safely.
+                    -- Original oversized body never reaches the hook
+                    -- (ARG_MAX would truncate it anyway).
                     if hooks.on_send then
                         local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
                         if transformed and transformed ~= "" then send_body = transformed end

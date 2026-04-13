@@ -87,6 +87,18 @@ jump around.
 - [ ] Partial chunks cleaned up on abort
 - [ ] Sender notified of abort
 
+### Auto-body: oversized message bodies (#349)
+- [ ] Body ≤ 128 KB: normal deliver, no attachment pipeline involved
+- [ ] Body > 128 KB: daemon writes `<outbox>-body.txt` under pending/, compresses, queues attachment_request with auto_body=true, sends stub as the message body
+- [ ] Stub body text mentions the attachment filename (e.g. "delivered as attachment my-note-body.txt")
+- [ ] Receiver sees a normal consent form for the body attachment (not a bypass)
+- [ ] Retry after a failed deliver reuses the existing att_id (no duplicate compression)
+- [ ] Retry continues until receiver consents; after consent, chunk-sender takes over
+- [ ] Transfer complete: auto-body temp file under pending/ is removed
+- [ ] Transfer complete: no outbox attach: line is stripped (there never was one)
+- [ ] Compression failure falls back to the old body_too_large error file
+- [ ] `on_send` hook runs on the stub body (not the oversized original)
+
 ### Progress files in RAM (#328)
 - [ ] Receiver's progress file stored in tmpfs with symlink from inbox
 - [ ] Deleting the progress file still cancels the transfer
