@@ -317,6 +317,57 @@ local function contact_addr(contact)
     return contact.ipv6 or contact.ip
 end
 
+-- ---- Hostname support for contact.ip ------------------------------------
+--
+-- Contacts can set `.ip = hostname.example.com` instead of a raw IP.  Outbound
+-- TCP already resolves hostnames via luasocket.  The inbound-comparison paths
+-- (LAN optimisation, connection-timeout fallback, LAN discovery) do literal
+-- string equality against a raw IP, so we need to resolve hostnames before
+-- comparing.  Cache the resolution briefly — dynamic-DNS TTLs are measured
+-- in seconds-to-minutes and we don't want to hit the resolver on every sync
+-- cycle.
+
+local dns_cache = {}
+local DNS_TTL_SEC = 60
+
+-- True if the address is a bare IPv4 dotted quad.
+local function is_ipv4(addr)
+    if not addr then return false end
+    local a, b, c, d = addr:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return false end
+    for _, part in ipairs({a, b, c, d}) do
+        if tonumber(part) > 255 then return false end
+    end
+    return true
+end
+
+-- True if the address looks like a hostname (anything that isn't a raw IP).
+local function is_hostname(addr)
+    return addr ~= nil and addr ~= "" and not is_ipv4(addr) and not is_ipv6(addr)
+end
+
+-- Resolve a contact address to a raw IP string, caching for DNS_TTL_SEC.
+-- IPv4/IPv6 literals are returned unchanged.  Hostnames that fail to resolve
+-- return nil (caller treats that as "no match").
+local function resolve_contact_host(addr)
+    if not is_hostname(addr) then return addr end
+    local now = os.time()
+    local entry = dns_cache[addr]
+    if entry and now - entry.t < DNS_TTL_SEC then
+        return entry.ip
+    end
+    local ip, err = socket.dns.toip(addr)
+    if ip then
+        dns_cache[addr] = {ip = ip, t = now}
+        return ip
+    end
+    -- log() isn't in scope this early in the file; stderr is fine for a
+    -- rare, recoverable condition.
+    io.stderr:write(string.format(
+        "DNS lookup failed for '%s': %s\n", addr, tostring(err)))
+    return nil
+end
+
 local function sanitize_filename(name)
     if not name or name == "" then return "untitled" end
     -- extract basename (strip directory components)
@@ -899,6 +950,16 @@ local function handle_deliver_update(data, sender)
         if meta.message_id == message_id and meta["from"] == sender then
             local target = INBOX .. "/" .. filename
 
+            -- If the user already deleted the inbox file on disk but our
+            -- sync_inbox hasn't run yet to reconcile state, we must not
+            -- recreate it here — that would silently undo the user's
+            -- delete.  Return 404 so the sender treats this as "they
+            -- deleted" and cleans up its own state.  See #323 (race
+            -- between sender update and receiver local delete).
+            if not file_exists(target) then
+                return 404, {error = "message not found"}
+            end
+
             if hooks.on_update then
                 local transformed = run_hook(hooks.on_update, sender, target, new_body)
                 if transformed and transformed ~= "" then new_body = transformed end
@@ -1107,17 +1168,36 @@ local function handle_update_address(data, sender)
         return 404, {error = "sender not in contacts"}
     end
 
-    local fields = {ip = new_ip}
+    -- If the existing .ip is a DNS hostname, don't overwrite it — the whole
+    -- point of using a hostname is that DNS re-resolution handles IP changes.
+    -- We still accept a port change, and still invalidate the cached lookup
+    -- so the next comparison picks up the new IP immediately.
+    local preserve_hostname = is_hostname(contacts[sender].ip)
+    local fields = {}
+    if not preserve_hostname then fields.ip = new_ip end
     if new_port then fields.port = new_port end
-    write_contact_fields(sender, fields)
+    if next(fields) then write_contact_fields(sender, fields) end
 
-    log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+    if preserve_hostname then
+        log("address update from %s: keeping hostname '%s' (will re-resolve to %s)",
+            sender, contacts[sender].ip, new_ip)
+        dns_cache[contacts[sender].ip] = nil
+    else
+        log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+    end
 
     -- drop a notification in inbox if the sender requested it
     if data.notify ~= false then
         local filename = "address-update-" .. sender
-        local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
-            ".\nYour contacts file has been updated automatically."
+        local body
+        if preserve_hostname then
+            body = sender .. "'s underlying IP changed to " .. new_ip .. ":" .. tostring(new_port) ..
+                ".\nYour contacts file still points at the hostname '" .. contacts[sender].ip ..
+                "', which will re-resolve automatically."
+        else
+            body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
+                ".\nYour contacts file has been updated automatically."
+        end
         write_file(INBOX .. "/" .. filename, body)
     end
     return 200, {ok = true}
@@ -3493,7 +3573,7 @@ local function do_resolve_lan_host(lan_peers, host, target_port)
     if host ~= my_public then return nil end
     local contacts = load_contacts()
     for name, c in pairs(contacts) do
-        if c.ip == host and tostring(c.port or "") == tostring(target_port) then
+        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) then
             local lan_ip = c.lan_ip or lan_peers[name]
             if lan_ip then
                 log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
@@ -3521,7 +3601,7 @@ local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
     local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
     local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
     for name, c in pairs(contacts) do
-        if c.ip == my_public_ip and c.token and c.port then
+        if resolve_contact_host(c.ip) == my_public_ip and c.token and c.port then
             local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
             local key = derive_key(c.token)
             local encrypted = encrypt_packet(key, payload)
@@ -3596,7 +3676,7 @@ local function do_on_connection_timeout(rt, host, target_port)
     if not my_lan_ip then return end
     local contacts = load_contacts()
     for name, c in pairs(contacts) do
-        if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
+        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) and c.token then
             if rt.lan.discovery_sent[name] then return end
             rt.lan.discovery_sent[name] = true
             local payload = "RMAIL-DISCOVER " .. rt.my_name .. " " .. rt.port .. " " .. my_lan_ip

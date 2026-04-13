@@ -66,6 +66,8 @@ jump around.
 - [ ] Interaction matrix built: sender sync first vs receiver sync first
 - [ ] All sender/receiver event combinations traced and validated
 - [ ] Receiver deletes inbox file, sender edits outbox → file is NOT "undeleted"
+- [ ] `handle_deliver_update` returns 404 when the inbox file is missing on disk (even if inbox.json still has the entry)
+- [ ] Sender's batch handler treats that 404 as "recipient deleted" and cleans outbox.json accordingly
 
 ## 4. Receiving messages (daemon inbox)
 
