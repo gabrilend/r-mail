@@ -49,8 +49,18 @@ class RmailClient(
         if (sock != null && sock!!.isConnected && !sock!!.isClosed) return
         sock?.close()
         val s = Socket()
+        // 5s to complete the TCP handshake is generous for LAN or healthy
+        // WAN; if we can't connect in that window the server is almost
+        // certainly down and there's no point waiting longer.
         s.connect(java.net.InetSocketAddress(host, port), 5_000)
-        s.soTimeout = 10_000
+        // Read timeout is for *after* a request is in flight, waiting on
+        // the daemon to respond.  The daemon's sync cycle can do real
+        // work (attachment probes, batch delivery, living-message
+        // updates) and the previous 10 s budget triggered transient
+        // "read timed out" errors that always resolved on the next sync
+        // (#320).  30 s is a better balance: rare to hit when things are
+        // working, still fast enough to surface a truly dead server.
+        s.soTimeout = 30_000
         sock = s
         sockOut = s.getOutputStream()
         sockInp = s.getInputStream()

@@ -152,7 +152,32 @@ class SyncManager(
             SyncResult.Success(resp.mailboxName, resp.mailboxPath)
 
         } catch (e: Exception) {
-            SyncResult.Error(e.message ?: "Unknown sync error")
+            SyncResult.Error(friendlySyncError(e))
+        }
+    }
+
+    /**
+     * Translate raw Java/network exceptions into messages a user can read
+     * without needing context about sockets.  Transient timeouts are the
+     * most common case (#320) — the server is alive but slow — so the
+     * message explicitly calls out "will retry" so the user isn't alarmed
+     * when the red box appears and then disappears on the next cycle.
+     */
+    private fun friendlySyncError(e: Exception): String {
+        val raw = e.message ?: ""
+        return when {
+            e is java.net.SocketTimeoutException ||
+                raw.contains("timed out", ignoreCase = true) ->
+                "server didn't respond in time — will retry"
+            e is java.net.ConnectException ||
+                raw.contains("refused", ignoreCase = true) ->
+                "server not reachable — will retry"
+            e is java.net.UnknownHostException ->
+                "server host couldn't be resolved"
+            raw.contains("Decryption failed", ignoreCase = true) ->
+                "wrong token or tampered response (check your contact token)"
+            raw.isNotBlank() -> raw
+            else -> "unknown sync error (${e::class.java.simpleName})"
         }
     }
 

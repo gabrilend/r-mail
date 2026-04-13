@@ -220,8 +220,13 @@ jump around.
 - [x] Error clears only when sync succeeds (one of two explicit clears: success branch + mailbox switch)
 
 ### "Read timed out" (#320)
-- [ ] Root cause identified (server delay, network, or client timeout)
-- [ ] Timeout value adjusted or error message softened
+- [x] Root cause identified (10 s socket timeout too aggressive for a busy sync)
+- [x] Timeout raised to 30 s
+- [ ] Error message softened — timeout now shows "server didn't respond in time — will retry" on the red box instead of "Read timed out"
+- [ ] ConnectException shows "server not reachable — will retry"
+- [ ] UnknownHostException shows "server host couldn't be resolved"
+- [ ] Decryption failure shows a token-hint message
+- [ ] Unrecognised errors still surface the raw message (no silent swallowing)
 
 ### Security (#314)
 - [ ] Only rmail app code can write to outbox and trigger sync
