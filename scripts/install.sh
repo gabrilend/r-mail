@@ -39,7 +39,7 @@ DKJSON_MIN="2.5"; DKJSON_MAX="2.8"
 # Helpers (defined early for argument parsing)
 # ============================================================
 
-err()   { printf "  \033[31merror: %s\033[0m\n" "$*"; }
+err()   { printf "  \033[31merror: %s\033[0m\n" "$*" >&2; }
 
 # version_to_num "5.4.7" -> numeric value for comparison
 # pads to 3 components: major * 1000000 + minor * 1000 + patch
@@ -60,15 +60,155 @@ validate_version() {
     fi
 }
 
+# ---- Install-time option store --------------------------------------------
+#
+# Every interactive prompt has a stable "key" (e.g. mail_dir, compile_lua).
+# A CLI flag (--mail-dir=PATH, --compile-lua, --no-compile-lua) or env var
+# (RMAIL_INSTALL_MAIL_DIR, RMAIL_INSTALL_COMPILE_LUA) can preset the key
+# and skip the prompt.  --silent refuses to prompt at all; --yes answers
+# every boolean prompt as yes unless an explicit --no-<flag> overrides.
+# Precedence: CLI > env > interactive prompt > built-in default.
+
+SILENT=false
+ALL_YES=false
+
+# Lookup/store presets via dynamic RMAIL_OPT_<KEY> variable names (POSIX
+# sh has no associative arrays).  The internal variables are prefixed
+# with __ to avoid clobbering callers' locals — POSIX sh has no real
+# lexical scoping, so anything starting with a plain _ might collide
+# with ask_value / ask_yn's own bookkeeping.
+_get_opt() {
+    __opt_k=$(echo "$1" | tr 'a-z' 'A-Z')
+    eval "printf '%s' \"\${RMAIL_OPT_${__opt_k}:-}\""
+}
+
+_set_opt() {
+    __opt_k=$(echo "$1" | tr 'a-z' 'A-Z')
+    eval "RMAIL_OPT_${__opt_k}=\"\$2\""
+    eval "RMAIL_OPT_${__opt_k}_SET=1"
+}
+
+_has_opt() {
+    __opt_k=$(echo "$1" | tr 'a-z' 'A-Z')
+    eval "[ \"\${RMAIL_OPT_${__opt_k}_SET:-0}\" = 1 ]"
+}
+
+_parse_bool() {
+    # _parse_bool STR — returns 0 for yes/true/1, 1 for no/false/0.  Exits
+    # on anything else so a mistyped "--compile-lua=maybe" is caught early.
+    case "$1" in
+        [Yy]|[Yy][Ee][Ss]|[Tt]|[Tt][Rr][Uu][Ee]|1) return 0 ;;
+        [Nn]|[Nn][Oo]|[Ff]|[Ff][Aa][Ll][Ss][Ee]|0) return 1 ;;
+        *) err "invalid boolean value: '$1' (use yes/no/true/false/1/0)"; exit 1 ;;
+    esac
+}
+
+# Option keys the installer recognises.  Value keys need a string, yn keys
+# take a boolean.  Used by _import_env_opts and show_help.
+OPT_VALUE_KEYS="mail_dir name port"
+OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service"
+
+_import_env_opts() {
+    for _k in $OPT_VALUE_KEYS $OPT_YN_KEYS; do
+        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
+        eval "_val=\${$_env:-}"
+        if [ -n "${_val:-}" ]; then
+            _set_opt "$_k" "$_val"
+        fi
+    done
+}
+
+show_help() {
+    cat <<'HELP'
+Usage: install.sh [options]
+
+Generic:
+  -h, --help              Show this help and exit
+  --force                 Force recompile of all locally-built dependencies
+  --silent                Fail instead of prompting.  Every required value
+                          must be supplied via a flag or env var.
+  --yes, -y               Answer yes to every boolean prompt unless the
+                          matching --no-<flag> is also given
+  --version dep=x.y.z     Pin a dependency version (lua, luasocket, openssl,
+                          dkjson).  Can be repeated.
+
+Required values (supplying --flag skips the matching prompt):
+  --mail-dir=PATH         Mailbox directory
+  --name=STR              Local identity (used only on this machine)
+  --port=NUM              TCP port the daemon listens on
+
+Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
+  --compile-lua           Compile a project-local Lua
+  --compile-openssl       Compile a project-local OpenSSL
+  --compile-luasocket     Compile a project-local luasocket
+  --compile-upnp          Compile miniupnpc (UPnP port forwarding)
+  --compile-natpmp        Compile libnatpmp (NAT-PMP port forwarding)
+  --compile-zip           Compile Info-ZIP zip and unzip
+  --setup-service         Set up rmail to start automatically
+  --user-service          When setting up a service, use a user-level one
+                          (no root required)
+
+Environment variables (alternative to --flags):
+  RMAIL_INSTALL_MAIL_DIR, RMAIL_INSTALL_NAME, RMAIL_INSTALL_PORT,
+  RMAIL_INSTALL_COMPILE_LUA, RMAIL_INSTALL_COMPILE_OPENSSL,
+  RMAIL_INSTALL_COMPILE_LUASOCKET, RMAIL_INSTALL_COMPILE_UPNP,
+  RMAIL_INSTALL_COMPILE_NATPMP, RMAIL_INSTALL_COMPILE_ZIP,
+  RMAIL_INSTALL_SETUP_SERVICE, RMAIL_INSTALL_USER_SERVICE
+
+Fully unattended example:
+  scripts/install.sh --silent --yes \
+      --mail-dir=/srv/rmail/alice --name=alice --port=54321
+HELP
+}
+
+# Import env vars before CLI parsing so --flags take precedence.
+_import_env_opts
+
+# Extract "key" and "value" from a --key=value or --key-with-dashes flag.
+# Populates _cli_key (underscore form) and _cli_val.  For --no-* flags,
+# _cli_val is "no" and _cli_key strips the "no-" prefix.
+_parse_flag() {
+    case "$1" in
+        --no-*=*)
+            err "$1: cannot combine --no- with =value"; exit 1 ;;
+        --no-*)
+            _cli_key=$(echo "${1#--no-}" | tr '-' '_')
+            _cli_val="no"
+            _cli_takes_next=0
+            ;;
+        *=*)
+            _cli_key=$(echo "${1%%=*}" | sed 's|^--||' | tr '-' '_')
+            _cli_val="${1#*=}"
+            _cli_takes_next=0
+            ;;
+        *)
+            _cli_key=$(echo "${1#--}" | tr '-' '_')
+            _cli_val=""
+            _cli_takes_next=1
+            ;;
+    esac
+}
+
 # parse arguments
 while [ $# -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            show_help; exit 0
+            ;;
         --force)
             FORCE=true
             shift
             ;;
+        --silent)
+            SILENT=true
+            shift
+            ;;
+        -y|--yes)
+            ALL_YES=true
+            shift
+            ;;
         --version)
-            if [ -z "$2" ]; then
+            if [ -z "${2:-}" ]; then
                 err "--version requires an argument (e.g., --version lua=5.3.6)"
                 exit 1
             fi
@@ -102,6 +242,41 @@ while [ $# -gt 0 ]; do
                     ;;
             esac
             shift 2
+            ;;
+        --*)
+            # Any other long flag is an option-store setter.
+            _parse_flag "$1"
+            case " $OPT_VALUE_KEYS " in
+                *" $_cli_key "*)
+                    # Value key: if the flag had no =value, take $2.
+                    if [ "$_cli_takes_next" = 1 ]; then
+                        if [ -z "${2:-}" ]; then err "$1 requires a value"; exit 1; fi
+                        _cli_val="$2"
+                        _set_opt "$_cli_key" "$_cli_val"
+                        shift 2
+                    else
+                        _set_opt "$_cli_key" "$_cli_val"
+                        shift
+                    fi
+                    ;;
+                *)
+                    case " $OPT_YN_KEYS " in
+                        *" $_cli_key "*)
+                            # Bare --flag implies yes; --no-flag already sets "no".
+                            if [ "$_cli_takes_next" = 1 ] && [ -z "$_cli_val" ]; then
+                                _cli_val="yes"
+                            fi
+                            _set_opt "$_cli_key" "$_cli_val"
+                            shift
+                            ;;
+                        *)
+                            err "unknown argument: $1"
+                            err "run 'install.sh --help' to see available flags"
+                            exit 1
+                            ;;
+                    esac
+                    ;;
+            esac
             ;;
         *)
             err "unknown argument: $1"
@@ -139,8 +314,25 @@ _prompt_read() {
 }
 
 ask_yn() {
-    # ask_yn "prompt" — returns 0 for yes, 1 for no
-    printf "  %s [y/N] " "$1"
+    # ask_yn KEY "prompt" — returns 0 for yes, 1 for no
+    # If RMAIL_OPT_<KEY> is preset (from CLI/env), the prompt is skipped.
+    # In --yes mode, unset keys default to yes.  In --silent mode, unset
+    # keys error out instead of prompting.
+    _k="$1"; shift
+    _prompt="$1"
+    if _has_opt "$_k"; then
+        _parse_bool "$(_get_opt "$_k")"
+        return
+    fi
+    if $ALL_YES; then return 0; fi
+    if $SILENT; then
+        _flag=$(echo "$_k" | tr '_' '-')
+        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
+        err "--silent: $_k not set"
+        err "  supply --$_flag / --no-$_flag, or export \$$_env"
+        exit 1
+    fi
+    printf "  %s [y/N] " "$_prompt"
     _prompt_read ans
     case "$ans" in
         [Yy]*) return 0 ;;
@@ -149,13 +341,29 @@ ask_yn() {
 }
 
 ask_value() {
-    # ask_value "prompt" "default" — prints prompt with default, reads input, echos result
-    # If user presses enter without input, returns the default.
-    # Prompt goes to /dev/tty so it is visible even when stdout is captured via $(...).
-    printf "  %s [%s]: " "$1" "$2" >/dev/tty
+    # ask_value KEY "prompt" "default"
+    # If RMAIL_OPT_<KEY> is preset, the prompt is skipped and the preset
+    # echoed.  In --silent mode, an unset key errors out.  Otherwise the
+    # prompt is shown with default in [brackets]; pressing enter accepts
+    # the default.  Prompt goes to /dev/tty so it's visible even when
+    # stdout is captured via $(...).
+    _k="$1"; shift
+    _prompt="$1"; _default="$2"
+    if _has_opt "$_k"; then
+        _get_opt "$_k"
+        return
+    fi
+    if $SILENT; then
+        _flag=$(echo "$_k" | tr '_' '-')
+        _env=RMAIL_INSTALL_$(echo "$_k" | tr 'a-z' 'A-Z')
+        err "--silent: $_k not set"
+        err "  supply --$_flag=VALUE, or export \$$_env"
+        exit 1
+    fi
+    printf "  %s [%s]: " "$_prompt" "$_default" >/dev/tty
     _prompt_read _val </dev/tty
     if [ -z "$_val" ]; then
-        echo "$2"
+        echo "$_default"
     else
         echo "$_val"
     fi
@@ -258,7 +466,7 @@ if [ -n "$EXISTING_CONFIG" ]; then
     [ -n "${_existing_mail:-}" ] && DEFAULT_MAIL="$_existing_mail"
 fi
 
-RMAIL_MAIL=$(ask_value "Mail directory" "$DEFAULT_MAIL")
+RMAIL_MAIL=$(ask_value mail_dir "Mail directory" "$DEFAULT_MAIL") || exit 1
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed 's|/*$||')  # strip trailing slashes
 MAIL_DIR="$RMAIL_MAIL"
@@ -288,7 +496,7 @@ DEFAULT_PORT=$(gen_random_port)
 
 # prompt for name
 while true; do
-    RMAIL_NAME=$(ask_value "Your own name (used locally, not transmitted)" "$DEFAULT_NAME")
+    RMAIL_NAME=$(ask_value name "Your own name (used locally, not transmitted)" "$DEFAULT_NAME") || exit 1
     if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
         break
     fi
@@ -297,7 +505,7 @@ done
 
 # prompt for port
 while true; do
-    RMAIL_PORT=$(ask_value "Port to listen on" "$DEFAULT_PORT")
+    RMAIL_PORT=$(ask_value port "Port to listen on" "$DEFAULT_PORT") || exit 1
     if echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' && [ "$RMAIL_PORT" -ge 1 ] && [ "$RMAIL_PORT" -le 65535 ]; then
         break
     fi
@@ -570,11 +778,11 @@ if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
     ok "found locally compiled: deps/lua/ ($local_ver)"
 elif find_lua_system; then
     ok "found system: $LUA_VER_STR"
-    if ask_yn "Compile a local version instead?"; then
+    if ask_yn compile_lua "Compile a local version instead?"; then
         compile_lua
     fi
 else
-    if ask_yn "Lua not found in PATH. Compile locally?"; then
+    if ask_yn compile_lua "Lua not found in PATH. Compile locally?"; then
         compile_lua
     else
         err "Lua is required — cannot continue without it"
@@ -685,12 +893,12 @@ if [ -d "$DEPS/openssl" ] && [ -f "$DEPS/openssl/include/openssl/ssl.h" ] && ! $
     ok "found locally compiled: deps/openssl/"
 elif find_openssl_system; then
     ok "found system-wide (headers: ${OPENSSL_INC:-default paths})"
-    if ask_yn "Compile a local version instead?"; then
+    if ask_yn compile_openssl "Compile a local version instead?"; then
         compile_openssl
     fi
 else
     warn "OpenSSL not found — required for AES-256-GCM encryption"
-    if ask_yn "Compile OpenSSL locally? (takes a few minutes)"; then
+    if ask_yn compile_openssl "Compile OpenSSL locally? (takes a few minutes)"; then
         compile_openssl
     else
         err "OpenSSL is required — cannot continue without it"
@@ -782,7 +990,7 @@ elif _have_luasocket; then
     # System (or otherwise-discoverable) luasocket works for this Lua.
     # Offer a project-local install but don't force it.
     ok "found: $LUA_BIN can require('socket') and require('mime')"
-    if ask_yn "Install a project-local copy into libs/ anyway?"; then
+    if ask_yn compile_luasocket "Install a project-local copy into libs/ anyway?"; then
         install_luasocket
     else
         info "using system luasocket — rmail adds libs/ to cpath at startup"
@@ -790,7 +998,7 @@ elif _have_luasocket; then
     fi
 else
     warn "luasocket not found — required for network operations"
-    if ask_yn "Compile project-local luasocket from source?"; then
+    if ask_yn compile_luasocket "Compile project-local luasocket from source?"; then
         install_luasocket
     else
         err "luasocket is required — cannot continue without it"
@@ -887,7 +1095,7 @@ elif command -v upnpc >/dev/null 2>&1 && ! $FORCE; then
     HAVE_UPNPC=true
 else
     info "upnpc not found (used for automatic UPnP port forwarding)"
-    if ask_yn "Compile miniupnpc locally? (small, no extra dependencies)"; then
+    if ask_yn compile_upnp "Compile miniupnpc locally? (small, no extra dependencies)"; then
         mkdir -p "$BUILD" "$BIN"
         info "Downloading miniupnpc..."
         download "https://github.com/miniupnp/miniupnp/archive/refs/tags/$MINIUPNPC_TAG.tar.gz" "$BUILD/miniupnpc.tar.gz"
@@ -914,7 +1122,7 @@ elif command -v natpmpc >/dev/null 2>&1 && ! $FORCE; then
     HAVE_NATPMPC=true
 else
     info "natpmpc not found (used for automatic NAT-PMP port forwarding)"
-    if ask_yn "Compile libnatpmp locally? (small, no extra dependencies)"; then
+    if ask_yn compile_natpmp "Compile libnatpmp locally? (small, no extra dependencies)"; then
         mkdir -p "$BUILD" "$BIN"
         info "Downloading libnatpmp..."
         download "https://github.com/miniupnp/libnatpmp/archive/$LIBNATPMP_COMMIT.tar.gz" "$BUILD/libnatpmp.tar.gz"
@@ -996,7 +1204,7 @@ elif ! _have_zip || ! _have_unzip; then
     _have_zip   || missing="$missing zip"
     _have_unzip || missing="$missing unzip"
     warn "missing for attachment transfer:$missing"
-    if ask_yn "Compile missing tool(s) locally from Info-ZIP source?"; then
+    if ask_yn compile_zip "Compile missing tool(s) locally from Info-ZIP source?"; then
         _have_zip   || _compile_zip   || exit 1
         _have_unzip || _compile_unzip || exit 1
     else
@@ -1007,7 +1215,7 @@ elif [ -x "$BIN/zip" ] && [ -x "$BIN/unzip" ]; then
     ok "found locally compiled: deps/bin/zip, deps/bin/unzip"
 else
     ok "found system: zip/unzip"
-    if ask_yn "Compile local versions instead?"; then
+    if ask_yn compile_zip "Compile local versions instead?"; then
         _compile_zip && _compile_unzip
     fi
 fi
@@ -1123,7 +1331,7 @@ fi
 if [ "$INIT_SYSTEM" = "unknown" ]; then
     info "Could not detect init system — skipping service setup"
     info "See README.md for service file examples"
-elif ask_yn "Set up rmail to run as a service?"; then
+elif ask_yn setup_service "Set up rmail to run as a service?"; then
     case "$INIT_SYSTEM" in
         nixos)
             NIX_PORT=$(grep '^port' "$CONFIG_FILE" | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]')
@@ -1203,7 +1411,7 @@ NIX
             echo "  Or use: ./scripts/view-logs.sh"
             ;;
         systemd)
-            if ask_yn "Set up as a user service? (no root required, starts on login)"; then
+            if ask_yn user_service "Set up as a user service? (no root required, starts on login)"; then
                 SERVICE_DIR="$HOME/.config/systemd/user"
                 SERVICE_FILE="$SERVICE_DIR/rmail.service"
                 mkdir -p "$SERVICE_DIR"
@@ -1318,7 +1526,8 @@ fi
 # ============================================================
 # docs/.templates/ holds the source-of-truth .md files with placeholder
 # paths.  Here we substitute real install paths and write the resulting
-# files to docs/, then remove the signpost file.  See
+# files to docs/ alongside the signpost (which is the one tracked file in
+# docs/ — everything else is a generated artefact).  See
 # issues/350-docs-templates-and-install-time-generation.md.
 
 generate_docs() {
@@ -1355,8 +1564,9 @@ generate_docs() {
             "$tmpl" > "$out_dir/$name"
     done
 
-    # Remove the signpost file — real docs now exist
-    rm -f "$out_dir/looking-for-docs.md"
+    # looking-for-docs.md deliberately stays in place.  It's the only
+    # git-tracked file in docs/; everything else here is a generated
+    # artefact.  Leaving it keeps `git status` clean after install.
 }
 
 generate_docs
