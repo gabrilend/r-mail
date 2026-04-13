@@ -974,6 +974,62 @@ local function migrate_hashed_state(state)
     return migrated
 end
 
+local function _is_hash(s)
+    return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
+end
+
+-- chunks-outgoing.json stores a `.to` field per transfer naming the
+-- recipient contact.  Persist it as a hash, but keep the name in memory
+-- so existing consumers (contacts[transfer.to], logs, note_contact_result)
+-- don't have to change.  These wrappers do the translation at the disk
+-- boundary: load resolves hash→name using the current contacts file;
+-- save deep-copies and hashes the .to field of the copy.
+--
+-- A transfer whose .to hash can't be resolved (contact renamed/deleted
+-- since save) keeps the hash as its .to value; downstream code already
+-- handles "unknown contact" by skipping/logging that transfer.
+-- The wrapper body uses raw read_file / write_file rather than
+-- load_state / save_state so a global replace_all of
+-- `load_chunks_outgoing()` → `load_chunks_outgoing()`
+-- (and matching save) doesn't accidentally rewrite the implementation
+-- into calling itself.
+local _CHUNKS_PATH = "chunks-outgoing.json"
+local function load_chunks_outgoing()
+    local text = read_file(STATE .. "/" .. _CHUNKS_PATH)
+    local state = (text and text ~= "") and json.decode(text) or {}
+    if type(state) ~= "table" then return {} end
+    local contacts = load_contacts()
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
+    for _, transfer in pairs(state) do
+        if _is_hash(transfer.to) and hash_to_name[transfer.to] then
+            transfer.to = hash_to_name[transfer.to]
+        end
+    end
+    return state
+end
+
+local function save_chunks_outgoing(state)
+    local snapshot = {}
+    for k, v in pairs(state) do
+        local copy = {}
+        for fk, fv in pairs(v) do
+            -- compressed_path was dropped earlier in #348 (derived via
+            -- zip_path_for(zip_id)); legacy entries loaded from disk may
+            -- still have the field.  Don't propagate it back out.
+            if fk ~= "compressed_path" then copy[fk] = fv end
+        end
+        if type(copy.to) == "string" and not _is_hash(copy.to) then
+            copy.to = hash_contact_name(copy.to)
+        end
+        snapshot[k] = copy
+    end
+    write_file(STATE .. "/" .. _CHUNKS_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
+end
+
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
 -- ============================================================
@@ -1604,7 +1660,7 @@ local function handle_delete(data, sender)
                     end
                     save_state("outbox.json", outbox_state)
                     -- cancel any outgoing chunk transfers to this recipient for this message
-                    local att_state = load_state("chunks-outgoing.json")
+                    local att_state = load_chunks_outgoing()
                     local att_changed = false
                     for att_id, transfer in pairs(att_state) do
                         if transfer.to == sender and transfer.message_id == message_id then
@@ -1614,7 +1670,7 @@ local function handle_delete(data, sender)
                             log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
                         end
                     end
-                    if att_changed then save_state("chunks-outgoing.json", att_state) end
+                    if att_changed then save_chunks_outgoing(att_state) end
                     return 200, {ok = true}
                 end
             end
@@ -2696,7 +2752,7 @@ local function handle_attachment_response(data, sender)
     local att_id = data.attachment_id
     local consent = data.consent
     if not att_id then return 400, {error = "missing attachment_id"} end
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     local transfer = chunks[att_id]
     if not transfer then return 200, {ok = true} end
     if consent then
@@ -2714,7 +2770,7 @@ local function handle_attachment_response(data, sender)
         chunks[att_id] = nil
         log("consent declined by %s for %s", sender, transfer.filename)
     end
-    save_state("chunks-outgoing.json", chunks)
+    save_chunks_outgoing(chunks)
     return 200, {ok = true}
 end
 
@@ -2787,7 +2843,7 @@ local function check_transfers_file_cancellations()
     local content = read_file(paths.transfers)
     if not content then return end
 
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     if not next(chunks) then return end
 
     -- Parse file into {path -> {contact_name -> true}}
@@ -2827,13 +2883,13 @@ local function check_transfers_file_cancellations()
     end
 
     if changed then
-        save_state("chunks-outgoing.json", chunks)
+        save_chunks_outgoing(chunks)
         write_transfers_file(chunks)
     end
 end
 
 local function send_next_chunks(my_name)
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     if not next(chunks) then return false end
     local contacts = load_contacts()
     local did_work = false
@@ -2934,7 +2990,7 @@ local function send_next_chunks(my_name)
             changed = true
         end
     end
-    if changed then save_state("chunks-outgoing.json", chunks) end
+    if changed then save_chunks_outgoing(chunks) end
     return did_work
 end
 
@@ -2994,7 +3050,7 @@ end
 local function sync_outbox(my_name)
     local contacts = load_contacts()
     local state = load_state("outbox.json")
-    local att_state = load_state("chunks-outgoing.json")
+    local att_state = load_chunks_outgoing()
     local att_state_changed = false
     local did_work = false
 
@@ -3603,7 +3659,7 @@ local function sync_outbox(my_name)
         end
     end
 
-    if att_state_changed then save_state("chunks-outgoing.json", att_state) end
+    if att_state_changed then save_chunks_outgoing(att_state) end
     save_state("outbox.json", state)
     return did_work
 end
@@ -4769,7 +4825,7 @@ local function run_sync_cycle(rt)
     local w5 = send_consent_responses(rt.my_name)
     local w6 = send_next_chunks(rt.my_name)
     local w7 = send_attachment_cancellations(rt.my_name)
-    write_transfers_file(load_state("chunks-outgoing.json"))
+    write_transfers_file(load_chunks_outgoing())
     -- One summary log for contacts whose every op failed this cycle
     -- (#324), instead of a separate "failed to X" line per queued op.
     flush_unreachable_summary()
