@@ -312,7 +312,14 @@ local function tcp_for(addr)
     if is_ipv6(addr) then return socket.tcp6() else return socket.tcp() end
 end
 
--- Get the best address for a contact: prefer IPv6 if available, fall back to IPv4.
+-- Get the best single address for a contact.
+--
+-- DEPRECATED for new code: prefer `contact_hosts(contact)` and loop over
+-- the returned list (so every configured address gets its turn on
+-- connection failure — see #347 Phase 2).  This single-address helper
+-- exists only for callers that need "just show me one address" (logs,
+-- UI summaries, one-shot probes).  The choice here matches the first
+-- entry in contact_hosts().
 local function contact_addr(contact)
     return contact.ipv6 or contact.ip
 end
@@ -451,10 +458,12 @@ local function load_contacts()
                 if not contacts[name] then contacts[name] = {} end
                 if field == "ip" then
                     -- Multi-IP support (#347): every `name.ip = ...` line is
-                    -- appended to a list; the first one stays at `.ip` as the
-                    -- preferred address so every existing consumer keeps
-                    -- working without changes.  A fallback/retry layer that
-                    -- walks the full list on connection failure is Phase 2.
+                    -- appended to `ips`, the list that's the new source of
+                    -- truth.  `contact.ip` stays populated with the first
+                    -- entry as a back-compat shim for every call site that
+                    -- still reads `contact.ip` directly.
+                    -- TODO(#347): once every such call site migrates to
+                    -- contact_hosts(), drop the `.ip` shim.
                     if not contacts[name].ips then contacts[name].ips = {} end
                     contacts[name].ips[#contacts[name].ips + 1] = value
                     if not contacts[name].ip then contacts[name].ip = value end
@@ -468,9 +477,14 @@ local function load_contacts()
             end
         end
     end
-    -- Fold a legacy `.ipv6` field into the address list so Phase 2 retry
-    -- logic has a single source of addresses to walk.  `.ipv6` remains set
-    -- for back-compat with existing call sites (contact_addr prefers it).
+    -- Fold a legacy `.ipv6` field into the address list so the retry
+    -- layer has a single source of addresses to walk.  `.ipv6` stays set
+    -- on the in-memory contact so back-compat readers (contact_addr)
+    -- keep working.
+    -- DEPRECATED(#347): the `.ipv6` field is no longer needed — users
+    -- can just add another `name.ip = <v6-address>` line and the
+    -- address-type detection handles IPv6.  Remove the fold + field
+    -- once existing contacts files have been migrated.
     for _, c in pairs(contacts) do
         if c.ipv6 then
             c.ips = c.ips or {}
@@ -1602,6 +1616,47 @@ local function http_post_batch(requests)
     return results
 end
 
+-- Like http_post_batch, but when a request carries a `hosts` list (from
+-- contact_hosts(), #347) and its first attempt fails with a connection-
+-- level error, retry that single request serially against each remaining
+-- host until one succeeds or the list is exhausted.  Application-level
+-- errors (the peer answered with a non-OK HTTP status) are returned
+-- as-is — a 404 or 400 doesn't get better by trying a different IP for
+-- the same peer.
+--
+-- First-attempt parallelism is preserved; fallback is only serial for
+-- the entries that actually failed, which are usually a small minority.
+local function http_post_batch_with_fallback(requests)
+    local results = http_post_batch(requests)
+    for i, req in ipairs(requests) do
+        local hosts = req.hosts
+        if results[i] and not results[i].ok and hosts and #hosts > 1 then
+            -- A status value means we got an HTTP response, i.e. the
+            -- peer is reachable.  Don't walk the fallback list in that
+            -- case — the error is application-level, not network.
+            if not results[i].status then
+                for k = 2, #hosts do
+                    if not hosts[k] or hosts[k] == "" then break end
+                    local single = {
+                        host = hosts[k], port = req.port, path = req.path,
+                        payload = req.payload, psk_key = req.psk_key,
+                    }
+                    local r = http_post_batch({single})[1]
+                    if r and r.ok then
+                        log("fallback to %s succeeded for %s", hosts[k], req.path or "?")
+                        results[i] = r
+                        break
+                    elseif r and r.status then
+                        results[i] = r
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return results
+end
+
 
 local function parse_outbox_file(path)
     local text = read_file(path)
@@ -1896,7 +1951,8 @@ local function send_consent_responses(my_name)
         if c and c.ip then
             valid[#valid + 1] = resp
             requests[#requests + 1] = {
-                host = contact_addr(c), port = c.port, path = "/deliver",
+                host = contact_addr(c), hosts = contact_hosts(c),
+                port = c.port, path = "/deliver",
                 payload = json.encode({
                     type = "attachment_response",
                     attachment_id = resp.attachment_id,
@@ -1908,7 +1964,7 @@ local function send_consent_responses(my_name)
         end
     end
     if #requests == 0 then return false end
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     local remaining = {}
     local pending = load_state("consent-pending.json")
     for i, resp in ipairs(valid) do
@@ -1956,7 +2012,8 @@ local function send_attachment_cancellations(my_name)
         if c and c.ip then
             valid[#valid + 1] = item
             requests[#requests + 1] = {
-                host = contact_addr(c), port = c.port, path = "/delete",
+                host = contact_addr(c), hosts = contact_hosts(c),
+                port = c.port, path = "/delete",
                 payload = json.encode({
                     message_id = item.entry.message_id,
                 }),
@@ -1970,7 +2027,7 @@ local function send_attachment_cancellations(my_name)
         save_state("consent-pending.json", pending)
         return true
     end
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     for i, item in ipairs(valid) do
         if results[i].ok then
             pending[item.att_id] = nil
@@ -2348,8 +2405,9 @@ local function send_next_chunks(my_name)
                 log("chunk read error at %d for %s", chunk_index, att_id)
                 aborted = true; break
             end
-            local results = http_post_batch({{
-                host = contact_addr(contact), port = contact.port, path = "/deliver",
+            local results = http_post_batch_with_fallback({{
+                host = contact_addr(contact), hosts = contact_hosts(contact),
+                port = contact.port, path = "/deliver",
                 payload = json.encode({
                     type = "attachment_chunk",
                     attachment_id = att_id,
@@ -2820,7 +2878,8 @@ local function sync_outbox(my_name)
             if not op.skip then
                 local j = #requests + 1
                 requests[j] = {
-                    host = contact_addr(op.contact), port = op.contact.port,
+                    host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
+                    port = op.contact.port,
                     path = path, payload = json.encode(data),
                     psk_key = op.contact.token,
                 }
@@ -2828,7 +2887,7 @@ local function sync_outbox(my_name)
             end
         end
 
-        local raw_results = http_post_batch(requests)
+        local raw_results = http_post_batch_with_fallback(requests)
         -- expand results back to ops indexing
         local results = {}
         for j, oi in ipairs(req_to_op) do
@@ -2982,7 +3041,8 @@ local function sync_inbox(my_name)
         local requests = {}
         for i, op in ipairs(ops) do
             requests[i] = {
-                host = contact_addr(op.contact), port = op.contact.port,
+                host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
+                port = op.contact.port,
                 path = "/delete",
                 payload = json.encode({
                     message_id = op.message_id,
@@ -2990,7 +3050,7 @@ local function sync_inbox(my_name)
                 psk_key = op.contact.token,
             }
         end
-        local results = http_post_batch(requests)
+        local results = http_post_batch_with_fallback(requests)
         for i, op in ipairs(ops) do
             if results[i].ok or results[i].status == 404 then
                 state[op.filename] = nil
@@ -3192,7 +3252,8 @@ local function sync_address_notifications(my_name)
     local requests = {}
     for i, op in ipairs(ops) do
         requests[i] = {
-            host = contact_addr(op.contact), port = op.contact.port,
+            host = contact_addr(op.contact), hosts = contact_hosts(op.contact),
+            port = op.contact.port,
             path = "/update-address",
             payload = json.encode({
                 ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
@@ -3201,7 +3262,7 @@ local function sync_address_notifications(my_name)
         }
     end
 
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     local did_work = false
     for i, op in ipairs(ops) do
         if results[i].ok then

@@ -136,12 +136,18 @@ jump around.
 - [ ] `contact_hosts()` returns at least one entry for any contact with an IP; empty list otherwise
 - [ ] Single `ip` field accepts IPv4, IPv6, and DNS hostname — type detected automatically
 
-**Phase 2 (deferred):**
-- [ ] Daemon tries each address in `contact_hosts()` order until one connects
-- [ ] Application-level errors (404, etc.) do not trigger fallback; only connection failures do
+**Phase 2 (shipped):**
+- [ ] Healthy first address: `http_post_batch_with_fallback` dispatches in parallel and returns first-attempt results (no serial regression)
+- [ ] First address unreachable, second reachable: retry picks up and returns the second address's result as the entry's final result
+- [ ] HTTP-level error (e.g. 404) from first address: no fallback attempted; first-address result returned as-is
+- [ ] All addresses unreachable: final result reports failure (no ok, no status)
+- [ ] `sync_outbox`, `sync_inbox`, consent-response, attachment-cancel, attachment-chunk, and update-address paths all use the fallback wrapper
 
 **Phase 3 (deferred, stretch):**
 - [ ] Successful non-first address is promoted to the top of that contact's block on disk
+
+**Per-IP ports (deferred, separate issue):**
+- [ ] Per-address port syntax supported (endpoint-form or parallel list)
 
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4

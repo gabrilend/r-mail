@@ -76,44 +76,55 @@ From `issues/new-issue-todo`.
 
 ## Status
 
-**Phase 1 complete.**
+**Phases 1 and 2 complete. Phase 3 (stretch) and per-IP ports deferred.**
 
 Landed in this pass:
 
 - **Schema: multiple `ip` lines per contact.** `load_contacts` collects
   every `name.ip = ...` line into `contact.ips` (a list). The first
-  one also lives at `contact.ip`, so every existing consumer of
-  `contact.ip` and `contact_addr()` keeps working unchanged. A legacy
-  `.ipv6` field is folded into the same list.
-- **New helper `contact_hosts(contact)`** returning the address list
-  in preferred order. Ready for Phase 2 to walk on connection
-  failure.
+  one also lives at `contact.ip`, marked in a `TODO(#347)` comment as
+  a back-compat shim to drop once every call site migrates to
+  `contact_hosts()`. A legacy `.ipv6` field is folded into the same
+  list, also `DEPRECATED(#347)`-tagged for future removal — users
+  can add another `name.ip = <v6-address>` line now that type
+  detection handles IPv6.
+- **Helper `contact_hosts(contact)`** returning the address list in
+  preferred order.
 - **Auto-grouping in `align_contacts`.** Scattered `name.*` lines are
-  now consolidated at the contact's first position (verified against
-  the example in this issue). The existing `=` alignment still runs
+  consolidated at the contact's first position (verified against the
+  example in this issue). The existing `=` alignment still runs
   afterwards on the now-contiguous blocks.
 - **`handle_update_address` guard:** if the contact has more than one
   IP configured, an inbound single-address update no longer clobbers
   the list. Port updates still apply.
+- **Retry-on-failure: `http_post_batch_with_fallback`.** Wraps the
+  existing parallel `http_post_batch`; the first attempt dispatches
+  as before, so the hot path is unchanged. Any request whose result
+  has no `status` (connection-level failure, not an HTTP response)
+  and whose `hosts` list has more than one entry is retried serially
+  against `hosts[2..]` until one succeeds or the list is exhausted.
+  HTTP-level errors (404, 500, etc.) are returned as-is — a
+  different IP for the same peer won't fix a protocol error.
+- **All six `http_post_batch` call sites migrated:**
+  `send_consent_responses`, `send_attachment_cancellations`, the
+  attachment-chunk sender, `sync_outbox`'s main batch,
+  `sync_inbox`'s deletion notifier, and the update-address push.
 
-Deferred (separate follow-ups):
+Deferred:
 
-- **Phase 2: retry on connection failure.** The sender needs to walk
-  `contact_hosts(c)` when the first address can't be reached. This
-  touches every `http_post_batch` call site that currently passes
-  `host = contact_addr(c)` — sync_outbox, send_consent_responses,
-  send_attachment_cancellations, sync_inbox delete notify,
-  update-address push, and the LAN-discovery / peer-address probes.
-  Simplest implementation sketch: after the initial parallel dispatch,
-  retry each failure individually with subsequent addresses from the
-  list (no change to `http_post_batch`'s state machine, slight loss
-  of parallelism only on the fallback path). Without Phase 2, users
-  can **declare** multiple IPs and they'll **survive** auto-grouping,
-  but only the first is tried today.
-- **Phase 3 (stretch): promote the winning address.** When a non-first
-  address succeeds, rewrite the contacts file so that address is first
-  for future connections. Needs a multi-value-aware write path —
-  `write_contact_fields` currently assumes one value per field.
+- **Phase 3 (stretch): promote the winning address.** When a
+  non-first address succeeds, rewrite the contacts file so that
+  address is first for future connections. Needs a multi-value-aware
+  write path — `write_contact_fields` currently assumes one value
+  per field, and `align_contacts` is the other surface that touches
+  IP ordering.
+- **Per-IP ports.** `contact.port` is still a single scalar that
+  applies to every address in `contact.ips`. A contact whose LAN and
+  WAN endpoints listen on different ports can't be expressed today.
+  Probable syntax: either embedded in the ip line
+  (`name.ip = 192.168.1.5:22`, parsed off the last `:` with IPv6
+  bracket-form for disambiguation) or a parallel list of ports.
+  Track as a separate issue when a user needs it.
 
-Re-open or spawn new issues for Phase 2 and Phase 3 when ready to
-implement.
+Re-open this issue when ready to tackle Phase 3, or spawn a new issue
+for per-IP ports.
