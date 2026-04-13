@@ -48,6 +48,12 @@ all four get safer behavior.
 
 ## Status
 
-Not started. Small, local fix. Spin this up the next time someone
-actually creates a directory in one of these dirs and something
-misbehaves.
+Shipped. `list_files` now shells to `ls -1p` and drops any entry
+whose last character is `/` (POSIX marker for directories) along
+with dotfiles.
+
+Follow-on: the delete-then-mkdir race that motivated this
+(user deletes `inbox/foo`, creates `inbox/foo/` before the next
+sync) now resolves correctly — the deletion notification is sent,
+because `foo` is absent from the filtered `list_files` output even
+though a directory of that name exists.

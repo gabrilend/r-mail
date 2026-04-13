@@ -99,6 +99,14 @@ jump around.
 - [ ] Transfer complete: no outbox attach: line is stripped (there never was one)
 - [ ] Compression failure falls back to the old body_too_large error file
 - [ ] `on_send` hook runs on the stub body (not the oversized original)
+- [ ] Receiver's inbox stub text reads "delivered as attachment at <paths.attachments>/<subject>" with the receiver's own resolved path
+- [ ] Old daemons that ignore `auto_body` still see the sender's fallback stub text
+
+### list_files skips directories (#356)
+- [ ] `list_files` on a dir containing files + subdirs returns only files
+- [ ] Delete an inbox file and create a directory with the same name before next sync: sync_inbox still notifies the sender of the deletion
+- [ ] Consent/progress file overlaid by a same-named directory: handler treats the transfer as cancelled (expected)
+- [ ] Android attachments API doesn't surface subdirs as attachments
 
 ### Progress files in RAM (#328)
 - [ ] Receiver's progress file stored in tmpfs with symlink from inbox
