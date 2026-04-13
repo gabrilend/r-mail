@@ -143,6 +143,25 @@ fun InboxScreen(
     var draftSubject by remember { mutableStateOf("") }
     var draftBody by remember { mutableStateOf("") }
 
+    // #321: edit-mode tracking.  Declared before the pendingDraft
+    // LaunchedEffect that writes to them.  When editingOutboxFilename
+    // is non-null, the composer is editing that file (Send becomes
+    // Save, back asks to confirm, the saved file overwrites this
+    // filename rather than getting a fresh name).
+    var editingOutboxFilename by remember { mutableStateOf<String?>(null) }
+    var editingAttachLines by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Snapshot taken at edit-start; we compare against it to know
+    // whether the draft has been changed.
+    var editingSnapshot by remember {
+        mutableStateOf(Triple(emptyList<String>(), "", ""))
+    }
+    var editingDiscardConfirm by remember { mutableStateOf(false) }
+    val editingDirty = editingOutboxFilename != null && (
+        draftRecipients != editingSnapshot.first ||
+        draftSubject != editingSnapshot.second ||
+        draftBody != editingSnapshot.third
+    )
+
     // #358 / #321: pick up a forward/reply/edit draft queued by
     // ReadScreen, seed the composer state with it, and jump to the
     // Write panel.  When the draft is tagged as an edit
@@ -176,23 +195,6 @@ fun InboxScreen(
     // #315: duplicate-subject warning dialog.  Keeps the draft intact
     // so the user can tweak the subject and resend.
     var duplicateSubjectWarning by remember { mutableStateOf<String?>(null) }
-
-    // #321: edit-mode tracking.  When non-null, the composer is editing
-    // an existing outbox file (Send becomes Save, back asks to confirm,
-    // the saved file overwrites this filename).
-    var editingOutboxFilename by remember { mutableStateOf<String?>(null) }
-    var editingAttachLines by remember { mutableStateOf<List<String>>(emptyList()) }
-    // Snapshot taken at edit-start; we compare against it to know
-    // whether the draft is dirty.
-    var editingSnapshot by remember {
-        mutableStateOf(Triple(emptyList<String>(), "", ""))
-    }
-    var editingDiscardConfirm by remember { mutableStateOf(false) }
-    val editingDirty = editingOutboxFilename != null && (
-        draftRecipients != editingSnapshot.first ||
-        draftSubject != editingSnapshot.second ||
-        draftBody != editingSnapshot.third
-    )
 
     // Contact editor state
     var showContactEditor by remember { mutableStateOf(false) }
@@ -1410,7 +1412,8 @@ private fun ColorField(label: String, color: Color, onChange: (Color) -> Unit) {
 
 // ── Compose panel ───────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class,
+       androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ComposePanel(
     vm: MainViewModel,

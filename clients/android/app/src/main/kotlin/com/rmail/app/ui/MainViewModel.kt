@@ -293,16 +293,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return items
     }
 
-    // #357: fully remove a mailbox: drop it from the registry, delete
-    // the local mailbox directory (MailStore), and deselect if this was
-    // the active mailbox.  Caller is responsible for navigating away.
-    fun removeMailbox(id: String) {
-        if (_activeMailboxId.value == id) {
-            deselectMailbox()
-        }
-        registry.remove(id)
-        _mailboxes.value = registry.loadAll()
-    }
+    // #357: removeMailbox is defined further down alongside the other
+    // registry-mutation helpers (updateMailbox etc.) — same body as
+    // the one I had here originally.  Removed the duplicate.
 
     fun loadOutboxMessage(filename: String): MailMessage? {
         val s = store ?: return null
