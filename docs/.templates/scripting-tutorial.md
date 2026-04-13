@@ -23,6 +23,8 @@ on_update      = /path/to/script.sh
 - [Using other languages](#using-other-languages)
   - [Lua](#lua)
   - [C](#c)
+- [Patterns](#patterns)
+  - [Periodic tasks via self-addressed messages](#periodic-tasks-via-self-addressed-messages)
 - [Tips](#tips)
 
 ---
@@ -311,6 +313,145 @@ file path, open it with `fopen(argv[3], "r")`.
 
 **Returning data:** write to `stdout`. Return 0 for success. Non-zero exit
 causes rmail to log a warning and keep the original body unchanged.
+
+---
+
+## Patterns
+
+Hooks combine with living messages (see #306) to build behaviours rmail
+doesn't ship natively.  The one worked out below is a **periodic** — a
+self-scheduling task that ticks down each sync cycle and fires when the
+timer hits zero.
+
+### Periodic tasks via self-addressed messages
+
+No `on_tick` hook exists.  To run something every N seconds you'd
+normally want a cron job, but rmail can already approximate one with
+three ingredients it already has:
+
+1. **Self-addressed outbox message.** A contact entry with `own = true`
+   and your own name lets you put `to: <your-name>` in an outbox file.
+   The daemon self-delivers it — the inbox gets a copy without any
+   network traffic.
+2. **Living messages.** Editing the outbox body re-delivers it as an
+   update (via `on_update`), fired once per sync cycle.
+3. **The outbox body as state.** Whatever timer and payload you need
+   just lives in the body of the message.
+
+So a periodic is an outbox file with a `remaining_ms` header that the
+hook decrements each cycle.  When it reaches zero, the hook runs the
+payload and resets the timer.
+
+Because the daemon's sync cycle is the clock, the minimum granularity
+is your sync interval — usually seconds to a minute.  Don't use this
+pattern for sub-second timing.
+
+#### Minimal example: log a tick every 30 seconds
+
+**Step 1.** Add yourself to `~/mail/contacts` with `own = true`:
+
+```
+me.ip    = 127.0.0.1
+me.port  = 0
+me.token = "any-non-empty-string"
+me.own   = true
+```
+
+(The ip/port aren't used for self-delivery, but the fields are required
+for a valid contact.)
+
+**Step 2.** Create `~/mail/outbox/heartbeat`:
+
+```
+to: me
+remaining_ms: 30000
+last_tick: 0
+tick count: 0
+```
+
+**Step 3.** Hook script at `/home/you/.config/rmail/hooks/heartbeat.sh`:
+
+```sh
+#!/bin/sh
+# on_update hook for periodic self-messages.
+# Args: $1=sender, $2=inbox path, $3=new body (stdout replaces body).
+sender="$1"
+inbox_path="$2"
+body="$3"
+
+remaining=$(printf '%s' "$body" | sed -n 's/^remaining_ms: //p' | head -1)
+last_tick=$(printf '%s' "$body" | sed -n 's/^last_tick: //p' | head -1)
+count=$(printf '%s' "$body" | sed -n 's/^tick count: //p' | head -1)
+
+# Not a periodic message — pass through unchanged.
+if [ -z "$remaining" ]; then printf '%s' "$body"; exit 0; fi
+
+now=$(date +%s)
+elapsed_ms=$(( (now - last_tick) * 1000 ))
+new_remaining=$(( remaining - elapsed_ms ))
+period_ms=30000
+
+if [ "$new_remaining" -le 0 ]; then
+    # Payload: bump the count and log a tick.  Replace with whatever
+    # work you actually want to do.
+    count=$(( count + 1 ))
+    echo "$(date '+%Y-%m-%d %H:%M:%S') tick $count" >> ~/mail/.heartbeat.log
+    new_remaining=$period_ms
+fi
+
+# Rewrite the body: updated counter, reset last_tick to now.
+new_body=$(printf 'remaining_ms: %d\nlast_tick: %d\ntick count: %d\n' \
+    "$new_remaining" "$now" "$count")
+
+# Replace the inbox body (stdout) AND rewrite the outbox file so the
+# next sync cycle sees a body change and fires on_update again.
+printf '%s' "$new_body"
+
+subject=$(basename "$inbox_path")
+printf 'to: %s\n%s' "$sender" "$new_body" > ~/mail/outbox/"$subject"
+```
+
+**Step 4.** Wire it up in `~/.config/rmail/config`:
+
+```
+on_update = /home/you/.config/rmail/hooks/heartbeat.sh
+```
+
+Every sync cycle the daemon sees the outbox body changed (the hook
+updated `last_tick`), delivers the update to your own inbox, fires
+`on_update` with the new body, and the hook decrements again.  When
+`remaining_ms` drops below zero the payload runs and the timer resets.
+
+#### What stops the loop?
+
+It never stops — that's the point.  Each cycle produces one decrement.
+If you want the periodic to end, have the hook delete the outbox file
+(and not rewrite it) when some condition is met.  The daemon's next
+sync cycle will see the file missing and clean up the inbox copy too.
+
+#### One hook, many periodic messages (and regular messages too)
+
+The hook's first check — "is `remaining_ms` present?" — lets it live
+peacefully alongside non-periodic `on_update` use cases.  Messages
+without the header pass through unchanged.  You can also dispatch on
+filename if you want multiple periodics with different intervals,
+different payloads, or different destinations.
+
+#### Real-world payload: poll an external source
+
+Replace the `echo ... >> .heartbeat.log` line with anything a shell
+script can do.  Common examples:
+
+- `curl` a calendar API and append summarised events to another
+  outbox message that goes to a remote contact
+- Run a disk-space check and send yourself an inbox message if a
+  threshold is crossed
+- Sweep old messages out of the inbox into an archive directory
+- Check for new items in a git repo and deliver a summary
+
+The payload runs on your machine with your permissions — same as any
+hook.  It can read and write anywhere the daemon can, including
+creating new outbox messages addressed to other contacts.
 
 ---
 
