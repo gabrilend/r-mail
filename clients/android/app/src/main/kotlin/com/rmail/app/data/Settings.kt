@@ -25,4 +25,13 @@ class Settings(context: Context) {
     var accentColor: Int
         get() = prefs.getInt("accent_color", 0xFF00E5FF.toInt())  // cyan
         set(v) = prefs.edit { putInt("accent_color", v) }
+
+    // #318: monospace column width for the inbox message viewer.
+    // Font size is computed so that `readerColumns` characters fit the
+    // screen width.  Default 80 (classic terminal width).  User-
+    // adjustable via +/- controls in the Read screen's top bar, which
+    // step in increments of 20 (so common values are 60, 80, 100, 120).
+    var readerColumns: Int
+        get() = prefs.getInt("reader_columns", 80)
+        set(v) = prefs.edit { putInt("reader_columns", v.coerceIn(40, 200)) }
 }

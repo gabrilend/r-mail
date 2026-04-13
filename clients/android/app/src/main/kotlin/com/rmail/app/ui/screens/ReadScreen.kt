@@ -11,7 +11,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.rmail.app.data.MailMessage
 import com.rmail.app.ui.MainViewModel
 
@@ -78,7 +83,44 @@ fun ReadScreen(
                     }
                 },
                 actions = {
+                    if (!isOutbox && !msg.isConsent) {
+                        // #318: width controls (expand / shrink by 20 cols).
+                        // Persisted as GlobalSettings.readerColumns.
+                        IconButton(onClick = {
+                            vm.globalSettings.readerColumns =
+                                (vm.globalSettings.readerColumns - 20).coerceAtLeast(40)
+                            vm.bumpReaderColumns()
+                        }) {
+                            Icon(Icons.Default.Remove, contentDescription = "Narrower columns")
+                        }
+                        IconButton(onClick = {
+                            vm.globalSettings.readerColumns =
+                                (vm.globalSettings.readerColumns + 20).coerceAtMost(200)
+                            vm.bumpReaderColumns()
+                        }) {
+                            Icon(Icons.Default.Add, contentDescription = "Wider columns")
+                        }
+                    }
                     if (isOutbox) {
+                        // #321: Edit kicks off the in-place edit flow —
+                        // parse this outbox file's headers and body,
+                        // queue a PendingDraft tagged with this
+                        // filename, pop back to the InboxScreen which
+                        // observes the draft and switches to Write
+                        // panel in edit mode.
+                        IconButton(onClick = {
+                            val parsed = parseOutbox(msg.content)
+                            vm.queuePendingDraft(MainViewModel.PendingDraft(
+                                recipients = parsed.recipients.ifEmpty { listOf("") },
+                                subject = filename,
+                                body = parsed.body,
+                                editingOutboxFilename = filename,
+                                attachLines = parsed.attachLines
+                            ))
+                            onBack()
+                        }) {
+                            Icon(Icons.Default.Edit, contentDescription = "Edit")
+                        }
                         IconButton(onClick = { showDeleteDialog = true }) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete")
                         }
@@ -134,30 +176,50 @@ fun ReadScreen(
             )
         } else {
             Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-                Column(
+                // #318: monospace text sized so exactly `columns`
+                // characters fit the container width.  BoxWithConstraints
+                // gives us the viewport's maxWidth; TextMeasurer gives us
+                // the real rendered width of a row of `columns` "M"s at a
+                // reference size; we scale the font to make those match.
+                // Recomputed whenever the user adjusts columns via the
+                // +/- buttons (observed through vm.readerColumns).
+                val columns by vm.readerColumns.collectAsState()
+                BoxWithConstraints(
                     modifier = Modifier
                         .weight(1f)
-                        .padding(16.dp)
+                        .padding(horizontal = 8.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
+                    val refSize = 14.sp
+                    val measurer = rememberTextMeasurer()
+                    val referenceLine = "M".repeat(columns)
+                    val measured = measurer.measure(
+                        text = referenceLine,
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = refSize
+                        )
+                    )
+                    val density = LocalDensity.current
+                    val widthAtRef = with(density) { measured.size.width.toDp() }
+                    val scale: Float = maxWidth / widthAtRef
+                    val scaled = refSize * scale
                     Text(
                         text = msg.content,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = scaled,
+                        lineHeight = scaled * 1.2f
                     )
                 }
-                if (isOutbox) {
-                    Button(
-                        onClick = { vm.triggerSync() },
-                        modifier = Modifier.fillMaxWidth().height(56.dp),
-                        shape = androidx.compose.ui.graphics.RectangleShape,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF00BCD4)
-                        )
-                    ) {
-                        Text("Update", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                    }
-                }
+                // #321: removed the standalone "Update" button.  In its
+                // earlier incarnation it just retriggered the sync,
+                // which is also what every other touch on this screen
+                // (Edit, Reply, Forward) implicitly does and what the
+                // top-bar refresh icon in InboxScreen does explicitly.
+                // The spec asks for an Update *progress* indicator
+                // here when there's an in-flight transfer; that's a
+                // separate visualisation we can add later, distinct
+                // from the misleading "tap to do something" button.
             }
         }
     }
@@ -220,4 +282,33 @@ private fun ConsentView(
 private fun buildQuoted(msg: MailMessage): String {
     val quoted = msg.content.lines().joinToString("\n") { "| $it" }
     return "\n\n$quoted"
+}
+
+// #321: parse an outbox file into its constituent parts so the
+// composer can reload it for editing.  Mirrors the daemon's
+// parse_outbox_file logic: contiguous to:/attach: lines at the top
+// are the header block, everything after the first non-header line
+// is the body.
+private data class ParsedOutbox(
+    val recipients: List<String>,
+    val attachLines: List<String>,
+    val body: String
+)
+private fun parseOutbox(content: String): ParsedOutbox {
+    val recipients = mutableListOf<String>()
+    val attachLines = mutableListOf<String>()
+    val lines = content.lines()
+    var bodyStart = lines.size
+    for ((i, line) in lines.withIndex()) {
+        val lower = line.trimStart().lowercase()
+        when {
+            lower.startsWith("to:") ->
+                recipients.add(line.substringAfter(":").trim())
+            lower.startsWith("attach:") ->
+                attachLines.add(line.trim())
+            else -> { bodyStart = i; break }
+        }
+    }
+    val body = lines.drop(bodyStart).joinToString("\n").trimStart('\n')
+    return ParsedOutbox(recipients, attachLines, body)
 }

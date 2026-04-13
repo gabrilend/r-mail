@@ -10,7 +10,11 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -139,9 +143,12 @@ fun InboxScreen(
     var draftSubject by remember { mutableStateOf("") }
     var draftBody by remember { mutableStateOf("") }
 
-    // #358: pick up a forward/reply draft queued by ReadScreen, seed the
-    // composer state with it, and jump to the Write panel.  Consume the
-    // pending value so a back-and-forth navigation doesn't refill again.
+    // #358 / #321: pick up a forward/reply/edit draft queued by
+    // ReadScreen, seed the composer state with it, and jump to the
+    // Write panel.  When the draft is tagged as an edit
+    // (editingOutboxFilename != null), also enable the save/back-
+    // confirm machinery and snapshot the inbound state so we can tell
+    // when the user has actually changed something.
     val pendingDraft by vm.pendingDraft.collectAsState()
     LaunchedEffect(pendingDraft) {
         val d = pendingDraft ?: return@LaunchedEffect
@@ -149,6 +156,9 @@ fun InboxScreen(
         draftSubject = d.subject
         draftBody = d.body
         draftAttachments.clear()
+        editingOutboxFilename = d.editingOutboxFilename
+        editingAttachLines = d.attachLines
+        editingSnapshot = Triple(draftRecipients, draftSubject, draftBody)
         currentPanel = Panel.WRITE
         vm.consumePendingDraft()
     }
@@ -166,6 +176,23 @@ fun InboxScreen(
     // #315: duplicate-subject warning dialog.  Keeps the draft intact
     // so the user can tweak the subject and resend.
     var duplicateSubjectWarning by remember { mutableStateOf<String?>(null) }
+
+    // #321: edit-mode tracking.  When non-null, the composer is editing
+    // an existing outbox file (Send becomes Save, back asks to confirm,
+    // the saved file overwrites this filename).
+    var editingOutboxFilename by remember { mutableStateOf<String?>(null) }
+    var editingAttachLines by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Snapshot taken at edit-start; we compare against it to know
+    // whether the draft is dirty.
+    var editingSnapshot by remember {
+        mutableStateOf(Triple(emptyList<String>(), "", ""))
+    }
+    var editingDiscardConfirm by remember { mutableStateOf(false) }
+    val editingDirty = editingOutboxFilename != null && (
+        draftRecipients != editingSnapshot.first ||
+        draftSubject != editingSnapshot.second ||
+        draftBody != editingSnapshot.third
+    )
 
     // Contact editor state
     var showContactEditor by remember { mutableStateOf(false) }
@@ -256,10 +283,18 @@ fun InboxScreen(
                         // #359: title doubles as the "go to mailbox list"
                         // tap target.  A subtle underline signals it's
                         // interactive without shouting about it.
+                        // #321: when in edit mode with unsaved changes,
+                        // intercept the tap and ask before leaving.
                         Text(
                             label,
                             textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
-                            modifier = Modifier.clickable(onClick = onBack)
+                            modifier = Modifier.clickable {
+                                if (editingOutboxFilename != null && editingDirty) {
+                                    editingDiscardConfirm = true
+                                } else {
+                                    onBack()
+                                }
+                            }
                         )
                     }
                 },
@@ -328,39 +363,53 @@ fun InboxScreen(
                         IconButton(onClick = {
                             val validRecipients = draftRecipients.filter { it.isNotBlank() }
                             if (validRecipients.isEmpty()) return@IconButton
-                            val filename = if (draftSubject.isNotBlank())
-                                sanitizeFilename(draftSubject) else vm.newOutboxFilename()
-                            // #315: catch the collision on the *converted*
-                            // filename, not the raw subject.  "hello world"
-                            // and "hello-world" both sanitise to
-                            // "hello-world"; neither should silently
-                            // overwrite an existing outbox file of that
-                            // name.  If there's a collision, show a dialog
-                            // and keep the draft intact so the user can
-                            // adjust the subject.
-                            if (draftSubject.isNotBlank() &&
-                                vm.outboxFiles.value.contains(filename)) {
-                                duplicateSubjectWarning = filename
-                                return@IconButton
+                            // #321: in edit mode we overwrite the
+                            // existing outbox file; otherwise we
+                            // generate (or sanitise) a new filename
+                            // and apply the duplicate-subject guard.
+                            val filename = editingOutboxFilename ?: run {
+                                val candidate = if (draftSubject.isNotBlank())
+                                    sanitizeFilename(draftSubject)
+                                else vm.newOutboxFilename()
+                                if (draftSubject.isNotBlank() &&
+                                    vm.outboxFiles.value.contains(candidate)) {
+                                    duplicateSubjectWarning = candidate
+                                    return@IconButton
+                                }
+                                candidate
                             }
                             val localPaths = draftAttachments.map { it.uri.toString() }
                             val sb = StringBuilder()
                             for (r in validRecipients) sb.appendLine("to: $r")
+                            // Existing attach: lines from an editing
+                            // session, preserved verbatim.
+                            for (a in editingAttachLines) sb.appendLine(a)
                             for (p in localPaths) sb.appendLine("attach: $p")
                             sb.appendLine()
                             sb.append(draftBody)
                             vm.saveOutboxFile(filename, sb.toString())
                             vm.uploadAttachmentsInBackground(filename, draftAttachments.map { it.uri })
-                            // #322: trigger the top-bar sending animation
-                            vm.markSendingStart(filename)
+                            // #322: only trigger the sending animation
+                            // for fresh sends.  An edit is "save +
+                            // sync"; the daemon's living-messages
+                            // mechanism does the right thing without
+                            // a "sending…" indicator.
+                            if (editingOutboxFilename == null) vm.markSendingStart(filename)
                             draftRecipients = listOf("")
                             draftAttachments.clear()
                             draftSubject = ""
                             draftBody = ""
+                            editingOutboxFilename = null
+                            editingAttachLines = emptyList()
                             currentPanel = Panel.OUTBOX
                             vm.triggerSync()
                         }) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                            Icon(
+                                imageVector = if (editingOutboxFilename != null)
+                                    Icons.Default.Check
+                                else Icons.AutoMirrored.Filled.Send,
+                                contentDescription = if (editingOutboxFilename != null) "Save" else "Send"
+                            )
                         }
                     }
                 }
@@ -445,6 +494,43 @@ fun InboxScreen(
             } // end if (!isKeyboardOpen)
         }
     ) { padding ->
+        // #321: discard-changes confirmation.  Triggered by either the
+        // device back gesture (BackHandler) or tapping the underlined
+        // mailbox-name title (#359) while in edit mode with unsaved
+        // edits.  Save → re-fires the Send/Save action; Discard →
+        // clears edit state and leaves to the previous panel.
+        androidx.activity.compose.BackHandler(
+            enabled = editingOutboxFilename != null && editingDirty
+        ) {
+            editingDiscardConfirm = true
+        }
+        if (editingDiscardConfirm) {
+            AlertDialog(
+                onDismissRequest = { editingDiscardConfirm = false },
+                title = { Text("Save changes?") },
+                text = {
+                    Text("You've edited \"${editingOutboxFilename}\". " +
+                        "Discard your changes, or go back and save?")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        editingDiscardConfirm = false
+                        editingOutboxFilename = null
+                        editingAttachLines = emptyList()
+                        draftRecipients = listOf("")
+                        draftAttachments.clear()
+                        draftSubject = ""
+                        draftBody = ""
+                        currentPanel = Panel.OUTBOX
+                    }) { Text("Discard") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { editingDiscardConfirm = false }) {
+                        Text("Keep editing")
+                    }
+                }
+            )
+        }
         // #315: duplicate-subject dialog.  Shown when Send would produce
         // a filename that collides with an existing outbox file.  Draft
         // state is preserved; user picks Cancel (tweak the subject) or
@@ -1481,10 +1567,43 @@ private fun ComposePanel(
             thickness = 1.5.dp,
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 
-        // Body
+        // Body — #316: cursor-aware scroll.  The body is wrapped with a
+        // BringIntoViewRequester whose .bringIntoView() fires whenever
+        // the cursor (selection end) moves.  The compose runtime + IME
+        // insets together scroll the parent so the cursor's line stays
+        // visible above the keyboard.
+        //
+        // Scope note: the original spec asked for a fancier "three-line
+        // zone, per-character incremental scroll, manual-scroll reset"
+        // model.  That needs hands-on tuning against a real device and
+        // keyboard, so the per-character polish is deferred.  Today's
+        // behavior covers the user-visible failure mode (cursor going
+        // behind the keyboard) cleanly.
+        var bodyValue by remember(body) {
+            mutableStateOf(TextFieldValue(body))
+        }
+        // Keep external `body` and internal TextFieldValue in sync when
+        // the parent updates body (e.g. forward/reply prefill).
+        LaunchedEffect(body) {
+            if (body != bodyValue.text) {
+                bodyValue = TextFieldValue(body, selection = TextRange(body.length))
+            }
+        }
+        val cursorRequester = remember { BringIntoViewRequester() }
+        LaunchedEffect(bodyValue.selection.end) {
+            try { cursorRequester.bringIntoView() } catch (_: Exception) { /* no-op */ }
+        }
         BasicTextField(
-            value = body, onValueChange = onBodyChange,
-            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 300.dp).padding(16.dp)
+            value = bodyValue,
+            onValueChange = {
+                bodyValue = it
+                if (it.text != body) onBodyChange(it.text)
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 300.dp)
+                .padding(16.dp)
+                .bringIntoViewRequester(cursorRequester)
                 .onFocusChanged { focus ->
                     if (focus.isFocused) coroutineScope.launch { scrollState.animateScrollTo(bodyYOffset) }
                 },
@@ -1493,7 +1612,7 @@ private fun ComposePanel(
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             decorationBox = { innerTextField ->
                 Box {
-                    if (body.isEmpty()) Text("Message", style = TextStyle(
+                    if (bodyValue.text.isEmpty()) Text("Message", style = TextStyle(
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                         fontFamily = FontFamily.Monospace, fontSize = 14.sp))
                     innerTextField()

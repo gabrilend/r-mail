@@ -33,6 +33,12 @@ enum class SyncStatus { IDLE, SYNCING, ERROR }
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val globalSettings = Settings(application)
+
+    // #318: exposes readerColumns as observable Compose state so the
+    // Read screen recomposes when the user taps the +/- buttons.
+    private val _readerColumns = MutableStateFlow(globalSettings.readerColumns)
+    val readerColumns: StateFlow<Int> = _readerColumns
+    fun bumpReaderColumns() { _readerColumns.value = globalSettings.readerColumns }
     val registry = MailboxRegistry(application)
 
     // ── Mailbox list ────────────────────────────────────────────────────────
@@ -79,7 +85,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     data class PendingDraft(
         val recipients: List<String>,
         val subject: String,
-        val body: String
+        val body: String,
+        // #321: when non-null, the composer is in *edit* mode for this
+        // outbox filename — Send becomes Save, the back gesture asks
+        // for confirmation, and on save we overwrite this file rather
+        // than generating a fresh name.
+        val editingOutboxFilename: String? = null,
+        // #321: existing `attach: ...` lines from the outbox file
+        // being edited, preserved verbatim through the save round-trip.
+        val attachLines: List<String> = emptyList()
     )
     private val _pendingDraft = MutableStateFlow<PendingDraft?>(null)
     val pendingDraft: StateFlow<PendingDraft?> = _pendingDraft

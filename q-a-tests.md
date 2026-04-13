@@ -243,7 +243,13 @@ jump around.
 - [ ] Cannot save outbox file whose converted filename matches existing outbox file
 
 ### Cursor-aware scrolling (#316)
-- [ ] Cursor off-screen → view scrolls so cursor is 3 lines above keyboard
+**Shipped (base layer):**
+- [ ] Typing in the compose body keeps the cursor visible above the keyboard (no more typing into nothing)
+- [ ] Tapping inside the body to reposition the cursor scrolls the view to bring that cursor location into view
+- [ ] Forward / Reply prefilled bodies still place the cursor sensibly (end of text)
+
+**Deferred (need on-device tuning):**
+- [ ] Cursor lands exactly 3 lines above the keyboard (not just "visible")
 - [ ] Continued typing doesn't scroll until cursor reaches last visible line
 - [ ] At last visible line, scrolls proportionally so line becomes third-from-bottom
 - [ ] Deleting from third line reverses scroll in same increments
@@ -264,23 +270,29 @@ jump around.
 ## 9. Android — reading and editing outbox messages
 
 ### Outbox edit redesign (#321)
-- [ ] Tapping outbox message opens for reading
-- [ ] Tapping cursor position switches to compose with to/attachments/subject filled in
-- [ ] "Send" becomes "Save" in edit mode
-- [ ] Back button asks "save changes?" — "no" discards
-- [ ] Removing `to:` line marks recipient for deletion on their side
-- [ ] Adding `to:` line sends as new to new recipient, update to existing
+**Shipped:**
+- [ ] Tapping an outbox message opens it for reading (unchanged)
+- [ ] An Edit (pencil) icon in the top-bar opens the composer with `to:` lines, body, and existing `attach:` lines preserved
+- [ ] In edit mode, the top-right action shows a checkmark (Save), not the send arrow
+- [ ] Saving overwrites the existing outbox file (no new filename, no duplicate-subject prompt)
+- [ ] No green sending-progress animation appears for an edit (the daemon's update path handles delivery)
+- [ ] Android back gesture while dirty → "Save changes?" dialog (Discard / Keep editing)
+- [ ] Tapping the underlined mailbox-name title while dirty → same dialog
+- [ ] Daemon already handles to:-line additions/removals via living-messages diff; no Android work needed
 
-### Update button (#321)
-- [ ] Update button shows only zipping/transfer progress
-- [ ] Button hidden when nothing is in progress
+**Deferred:**
+- [ ] Tap-anywhere-on-body to start editing at that cursor position (today: explicit Edit button)
+- [ ] Visible attach-line management in edit mode (today: invisible-but-preserved)
+- [ ] Update progress indicator at the position of the old Update button
 
 ## 10. Android — reading inbox messages
 
 ### 80-character monospace scaling (#318)
-- [ ] Inbox message view uses monospace font scaled to 80 characters wide
-- [ ] +/- control adjusts width in increments of 20 (60, 80, 100, 120)
-- [ ] Width preference persists across sessions
+- [ ] Inbox message view uses monospace font scaled so 80 chars exactly fill the screen width (default)
+- [ ] `+` button in the top bar widens by 20 cols (80 → 100 → 120…); shrinks the rendered text
+- [ ] `–` button narrows by 20 cols (80 → 60 → 40…); enlarges the rendered text
+- [ ] Width preference persists across app restarts
+- [ ] +/- buttons hidden on outbox messages and consent files (only shown on regular inbox messages)
 
 ### Delete mailbox (#357)
 - [ ] Settings panel shows a "Danger zone" section with a red "Delete mailbox" button
