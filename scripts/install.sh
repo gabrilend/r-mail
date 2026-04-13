@@ -124,10 +124,24 @@ info()  { printf "  %s\n" "$*"; }
 warn()  { printf "  \033[33m%s\033[0m\n" "$*"; }
 ok()    { printf "  \033[32m%s\033[0m\n" "$*"; }
 
+# Read a line with readline editing (arrow keys, backspace, history) when
+# the interpreter supports it.  Bash sets BASH_VERSION even when invoked as
+# /bin/sh, which makes this a reliable runtime check; dash and other POSIX
+# shells leave it unset and we fall back to plain read.
+_prompt_read() {
+    # _prompt_read VARNAME < tty
+    if [ -n "${BASH_VERSION:-}" ]; then
+        # shellcheck disable=SC3045  # read -e is bash-only, guarded above
+        read -e -r "$1"
+    else
+        read -r "$1"
+    fi
+}
+
 ask_yn() {
     # ask_yn "prompt" — returns 0 for yes, 1 for no
     printf "  %s [y/N] " "$1"
-    read -r ans
+    _prompt_read ans
     case "$ans" in
         [Yy]*) return 0 ;;
         *) return 1 ;;
@@ -139,7 +153,7 @@ ask_value() {
     # If user presses enter without input, returns the default.
     # Prompt goes to /dev/tty so it is visible even when stdout is captured via $(...).
     printf "  %s [%s]: " "$1" "$2" >/dev/tty
-    read -r _val </dev/tty
+    _prompt_read _val </dev/tty
     if [ -z "$_val" ]; then
         echo "$2"
     else
@@ -388,6 +402,29 @@ else
 fi
 echo ""
 
+# Firewall primer — shown once after port info so users unfamiliar with
+# firewall config know what to expect and how to inspect their system.
+cat <<FIREWALL
+  About firewalls:
+    A "port" is a numbered channel on your machine.  Each running network
+    service claims one.  rmail needs port $RMAIL_PORT open so contacts can
+    reach your daemon.  Without opening it, outbound sends still work but
+    no one can deliver messages to you.
+
+    To check what's currently listening or blocked, try one of:
+      ss -tlnp                    # what's listening (most Linuxes)
+      sudo iptables -L            # classic firewall rules
+      sudo nft list ruleset       # modern nftables
+      ufw status                  # Ubuntu / simple firewall
+      firewall-cmd --list-all     # Fedora / firewalld
+      pfctl -s rules              # macOS / BSD
+
+    Whichever tool your system uses, you're looking for an "allow" rule
+    on TCP port $RMAIL_PORT — from anywhere (0.0.0.0/0 or ::/0) if you want
+    contacts on the public internet to reach you.
+
+FIREWALL
+
 # Contacts file
 CONTACTS_FILE="$MAIL_DIR/contacts"
 if [ ! -f "$CONTACTS_FILE" ]; then
@@ -527,7 +564,7 @@ if [ -d "$DEPS/lua" ] && [ -f "$DEPS/lua/include/lua.h" ] && ! $FORCE; then
     ok "found locally compiled: deps/lua/ ($local_ver)"
 elif find_lua_system; then
     ok "found system: $LUA_VER_STR"
-    if ask_yn "Compile a local version instead? (recommended for reproducibility)"; then
+    if ask_yn "Compile a local version instead?"; then
         compile_lua
     fi
 else
@@ -642,7 +679,7 @@ if [ -d "$DEPS/openssl" ] && [ -f "$DEPS/openssl/include/openssl/ssl.h" ] && ! $
     ok "found locally compiled: deps/openssl/"
 elif find_openssl_system; then
     ok "found system-wide (headers: ${OPENSSL_INC:-default paths})"
-    if ask_yn "Compile a local version instead? (recommended for reproducibility)"; then
+    if ask_yn "Compile a local version instead?"; then
         compile_openssl
     fi
 else
@@ -937,7 +974,7 @@ elif [ -x "$BIN/zip" ] && [ -x "$BIN/unzip" ]; then
     ok "found locally compiled: deps/bin/zip, deps/bin/unzip"
 else
     ok "found system: zip/unzip"
-    if ask_yn "Compile local versions instead? (recommended for reproducibility)"; then
+    if ask_yn "Compile local versions instead?"; then
         _compile_zip && _compile_unzip
     fi
 fi
@@ -1084,7 +1121,7 @@ in {
       Type = "simple";
       User = "$(whoami)";
       Group = "users";
-      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $MAIL_DIR";
+      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $CONFIG_FILE";
       Restart = "on-failure";
       RestartSec = 5;
       StandardOutput = "append:/tmp/rmail.log";
@@ -1112,7 +1149,7 @@ in {
       Type = "simple";
       User = "$(whoami)";
       Group = "users";
-      ExecStart = "$LUA_BIN $ROOT/rmail.lua $MAIL_DIR";
+      ExecStart = "$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE";
       Restart = "on-failure";
       RestartSec = 5;
       StandardOutput = "append:/tmp/rmail.log";
@@ -1145,7 +1182,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
+ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/tmp/rmail.log
@@ -1174,7 +1211,7 @@ After=network.target
 [Service]
 Type=simple
 User=$(whoami)
-ExecStart=$LUA_BIN $ROOT/rmail.lua $MAIL_DIR
+ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/tmp/rmail.log
@@ -1202,7 +1239,7 @@ SERVICE
 # rmail runit service - redirects logs to RAM-backed /tmp
 # Logs don't persist across reboots and don't cause disk wear.
 export HOME=$HOME
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $MAIL_DIR >>/tmp/rmail.log 2>&1
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $CONFIG_FILE >>/tmp/rmail.log 2>&1
 SERVICE
             chmod +x "$SERVICE_FILE"
             ok "generated $SERVICE_FILE"
@@ -1223,7 +1260,7 @@ SERVICE
 
 description="rmail messaging daemon"
 command="$LUA_BIN"
-command_args="$ROOT/rmail.lua $MAIL_DIR"
+command_args="$ROOT/rmail.lua $CONFIG_FILE"
 command_user="$(whoami)"
 command_background=true
 pidfile="/run/rmail.pid"

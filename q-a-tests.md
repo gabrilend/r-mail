@@ -237,8 +237,15 @@ jump around.
 - [ ] Mail-directory option is present and correct in the generated config (#343)
 - [ ] Re-running install with existing config: `mail` value appears as the `[bracket]` default (#343)
 - [ ] `set_config_value` appends a missing key and replaces a present one without touching other lines (#343)
+- [ ] `set_config_value` preserves comments and commented-out `# key = …` lines (#343)
 - [ ] Paths containing `|`, `\`, or `&` round-trip through both the config update and the docs-template expansion without mangling (#344)
 - [ ] Config filename is `~/.config/rmail/config-<slug>` where slug is the mail path with `/` → `-` (intentional, not a bug) (#344)
+
+### Service files point at the config, not the mailbox
+- [ ] Generated systemd/runit/openrc/NixOS service files pass the config path (not the mail dir) to rmail.lua
+- [ ] `rmail.lua <config-file>` starts the daemon using `mail = …` from the config
+- [ ] `rmail.lua <mail-dir>` still works (backwards compat for existing service files)
+- [ ] Error surfaced when config path is passed but the config has no `mail` line
 
 ### Dependencies
 - [ ] Installer prompts before installing project-local luasocket (#342)

@@ -5,49 +5,33 @@
 -- Configuration
 -- ============================================================
 
--- Resolve the mail directory from the command-line argument.
--- Usage: lua rmail.lua /path/to/mailbox
-local MAIL_ARG = arg and arg[1]
-if not MAIL_ARG or MAIL_ARG == "" then
-    io.stderr:write("usage: rmail.lua <mailbox-directory>\n")
+-- Resolve the mailbox directory and config file from the single command-line
+-- argument.  arg[1] can be either:
+--   • a directory        — the mailbox; config is found via a symlink inside
+--                          it or a ~/.config/rmail/config-<slug> file
+--   • a config file path — config loaded directly; mail = ... inside the
+--                          config specifies the mailbox
+-- The file form is preferred (the config is the source of truth) but the
+-- directory form remains so old service files keep working.
+local ARG = arg and arg[1]
+if not ARG or ARG == "" then
+    io.stderr:write("usage: rmail.lua <mailbox-directory | config-file>\n")
     io.stderr:write("  e.g. lua rmail.lua ~/mail\n")
+    io.stderr:write("       lua rmail.lua ~/.config/rmail/config-home-you-mail\n")
     os.exit(1)
 end
--- expand ~ to HOME
-MAIL_ARG = MAIL_ARG:gsub("^~", os.getenv("HOME") or "/tmp")
--- strip trailing slashes
-MAIL_ARG = MAIL_ARG:gsub("/+$", "")
+ARG = ARG:gsub("^~", os.getenv("HOME") or "/tmp")
+ARG = ARG:gsub("/+$", "")
 
--- Find config file:
--- 1. Symlink at <mailbox>/config (preferred — survives renames)
--- 2. Derived path: ~/.config/rmail/config-<path-with-dashes>
--- 3. Error out
-local function find_config_path(mail_dir)
-    -- try symlink/file in the mailbox directory
-    local symlink_path = mail_dir .. "/config"
-    local f = io.open(symlink_path, "r")
-    if f then f:close(); return symlink_path end
-    -- derive from mail directory path: /home/ritz/mail -> config-home-ritz-mail
-    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
-    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
-    f = io.open(derived, "r")
-    if f then f:close(); return derived end
-    return nil
+local function is_dir(path)
+    local f = io.open(path .. "/.", "r")
+    if f then f:close(); return true end
+    return false
 end
 
-local CONFIG_PATH = find_config_path(MAIL_ARG)
-if not CONFIG_PATH then
-    io.stderr:write("error: no config file found\n")
-    io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
-    local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
-    io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
-    io.stderr:write("  run scripts/install.sh to create one\n")
-    os.exit(1)
-end
-
-local function load_config()
-    local f = io.open(CONFIG_PATH, "r")
-    if not f then return {} end
+local function parse_config_file(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
     local cfg = {}
     for line in f:lines() do
         line = line:match("^%s*(.-)%s*$")
@@ -65,6 +49,49 @@ local function load_config()
     f:close()
     return cfg
 end
+
+local function find_config_path(mail_dir)
+    -- 1. Symlink/file at <mailbox>/config (survives renames)
+    local symlink_path = mail_dir .. "/config"
+    local f = io.open(symlink_path, "r")
+    if f then f:close(); return symlink_path end
+    -- 2. Derived path: ~/.config/rmail/config-<mail-dir-with-slashes-as-dashes>
+    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
+    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
+    f = io.open(derived, "r")
+    if f then f:close(); return derived end
+    return nil
+end
+
+local CONFIG_PATH, MAIL_ARG
+if is_dir(ARG) then
+    MAIL_ARG = ARG
+    CONFIG_PATH = find_config_path(MAIL_ARG)
+    if not CONFIG_PATH then
+        io.stderr:write("error: no config file found\n")
+        io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
+        local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
+        io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
+        io.stderr:write("  run scripts/install.sh to create one\n")
+        os.exit(1)
+    end
+else
+    -- Treat the argument as a config file path directly
+    CONFIG_PATH = ARG
+    local probe = parse_config_file(CONFIG_PATH)
+    if not probe then
+        io.stderr:write("error: cannot open config file: " .. CONFIG_PATH .. "\n")
+        os.exit(1)
+    end
+    if not probe.mail or probe.mail == "" then
+        io.stderr:write("error: config " .. CONFIG_PATH .. " has no `mail = ...` line\n")
+        io.stderr:write("  add the mailbox path, or launch with the mailbox dir as the argument\n")
+        os.exit(1)
+    end
+    MAIL_ARG = probe.mail:gsub("^~", os.getenv("HOME") or "/tmp"):gsub("/+$", "")
+end
+
+local function load_config() return parse_config_file(CONFIG_PATH) or {} end
 
 local config = load_config()
 
