@@ -331,6 +331,58 @@ local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+-- ---- Progress-file helpers (#328) ---------------------------------------
+--
+-- Some files get rewritten per-chunk during attachment transfer — the
+-- receiver's consent/progress file and the sender's `transfers` file.
+-- That's a lot of writes to persistent storage for content that's pure
+-- status and loses its meaning on reboot anyway.  The fix is to keep a
+-- persistent *symlink* on the mailbox path and point it at a tmpfs
+-- target that absorbs the churn.
+--
+-- The symlink is the user-facing contract (deleting it cancels the
+-- transfer; editing the file to contain "deny" also cancels).  The
+-- target goes away on reboot; that's fine — we recreate it lazily on
+-- the next write.  Distinguishing "user deleted the file" from "tmpfs
+-- was wiped" matters for correctness, so code paths that interpret
+-- file absence use path_state() instead of plain file_exists().
+
+local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
+
+-- Return "live" (regular file or symlink with a live target), "dangling"
+-- (symlink whose target is gone — typically after a reboot wiped /tmp),
+-- or "absent" (nothing at this path).  `test -e` follows symlinks so it
+-- distinguishes live from dangling without any lfs dependency.
+local function path_state(path)
+    local h = io.popen(string.format(
+        "if [ -e %s ]; then echo live; " ..
+        "elif [ -L %s ]; then echo dangling; " ..
+        "else echo absent; fi",
+        shell_quote(path), shell_quote(path)))
+    if not h then return "absent" end
+    local out = h:read("*l") or "absent"
+    h:close()
+    return out
+end
+
+local function progress_tmpfs_path(name)
+    return TMPFS_PROGRESS_DIR .. "/" .. name
+end
+
+-- Write ephemeral status content to a symlink-backed tmpfs path.
+-- Ensures /tmp/rmail-progress/ exists, writes the content to the tmpfs
+-- target, and makes sure link_path is a symlink pointing there.  ln -sf
+-- replaces an existing regular file or stale symlink in place, so this
+-- call is safe whether link_path was previously a persistent file (the
+-- initial consent prompt), a live symlink (mid-transfer), or a dangling
+-- symlink (after a reboot wiped /tmp).
+local function write_progress_file(link_path, tmpfs_name, content)
+    local target = progress_tmpfs_path(tmpfs_name)
+    os.execute("mkdir -p " .. shell_quote(TMPFS_PROGRESS_DIR))
+    write_file(target, content)
+    os.execute("ln -sf " .. shell_quote(target) .. " " .. shell_quote(link_path))
+end
+
 -- {{{ expand_tilde
 -- Expand ~ at the start of a path to the user's home directory.
 -- ~/foo becomes /home/user/foo. Paths not starting with ~ are unchanged.
@@ -2144,12 +2196,21 @@ local function handle_attachment_request(data, sender)
     return 200, {ok = true}
 end
 
--- True if the inbox consent/progress file is missing, or any line in it
--- reads exactly "deny". Lets the user bail on an in-progress transfer by
--- writing "deny" as well as by deleting the file.
+-- True if the user cancelled the transfer — either by deleting the
+-- inbox consent/progress file, or by editing it to contain a line
+-- that reads exactly "deny".
+--
+-- Since #328 the progress file can be a symlink into tmpfs.  A reboot
+-- wipes tmpfs and the symlink ends up dangling, but the user didn't
+-- actually cancel — treat that state as "not cancelled" so the next
+-- chunk arrival recreates the target and the transfer resumes.
 local function consent_cancelled(inbox_file)
-    local content = read_file(INBOX .. "/" .. inbox_file)
-    if not content then return true end
+    local path = INBOX .. "/" .. inbox_file
+    local state = path_state(path)
+    if state == "absent" then return true end
+    if state == "dangling" then return false end
+    local content = read_file(path)
+    if not content then return true end  -- defence-in-depth
     for line in (content .. "\n"):gmatch("([^\n]*)\n") do
         if line:match("^%s*(.-)%s*$") == "deny" then return true end
     end
@@ -2238,7 +2299,12 @@ local function send_consent_responses(my_name)
             local entry = pending[resp.attachment_id]
             if entry then
                 if resp.consent then
-                    write_file(INBOX .. "/" .. entry.inbox_file,
+                    -- Progress file goes onto tmpfs from now on (#328).
+                    -- The consent prompt was a regular file; from this
+                    -- write forward it's a symlink into /tmp.
+                    write_progress_file(
+                        INBOX .. "/" .. entry.inbox_file,
+                        "consent-" .. resp.attachment_id,
                         "Sending: " .. entry["from"] .. "'s attachment " .. entry.filename ..
                         " is being transferred.")
                     entry.status = "receiving"
@@ -2424,10 +2490,13 @@ local function handle_attachment_chunk(data, sender)
                     "\nAverage: %.1f seconds per chunk.", elapsed / received)
             end
         end
-        write_file(INBOX .. "/" .. cpe.inbox_file, string.format(
-            "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nTo cancel: delete this file, or add a line that reads: deny",
-            filename, sender, received, total_chunks,
-            math.floor(received / total_chunks * 100), avg_str))
+        write_progress_file(
+            INBOX .. "/" .. cpe.inbox_file,
+            "consent-" .. att_id,
+            string.format(
+                "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nTo cancel: delete this file, or add a line that reads: deny",
+                filename, sender, received, total_chunks,
+                math.floor(received / total_chunks * 100), avg_str))
     end
 
     if #missing > 0 then
@@ -2561,8 +2630,18 @@ local function write_transfers_file(att_state)
         end
     end
 
+    -- Per-mailbox tmpfs name — stable across restarts, unique across
+    -- multiple rmail instances running on the same host.
+    local mail_slug = MAIL:gsub("^/", ""):gsub("/", "-")
+    local tmpfs_name = "transfers-" .. mail_slug
+
     if #path_order == 0 then
-        if file_exists(paths.transfers) then os.remove(paths.transfers) end
+        -- Remove both the persistent symlink and the tmpfs target.  Either
+        -- may already be gone (dangling symlink after reboot, or fresh
+        -- start with no transfers yet) — os.remove is idempotent-ish and
+        -- we don't care if it fails.
+        os.remove(paths.transfers)
+        os.remove(progress_tmpfs_path(tmpfs_name))
         return
     end
 
@@ -2583,7 +2662,7 @@ local function write_transfers_file(att_state)
         end
     end
     lines[#lines + 1] = sep
-    write_file(paths.transfers, table.concat(lines, "\n") .. "\n")
+    write_progress_file(paths.transfers, tmpfs_name, table.concat(lines, "\n") .. "\n")
 end
 
 -- Check ~/mail/transfers for user-initiated cancellations.
