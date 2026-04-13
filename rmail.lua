@@ -117,14 +117,24 @@ local cfg = {
     auto_port_forward = config.auto_port_forward == true,
 }
 
--- Hook scripts
+-- Hook scripts.  The config parser doesn't strip quotes, so a user who
+-- disabled a hook with `on_receive = ""` would end up with a two-char
+-- string that's still truthy; normalise empty-looking values to nil so
+-- `if hooks.on_receive then` correctly skips disabled hooks instead of
+-- running the quotes as a shell command.
+local function _hook_or_nil(v)
+    if v == nil or v == false then return nil end
+    if v == "" or v == '""' or v == "''" then return nil end
+    return v
+end
+
 local hooks = {
-    on_receive_raw = config.on_receive_raw,
-    on_receive     = config.on_receive,
-    on_package     = config.on_package,
-    on_send        = config.on_send,
-    on_delete      = config.on_delete,
-    on_update      = config.on_update,
+    on_receive_raw = _hook_or_nil(config.on_receive_raw),
+    on_receive     = _hook_or_nil(config.on_receive),
+    on_package     = _hook_or_nil(config.on_package),
+    on_send        = _hook_or_nil(config.on_send),
+    on_delete      = _hook_or_nil(config.on_delete),
+    on_update      = _hook_or_nil(config.on_update),
 }
 
 -- Aliases for frequently-used paths (reduces table lookups in hot paths)

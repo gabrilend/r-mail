@@ -600,30 +600,23 @@ notify_ip_change = true
 # auto_port_forward = false
 
 # ---- hooks ----
-# hooks let you run scripts in response to message events.
+# Hooks run a script in response to message events.  Each one points at
+# a default orchestrator in scripts/hooks/ that passes data through
+# unchanged (no-op).  Edit the script — or replace the path with any
+# executable of your own — to customise behaviour.
+#
+# Argument reference and worked examples:
+#   $ROOT/docs/scripting-tutorial.md
+#
+# To disable a hook entirely, set its value to the empty string:
+#   on_receive = ""
 
-# on_receive_raw: runs before a received message is written to inbox/.
-# \$1 is the raw message body. stdout REPLACES the body that gets saved.
-# use for content filtering or transformation.
-# on_receive_raw = /path/to/script.sh
-
-# on_receive: runs after a message is written to inbox/.
-# \$1 is the path to the saved inbox file.
-# on_receive = /path/to/script.sh
-
-# on_package: runs after an attachment is saved.
-# \$1 is the path to the saved attachment.
-# on_package = /path/to/script.sh
-
-# on_send: runs once per recipient before a message is sent.
-# \$1 is the message body, \$2 is the recipient name.
-# stdout REPLACES the body sent to that recipient.
-# use for per-recipient transformation.
-# on_send = /path/to/script.sh
-
-# on_delete: runs when a message is deleted. \$1 is the name of the other
-# party (sender if inbox, recipient if outbox).
-# on_delete = /path/to/script.sh
+on_receive_raw = $ROOT/scripts/hooks/on_receive_raw.sh
+on_receive     = $ROOT/scripts/hooks/on_receive.sh
+on_package     = $ROOT/scripts/hooks/on_package.sh
+on_send        = $ROOT/scripts/hooks/on_send.sh
+on_delete      = $ROOT/scripts/hooks/on_delete.sh
+on_update      = $ROOT/scripts/hooks/on_update.sh
 CONFIG
     ok "created config: $CONFIG_FILE"
 else
