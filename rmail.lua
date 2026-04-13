@@ -2653,9 +2653,20 @@ local function send_next_chunks(my_name)
         end
         ::continue::
     end
-    -- clean up completed transfers and release shared zips
+    -- clean up completed transfers and release shared zips.  This is
+    -- the typical completion path (status flips to "complete" above and
+    -- we clear the entry in the same call); the secondary cleanup in
+    -- sync_outbox exists only as a belt-and-braces for entries that
+    -- somehow persist across cycles.
     for att_id, transfer in pairs(chunks) do
         if transfer.status == "complete" then
+            -- #349: auto-body transfers put their source under pending/;
+            -- delete it now that the last chunk has been acked.  No
+            -- outbox attach: line to strip (there never was one).
+            if transfer.auto_body and transfer.original_path
+               and file_exists(transfer.original_path) then
+                os.remove(transfer.original_path)
+            end
             chunks[att_id] = nil
             release_zip(chunks, transfer.zip_id, transfer.compressed_path)
             changed = true
