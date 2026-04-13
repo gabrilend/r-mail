@@ -1336,9 +1336,38 @@ local function handle_deliver_message(data, sender)
     if file_exists(target) then
         local existing = inbox_state[filename]
         if existing and existing["from"] ~= sender then
+            -- Different sender with the same subject: disambiguate by
+            -- tagging the filename with the sender.
             filename = sanitize_filename(subject .. "-from-" .. sender)
             target = INBOX .. "/" .. filename
+        elseif existing and existing["from"] == sender and
+               existing.message_id ~= message_id then
+            -- #315: same sender, same sanitised subject, different
+            -- message.  The earlier deliver-attachments-to-existing
+            -- check above fires only when message_ids match, so this
+            -- branch is truly a collision between two separate
+            -- messages.  Disambiguate by appending a short suffix
+            -- derived from the new message_id; the recipient sees
+            -- both messages as distinct files.
+            local suffix = (message_id or ""):gsub("[^%w]", ""):sub(1, 6)
+            if suffix == "" then suffix = "2" end
+            filename = sanitize_filename(subject .. "-" .. suffix)
+            target = INBOX .. "/" .. filename
+            -- Loop guard: if this filename is *also* taken somehow
+            -- (extremely unlikely — 6 hex chars of message_id), keep
+            -- appending numeric suffixes until we find a free slot.
+            local n = 2
+            while file_exists(target) do
+                filename = sanitize_filename(subject .. "-" .. suffix .. "-" .. n)
+                target = INBOX .. "/" .. filename
+                n = n + 1
+                if n > 99 then break end
+            end
         end
+        -- The remaining case (existing AND same sender AND same
+        -- message_id) is already handled by the early return above
+        -- — that's the "more attachments being delivered for the same
+        -- message" path.  We shouldn't reach here for that case.
     end
 
     if hooks.on_receive_raw then
@@ -1412,12 +1441,21 @@ end
 -- message deletion.
 
 -- delete a zip if no other active transfer still references it
-local function release_zip(chunks, zip_id, compressed_path)
+-- Zip files for outbound attachments always live at
+-- paths.pending .. "/rmail-<zip_id>.zip" (see compress_attachment).  Pre-#348
+-- the path was also cached in chunks-outgoing.json as transfer.compressed_path;
+-- dropped there to reduce state-file PII.  Compute it on the fly instead.
+local function zip_path_for(zip_id)
+    return paths.pending .. "/rmail-" .. zip_id .. ".zip"
+end
+
+local function release_zip(chunks, zip_id)
     for _, t in pairs(chunks) do
         if t.zip_id == zip_id then return end  -- still in use
     end
-    if compressed_path and file_exists(compressed_path) then
-        os.remove(compressed_path)
+    local zip_path = zip_path_for(zip_id)
+    if file_exists(zip_path) then
+        os.remove(zip_path)
         log("deleted shared zip %s (no more recipients)", zip_id)
     end
 end
@@ -1571,7 +1609,7 @@ local function handle_delete(data, sender)
                     for att_id, transfer in pairs(att_state) do
                         if transfer.to == sender and transfer.message_id == message_id then
                             att_state[att_id] = nil
-                            release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                            release_zip(att_state, transfer.zip_id)
                             att_changed = true
                             log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
                         end
@@ -2668,8 +2706,8 @@ local function handle_attachment_response(data, sender)
         transfer.missing = m
         log("consent granted by %s for %s", sender, transfer.filename)
     else
-        if transfer.compressed_path and file_exists(transfer.compressed_path) then
-            os.remove(transfer.compressed_path)
+        if transfer.zip_id and file_exists(zip_path_for(transfer.zip_id)) then
+            os.remove(zip_path_for(transfer.zip_id))
         end
         write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
             sender .. " declined your attachment " .. transfer.filename .. ".")
@@ -2782,7 +2820,7 @@ local function check_transfers_file_cancellations()
 
     local changed = false
     for att_id, transfer in pairs(to_cancel) do
-        release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+        release_zip(chunks, transfer.zip_id)
         chunks[att_id] = nil
         log("transfer cancelled via transfers file: %s to %s", transfer.filename, transfer.to)
         changed = true
@@ -2807,13 +2845,14 @@ local function send_next_chunks(my_name)
             log("chunk transfer: unknown contact %s, skipping", transfer.to)
             goto continue
         end
-        if not file_exists(transfer.compressed_path) then
+        local zip_path = zip_path_for(transfer.zip_id)
+        if not file_exists(zip_path) then
             log("chunk transfer: zip missing for %s, cancelling", att_id)
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             changed = true; goto continue
         end
-        local f = io.open(transfer.compressed_path, "rb")
+        local f = io.open(zip_path, "rb")
         if not f then goto continue end
         local missing = transfer.missing or {}
         local aborted = false
@@ -2866,7 +2905,7 @@ local function send_next_chunks(my_name)
         end
         f:close()
         if cancelled then
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             chunks[att_id] = nil
             changed = true
         elseif not aborted and #transfer.missing == 0 then
@@ -2891,7 +2930,7 @@ local function send_next_chunks(my_name)
                 os.remove(transfer.original_path)
             end
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             changed = true
         end
     end
@@ -3153,9 +3192,9 @@ local function sync_outbox(my_name)
                                         if t.outbox_file == name and
                                            t.original_path == filepath and
                                            t.zip_id and
-                                           file_exists(t.compressed_path) then
+                                           file_exists(zip_path_for(t.zip_id)) then
                                             zip_id       = t.zip_id
-                                            zip_path     = t.compressed_path
+                                            zip_path     = zip_path_for(t.zip_id)
                                             checksum     = t.total_checksum
                                             total_chunks = t.total_chunks
                                             break
@@ -3176,7 +3215,8 @@ local function sync_outbox(my_name)
                                             to = rname, outbox_file = name,
                                             original_path = filepath, filename = basename,
                                             zip_id = zip_id,
-                                            compressed_path = zip_path,
+                                            -- compressed_path dropped (#348):
+                                            -- derive via zip_path_for(zip_id).
                                             total_chunks = total_chunks,
                                             total_checksum = checksum,
                                             expected_size = expected_size,
@@ -3335,7 +3375,8 @@ local function sync_outbox(my_name)
                                 to = op.recipient, outbox_file = op.filename,
                                 original_path = tmp_path, filename = body_fn,
                                 zip_id = att_id,
-                                compressed_path = zip_path,
+                                -- compressed_path dropped (#348):
+                                -- derive via zip_path_for(zip_id).
                                 total_chunks = total_chunks,
                                 total_checksum = checksum,
                                 expected_size = body_size,
@@ -3515,7 +3556,7 @@ local function sync_outbox(my_name)
                     local transfer = att_state[op.att_id]
                     if transfer then
                         att_state[op.att_id] = nil
-                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        release_zip(att_state, transfer.zip_id)
                         att_state_changed = true
                     end
                     -- the release-and-cleanup is the action; reachability
@@ -3543,7 +3584,7 @@ local function sync_outbox(my_name)
                 for att_id, transfer in pairs(att_state) do
                     if transfer.outbox_file == name then
                         att_state[att_id] = nil
-                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        release_zip(att_state, transfer.zip_id)
                         att_state_changed = true
                         log("cancelled outgoing chunks for %s (outbox file deleted)", att_id)
                     end

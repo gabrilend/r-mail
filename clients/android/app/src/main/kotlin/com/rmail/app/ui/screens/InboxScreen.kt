@@ -163,6 +163,10 @@ fun InboxScreen(
     // Settings modified tracking
     var settingsModified by remember { mutableStateOf(false) }
 
+    // #315: duplicate-subject warning dialog.  Keeps the draft intact
+    // so the user can tweak the subject and resend.
+    var duplicateSubjectWarning by remember { mutableStateOf<String?>(null) }
+
     // Contact editor state
     var showContactEditor by remember { mutableStateOf(false) }
 
@@ -326,6 +330,19 @@ fun InboxScreen(
                             if (validRecipients.isEmpty()) return@IconButton
                             val filename = if (draftSubject.isNotBlank())
                                 sanitizeFilename(draftSubject) else vm.newOutboxFilename()
+                            // #315: catch the collision on the *converted*
+                            // filename, not the raw subject.  "hello world"
+                            // and "hello-world" both sanitise to
+                            // "hello-world"; neither should silently
+                            // overwrite an existing outbox file of that
+                            // name.  If there's a collision, show a dialog
+                            // and keep the draft intact so the user can
+                            // adjust the subject.
+                            if (draftSubject.isNotBlank() &&
+                                vm.outboxFiles.value.contains(filename)) {
+                                duplicateSubjectWarning = filename
+                                return@IconButton
+                            }
                             val localPaths = draftAttachments.map { it.uri.toString() }
                             val sb = StringBuilder()
                             for (r in validRecipients) sb.appendLine("to: $r")
@@ -428,6 +445,52 @@ fun InboxScreen(
             } // end if (!isKeyboardOpen)
         }
     ) { padding ->
+        // #315: duplicate-subject dialog.  Shown when Send would produce
+        // a filename that collides with an existing outbox file.  Draft
+        // state is preserved; user picks Cancel (tweak the subject) or
+        // Replace (overwrite the existing file deliberately).
+        duplicateSubjectWarning?.let { collidingFilename ->
+            AlertDialog(
+                onDismissRequest = { duplicateSubjectWarning = null },
+                title = { Text("Subject already in outbox") },
+                text = {
+                    Text("Your outbox already has a message named " +
+                        "\"$collidingFilename\". Sending with the same " +
+                        "subject would overwrite it. Change the subject " +
+                        "to send a new message, or choose Replace to " +
+                        "overwrite the existing one.")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        // User chose to replace — re-do the Send path
+                        // but skip the collision check this time.
+                        val validRecipients = draftRecipients.filter { it.isNotBlank() }
+                        val localPaths = draftAttachments.map { it.uri.toString() }
+                        val sb = StringBuilder()
+                        for (r in validRecipients) sb.appendLine("to: $r")
+                        for (p in localPaths) sb.appendLine("attach: $p")
+                        sb.appendLine()
+                        sb.append(draftBody)
+                        vm.saveOutboxFile(collidingFilename, sb.toString())
+                        vm.uploadAttachmentsInBackground(
+                            collidingFilename, draftAttachments.map { it.uri })
+                        vm.markSendingStart(collidingFilename)
+                        draftRecipients = listOf("")
+                        draftAttachments.clear()
+                        draftSubject = ""
+                        draftBody = ""
+                        currentPanel = Panel.OUTBOX
+                        vm.triggerSync()
+                        duplicateSubjectWarning = null
+                    }) { Text("Replace") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { duplicateSubjectWarning = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
         Column(modifier = Modifier.padding(padding)) {
             if (syncError != null) {
                 Surface(

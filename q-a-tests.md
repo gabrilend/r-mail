@@ -47,8 +47,13 @@ jump around.
 - [ ] Sync cycle's own outbox modifications don't cause a feedback loop (drain works)
 
 ### Duplicate filename prevention (#315)
-- [ ] Daemon rejects delivery if converted filename matches existing inbox file at destination
+- [ ] Daemon: same sender sends two messages with the same converted subject → each lands in inbox as a distinct file (second gets a `-<short-id>` suffix)
+- [ ] Daemon: different senders with the same subject → older `-from-<sender>` disambiguation still applies
+- [ ] Daemon: re-delivery of the *same* message_id (e.g. attachment-followup path) still merges into the existing inbox entry, no suffix added
 - [ ] Duplicate check uses converted filename (after spaces-to-dashes), not raw subject
+- [ ] Android: sending "hello world" when outbox has "hello-world" triggers the "Subject already in outbox" dialog
+- [ ] Dialog's Cancel preserves the draft intact
+- [ ] Dialog's Replace overwrites the existing outbox file deliberately
 
 ### Living messages — edits propagate (#306)
 - [ ] Edit outbox file body → all recipients receive updated content
