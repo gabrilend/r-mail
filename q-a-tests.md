@@ -107,6 +107,7 @@ jump around.
 - [ ] Delete an inbox file and create a directory with the same name before next sync: sync_inbox still notifies the sender of the deletion
 - [ ] Consent/progress file overlaid by a same-named directory: handler treats the transfer as cancelled (expected)
 - [ ] Android attachments API doesn't surface subdirs as attachments
+- [ ] Directory in a watched dir logs a one-line warning the first time it's encountered; subsequent cycles stay silent until daemon restart
 
 ### Progress files in RAM (#328)
 - [ ] Receiver's progress file stored in tmpfs with symlink from inbox

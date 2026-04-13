@@ -258,6 +258,13 @@ local function start_file_watcher(path)
     return fd, inotify_wrap(fd)
 end
 
+-- Per-session cache of directories we've already warned about,
+-- keyed by absolute "<parent-dir>/<subdir>" so the same stray dir
+-- doesn't log once per sync cycle.  Cleared on daemon restart,
+-- which is exactly often enough for a warning — if the dir is
+-- still there the user will see the warning again next startup.
+local _listed_dir_warned = {}
+
 local function list_files(dir)
     -- `ls -1p` appends a trailing `/` to directory entries (POSIX).
     -- Skip those + dotfiles so every returned name is a regular file
@@ -266,12 +273,29 @@ local function list_files(dir)
     -- would make consent_cancelled() see a failed read and cancel the
     -- transfer (#356), and a dir whose name matched an in-flight
     -- message would block the delete-notify path in sync_inbox.
+    --
+    -- Directories found in a watched location are skipped *and*
+    -- logged once per session — the user's intent is unknowable
+    -- (we can't autoroute a directory of unknown recipients as a
+    -- message), but silently ignoring them would leave the user
+    -- wondering why nothing happens.  A log line gives them a
+    -- breadcrumb.
     local files = {}
     local handle = io.popen('ls -1p "' .. dir .. '" 2>/dev/null')
     if handle then
         for name in handle:lines() do
-            if name:sub(1, 1) ~= '.' and name:sub(-1) ~= '/' then
-                files[#files + 1] = name
+            if name:sub(1, 1) ~= '.' then
+                if name:sub(-1) == '/' then
+                    local real = name:sub(1, -2)
+                    local key = dir .. "/" .. real
+                    if not _listed_dir_warned[key] then
+                        _listed_dir_warned[key] = true
+                        log("ignoring directory in %s: %s (rmail only " ..
+                            "processes regular files here)", dir, real)
+                    end
+                else
+                    files[#files + 1] = name
+                end
             end
         end
         handle:close()

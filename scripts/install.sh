@@ -1,16 +1,76 @@
 #!/bin/sh
 # install.sh — compile rmail dependencies from source
 #
-# Usage: ./scripts/install.sh [--force] [--version dep=x.y.z ...]
+# Usage:
+#   ./scripts/install.sh [--force] [--yes | --silent]
+#                        [--version <dep>=<x.y.z> ...]
+#                        [--<option> <value> | --<flag> | --no-<flag> ...]
 #
 # Examples:
 #   ./scripts/install.sh --version lua=5.3.6
 #   ./scripts/install.sh --version luasocket=3.0.0 --version openssl=3.0.0
 #   ./scripts/install.sh --force --version lua=5.3.6
+#   ./scripts/install.sh --silent --name alice --port 8025 --mail ~/mail
 #
 # Installs into:
 #   libs/    — Lua modules (.lua + .so)
-#   deps/    — locally compiled Lua 5.4 and/or OpenSSL (if needed)
+#   deps/    — locally compiled Lua and/or OpenSSL (if needed)
+#
+# ---------------------------------------------------------------------------
+# What this script does, top to bottom:
+#
+#   PHASE 1 — Configuration (prompts run first, before any compilation)
+#     • Ask for mail directory, your name, and the port to listen on.
+#     • Write ~/.config/rmail/config-<mail-slug> with those values.
+#     • Symlink <mail-dir>/config → the config file for easy access.
+#
+#   PHASE 2 — Build toolchain
+#     • Verify a C compiler exists.
+#     • Find or compile Lua (with headers, for building C extensions).
+#
+#   PHASE 3 — OpenSSL
+#     • Used by rmail_crypto.so.  Skipped if libcrypto >= 1.1.1 is
+#       already on the system; otherwise compiled into deps/openssl/.
+#
+#   PHASES 4 / 5 — Pure-Lua and Lua/C libraries
+#     • dkjson (pure-Lua JSON parser).
+#     • luasocket (C extension — TCP, DNS, MIME).
+#
+#   PHASE 6 — Rmail-specific C extensions
+#     • libs/rmail_crypto.so   AES-256-GCM + SHA-256, linked to OpenSSL.
+#     • libs/rmail_inotify.so  Outbox file-change watcher (Linux).
+#
+#   PHASE 7 — NAT traversal tools (optional)
+#     • Compile miniupnpc and libnatpmp for the auto_port_forward config
+#       flag.  Probes the user's router and warns if either protocol is
+#       reachable — they're known-insecure.
+#
+#   PHASE 8 — Info-ZIP (zip / unzip)
+#     • Required for attachment transfer.  zip and unzip are detected
+#       independently; only the missing tool is compiled.
+#
+#   PHASE 9 — Security probe
+#     • Confirm router-side insecure-NAT findings from phase 7 and
+#       produce a consolidated end-of-run warning.
+#
+#   SERVICE SETUP
+#     • Detect the init system (systemd, runit, openrc, NixOS) and
+#       generate a service unit that launches the daemon pointing at
+#       the config file.
+#
+#   DOCS GENERATION
+#     • Expand docs/.templates/*.md with the user's real install paths
+#       and write results to docs/.
+#
+#   SUMMARY
+#     • Print the installed files and any next-step instructions.
+#
+# Every phase is reentrant: re-running the script skips work that's
+# already been done (libs present, deps built, config written) unless
+# --force is passed.  All interactive prompts can be satisfied from
+# command-line flags or env vars (see --silent and --yes above) so the
+# script runs unattended under a configuration-management system.
+# ---------------------------------------------------------------------------
 
 set -e
 
@@ -405,7 +465,7 @@ download() {
 }
 
 # ============================================================
-# 1. Configuration (ask first, before dependency checks)
+# PHASE 1 — Configuration (interactive prompts; run before compilation)
 # ============================================================
 
 echo ""
@@ -639,7 +699,7 @@ fi
 echo ""
 
 # ============================================================
-# 2. C compiler
+# PHASE 2a — C compiler (required for every build below)
 # ============================================================
 
 echo "Checking for C compiler..."
@@ -656,7 +716,7 @@ else
 fi
 
 # ============================================================
-# 2. Lua (need headers to compile C extensions)
+# PHASE 2b — Lua interpreter + headers (used by phases 5 and 6)
 # ============================================================
 
 echo "Checking for Lua..."
@@ -774,7 +834,7 @@ else
 fi
 
 # ============================================================
-# 3. OpenSSL
+# PHASE 3 — OpenSSL (used by rmail_crypto.so; skipped if already present)
 # ============================================================
 
 echo "Checking for OpenSSL..."
@@ -890,7 +950,7 @@ else
 fi
 
 # ============================================================
-# 4. dkjson
+# PHASE 4 — dkjson (pure-Lua JSON library, no C)
 # ============================================================
 
 echo "Checking for dkjson..."
@@ -907,7 +967,7 @@ else
 fi
 
 # ============================================================
-# 5. luasocket
+# PHASE 5 — luasocket (C extension: TCP, DNS, MIME)
 # ============================================================
 
 echo "Checking for luasocket..."
@@ -990,7 +1050,7 @@ else
 fi
 
 # ============================================================
-# 6. rmail_crypto.so (AES-256-GCM + SHA-256)
+# PHASE 6a — rmail_crypto.so  (AES-256-GCM + SHA-256, linked to OpenSSL)
 # ============================================================
 
 echo "Checking for rmail_crypto.so..."
@@ -1024,7 +1084,7 @@ else
 fi
 
 # ============================================================
-# 6b. rmail_inotify.so (outbox file-change watcher)
+# PHASE 6b — rmail_inotify.so  (outbox file-change watcher, Linux)
 # ============================================================
 
 echo ""
@@ -1047,7 +1107,7 @@ else
 fi
 
 # ============================================================
-# 7. NAT traversal tools (optional, for auto_port_forward)
+# PHASE 7 — NAT traversal tools (optional, for the auto_port_forward flag)
 # ============================================================
 
 MINIUPNPC_TAG="miniupnpc_2_3_3"
@@ -1128,7 +1188,7 @@ if ! $HAVE_UPNPC || ! $HAVE_NATPMPC; then
 fi
 
 # ============================================================
-# 8. zip / unzip (Info-ZIP, required for attachment transfer)
+# PHASE 8 — Info-ZIP: zip + unzip  (required for attachment transfer)
 # ============================================================
 
 echo ""
@@ -1204,7 +1264,7 @@ else
 fi
 
 # ============================================================
-# 9. Security probe (check for insecure NAT protocols)
+# PHASE 9 — Security probe (consolidate and report insecure NAT findings)
 # ============================================================
 
 echo ""
@@ -1260,7 +1320,7 @@ if ! $HAVE_UPNPC && ! $HAVE_NATPMPC; then
 fi
 
 # ============================================================
-# Clean up
+# CLEAN UP — remove temporary build artefacts
 # ============================================================
 
 if [ -d "$BUILD" ]; then
@@ -1270,7 +1330,7 @@ fi
 
 # (config and contacts setup moved to section 1, before dependency checks)
 # ============================================================
-# Service setup
+# SERVICE SETUP — generate the init unit for this system (systemd, runit, …)
 # ============================================================
 
 echo ""
@@ -1505,7 +1565,7 @@ SERVICE
 fi
 
 # ============================================================
-# Generate docs from templates
+# DOCS GENERATION — expand docs/.templates/*.md with real install paths
 # ============================================================
 # docs/.templates/ holds the source-of-truth .md files with placeholder
 # paths.  Here we substitute real install paths and write the resulting
@@ -1556,7 +1616,7 @@ generate_docs
 ok "generated docs/ from docs/.templates/"
 
 # ============================================================
-# Summary
+# SUMMARY — print installed files, warnings, and next-step instructions
 # ============================================================
 
 echo ""
