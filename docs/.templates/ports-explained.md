@@ -72,12 +72,36 @@ traffic bypasses the router's NAT entirely and goes directly between devices —
 hairpin support needed, and no port forwarding rule required either.
 
 ```
-# reachable from anywhere (requires hairpin NAT for LAN use)
+# Single contact with both addresses — daemon tries each in order:
+alice.ip       = 203.0.113.1
+alice.port     = 8025
+alice.token    = "shared-secret"
+alice.ip[1]    = 192.168.1.10
+alice.port[1]  = 8025
+```
+
+The unindexed `ip`/`port` is always tried first. If it fails, the daemon
+falls back to `ip[1]` (the LAN address). When a fallback succeeds, the
+indexed entries are automatically reordered so the working address is tried
+first next time.
+
+If the LAN and WAN use different ports, set `port[N]` to override:
+
+```
+alice.ip       = 203.0.113.1
+alice.port     = 8025
+alice.token    = "shared-secret"
+alice.ip[1]    = 192.168.1.10
+alice.port[1]  = 22
+```
+
+Alternatively, you can still use two separate contact entries:
+
+```
 alice.ip    = 203.0.113.1
 alice.port  = 8025
 alice.token = "shared-secret"
 
-# reachable only from the same local network
 alice_home.ip    = 192.168.1.10
 alice_home.port  = 8025
 alice_home.token = "shared-secret"

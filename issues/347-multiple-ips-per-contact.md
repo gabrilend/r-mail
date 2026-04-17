@@ -76,8 +76,7 @@ From `issues/new-issue-todo`.
 
 ## Status
 
-**Phases 1, 2, and 3 complete. Per-IP ports designed, deferred to a
-follow-up issue when a user needs it.**
+**Phases 1–4 complete.  All features implemented.**
 
 Landed in this pass:
 
@@ -131,35 +130,34 @@ Phase 3 (this pass):
   address drops to the back of the list, the live one moves to the
   front, and subsequent cycles hit it first.
 
-Deferred to a separate issue (per-IP ports):
+Phase 4 (per-IP ports, implemented):
 
-- **Problem.** `contact.port` is a single scalar shared across every
-  address in `contact.ips`. A contact whose LAN interface listens on
-  port 22 and whose WAN port-forward lands on 8025 can't be
-  expressed today.
-- **Proposed syntax.** Embed the port in the `ip` value:
-  - `alice.ip = 192.168.1.5:22`          (IPv4 + port)
-  - `alice.ip = alice.duckdns.org:8025`  (hostname + port)
-  - `alice.ip = [2001:db8::1]:8025`      (IPv6 + port, brackets
-     required to distinguish from bare IPv6)
-  - `alice.ip = 192.168.1.5`             (inherits `alice.port`)
-- **Parser.** A small `parse_endpoint(value, default_port)`:
-  1. Match `[IPv6]:port` → (addr, port).
-  2. Match `[IPv6]` → (addr, default_port).
-  3. Otherwise: if the value contains `:` but looks like a bare
-     IPv6 (multiple `:` or `::`), treat the whole thing as the
-     address with default_port. Else split on the last `:` and use
-     the numeric tail as the port.
-  4. If none of the above matches, treat as host-only with
-     default_port.
-- **Shape of the data structure.** `contact.endpoints` becomes a
-  list of `{addr, port}` pairs. `contact.ips` stays (addresses only)
-  for callers that still need just the address list. `contact_hosts()`
-  today returns a string list; an `contact_endpoints()` variant
-  would return the pairs for callers that need the port too.
-- **Migration.** A contacts file with no `HOST:PORT` syntax and a
-  `name.port = ...` line keeps working identically. Users opt in
-  per-line.
-- **Scope note.** Not implementing now — the daemon currently works
-  for single-port setups, which covers the common case. Spawn a new
-  issue when someone wants this.
+- **Syntax: indexed `ip[N]`/`port[N]` fields.** Each address can
+  have its own port via explicit array indexing:
+  ```
+  alice.ip       = 10.0.0.1        # default, always tried first
+  alice.port     = 8025             # default port
+  alice.ip[1]    = 192.168.1.5     # LAN
+  alice.port[1]  = 4858
+  alice.ip[2]    = alice.duckdns.org
+  alice.port[2]  = 44444
+  ```
+- **Default endpoint** (`name.ip` + `name.port`, unindexed): always
+  tried first, immune to promotion reordering.  At most one unindexed
+  ip and one unindexed port per contact.
+- **Indexed endpoints** (`name.ip[N]` + `name.port[N]`): tried after
+  the default, subject to auto-reordering on fallback success.
+  Missing `port[N]` inherits `name.port`; missing `ip[N]` (when
+  `port[N]` exists) inherits `name.ip`.
+- **Backward compat:** old-style configs with multiple unindexed
+  `name.ip` lines still work — the first becomes the default, the
+  rest are auto-indexed.  Old-style promotion (reorder unindexed ip
+  lines) still works for these configs.
+- **Promotion (`promote_contact_index`):** rotates both `ip[N]` and
+  `port[N]` values together so the winning (ip, port) pair moves to
+  `[1]`.  Renumbers indices to be contiguous.
+- **Validation:** warns on orphan `port[N]` with no `ip[N]` and no
+  default ip; warns on endpoints with no port.
+- **Removed `parse_endpoint`:** the old embedded-port syntax
+  (`ip = host:port`, `ip = [IPv6]:port`) is replaced by explicit
+  indexed port fields — simpler parser, clearer config.

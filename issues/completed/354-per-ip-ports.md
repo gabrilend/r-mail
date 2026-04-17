@@ -91,31 +91,11 @@ user during that pass.
 
 ## Status
 
-Implemented.
+Superseded by #347 Phase 4.
 
-- `parse_endpoint(value, default_port)` splits an ip line value into
-  (addr, port). Handles IPv4, hostname, bare IPv6, bracketed IPv6 with
-  or without port. Tested against every documented form.
-- `load_contacts` populates `contact.endpoints = [{addr, port, raw}]`
-  per contact. `contact.ips` now holds addresses only (port component
-  stripped), preserving the earlier Phase 1 contract. `contact.ip`
-  remains a shim pointing at the first address.
-- `contact_endpoints(c)` helper added alongside `contact_hosts(c)`.
-  Falls back to synthesizing endpoints from the legacy shape when a
-  contact was built ad-hoc without going through `load_contacts`.
-- `http_post_batch_with_fallback` prefers `endpoints` when supplied.
-  The first endpoint's (addr, port) drives the primary dispatch; each
-  fallback attempt uses its own endpoint's (addr, port). The legacy
-  `hosts` + `port` path still works unchanged for any caller that
-  hasn't migrated.
-- All six existing batch call sites migrated to pass `endpoints =
-  contact_endpoints(c)`: consent responses, attachment cancellations,
-  attachment-chunk send, sync_outbox batch, sync_inbox delete notify,
-  update-address push.
-- `promote_contact_address` now keys on the raw line value (including
-  any `:port` suffix), so an `alice.ip = 1.2.3.4:22` line moved to
-  the top of the block keeps its per-line port.
+The original design embedded ports in the ip value (`ip = host:port`)
+with a `parse_endpoint` parser.  This was replaced by explicit indexed
+fields (`ip[N]`/`port[N]`) which are simpler to parse and clearer to
+read.  The `parse_endpoint` function has been removed.
 
-Data-fallback behavior as agreed: a bare `name.ip = HOST` inherits
-`name.port`. A `name.ip = HOST:PORT` line overrides it for just that
-address. No code-level special-case handling.
+See #347 for the current implementation.

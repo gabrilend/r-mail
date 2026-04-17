@@ -556,35 +556,6 @@ local function flush_unreachable_summary()
     log("unreachable contacts this cycle: %s", table.concat(unreachable, ", "))
 end
 
--- #354 Parse an `ip` line's value into (address, port).
---
---  alice.ip = 192.168.1.5:22         → addr 192.168.1.5, port 22
---  alice.ip = alice.duckdns.org:8025 → addr alice.duckdns.org, port 8025
---  alice.ip = [2001:db8::1]:8025     → addr 2001:db8::1, port 8025
---  alice.ip = [2001:db8::1]          → addr 2001:db8::1, port default
---  alice.ip = 2001:db8::1            → addr 2001:db8::1, port default
---      (bare IPv6 literal keeps working: two-or-more colons means don't
---       try to split off a port)
---  alice.ip = 192.168.1.5            → addr 192.168.1.5, port default
---
--- "default" is the contact's `port` field; if that's also unset the
--- caller gets nil and is expected to skip the contact as unreachable,
--- same as it would for a missing port today.
-local function parse_endpoint(value, default_port)
-    if not value or value == "" then return nil, default_port end
-    local addr, port = value:match("^%[([^%]]+)%]:(%d+)$")
-    if addr then return addr, tonumber(port) end
-    addr = value:match("^%[([^%]]+)%]$")
-    if addr then return addr, default_port end
-    -- Count colons to distinguish bare IPv6 from HOST:PORT.
-    local colons = 0
-    for _ in value:gmatch(":") do colons = colons + 1 end
-    if colons >= 2 then return value, default_port end
-    addr, port = value:match("^(.-):(%d+)$")
-    if addr and port then return addr, tonumber(port) end
-    return value, default_port
-end
-
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
@@ -617,82 +588,141 @@ local function load_contacts()
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         line = line:match("^%s*(.-)%s*$")
         if line ~= "" and not line:match("^[/#]") then
-            local name, field, value = line:match("^([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+            -- Try indexed field first: name.field[N] = value
+            local name, field, idx, value =
+                line:match("^([%w_%-]+)%.([%w_%-]+)%[(%d+)%]%s*=%s*(.+)$")
+            if not name then
+                name, field, value =
+                    line:match("^([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+                idx = nil
+            end
             if name and field and value then
                 value = value:match("^%s*(.-)%s*$")
                 local unquoted = value:match('^"(.*)"$')
                 if unquoted then value = unquoted end
                 if not contacts[name] then contacts[name] = {} end
-                if field == "ip" then
-                    -- Multi-IP support (#347): every `name.ip = ...` line is
-                    -- appended to `ips`, the list that's the new source of
-                    -- truth.  `contact.ip` stays populated with the first
-                    -- entry as a back-compat shim for every call site that
-                    -- still reads `contact.ip` directly.
-                    -- TODO(#347): once every such call site migrates to
-                    -- contact_hosts(), drop the `.ip` shim.
-                    if not contacts[name].ips then contacts[name].ips = {} end
-                    contacts[name].ips[#contacts[name].ips + 1] = value
-                    if not contacts[name].ip then contacts[name].ip = value end
-                    -- Per-IP ports (#354): keep the raw value around so
-                    -- we can reconnect (addr+port) and so promote_contact
-                    -- _address can locate the exact line to reorder.
-                    -- The port resolution happens after the full load
-                    -- so `contact.port` (the data-level default) is
-                    -- available.
-                    if not contacts[name]._ip_raw then contacts[name]._ip_raw = {} end
-                    contacts[name]._ip_raw[#contacts[name]._ip_raw + 1] = value
+                local c = contacts[name]
+                if idx then
+                    idx = tonumber(idx)
+                    if field == "ip" then
+                        if not c._indexed_ips then c._indexed_ips = {} end
+                        c._indexed_ips[idx] = value
+                    elseif field == "port" then
+                        if not c._indexed_ports then c._indexed_ports = {} end
+                        c._indexed_ports[idx] = value
+                    end
+                elseif field == "ip" then
+                    if not c.ip then
+                        c.ip = value
+                    else
+                        -- Additional unindexed ip lines: auto-index them
+                        -- for backward compat with the old multi-line format.
+                        if not c._indexed_ips then c._indexed_ips = {} end
+                        local max_i = 0
+                        for n in pairs(c._indexed_ips) do
+                            if n > max_i then max_i = n end
+                        end
+                        c._indexed_ips[max_i + 1] = value
+                        c._auto_indexed = true
+                    end
                 else
-                    contacts[name][field] = value
+                    c[field] = value
                 end
             else
-                -- bare name line: create empty entry as a placeholder
                 local bare = line:match("^([%w_%-]+)$")
                 if bare and not contacts[bare] then contacts[bare] = {} end
             end
         end
     end
-    -- Fold a legacy `.ipv6` field into the address list so the retry
-    -- layer has a single source of addresses to walk.  `.ipv6` stays set
-    -- on the in-memory contact so back-compat readers (contact_addr)
-    -- keep working.
-    -- DEPRECATED(#347): the `.ipv6` field is no longer needed — users
-    -- can just add another `name.ip = <v6-address>` line and the
-    -- address-type detection handles IPv6.  Remove the fold + field
-    -- once existing contacts files have been migrated.
+    -- Fold legacy .ipv6 into the address list.  The field stays set so
+    -- back-compat readers (contact_addr) keep working.
     for _, c in pairs(contacts) do
         if c.ipv6 then
-            c.ips = c.ips or {}
-            local seen = false
-            for _, v in ipairs(c.ips) do if v == c.ipv6 then seen = true; break end end
-            if not seen then
-                c.ips[#c.ips + 1] = c.ipv6
-                c._ip_raw = c._ip_raw or {}
-                c._ip_raw[#c._ip_raw + 1] = c.ipv6
+            if not c.ip then
+                c.ip = c.ipv6
+            else
+                local dominated = c.ip == c.ipv6
+                if not dominated and c._indexed_ips then
+                    for _, v in pairs(c._indexed_ips) do
+                        if v == c.ipv6 then dominated = true; break end
+                    end
+                end
+                if not dominated then
+                    c._indexed_ips = c._indexed_ips or {}
+                    local max_i = 0
+                    for n in pairs(c._indexed_ips) do
+                        if n > max_i then max_i = n end
+                    end
+                    c._indexed_ips[max_i + 1] = c.ipv6
+                end
             end
         end
     end
-    -- Per-IP ports (#354): resolve each raw value into (addr, port) now
-    -- that `contact.port` (the data-level default) is known.  `endpoints`
-    -- is the list call sites should use; `ips` stays around for callers
-    -- that just need addresses (DNS comparison, LAN cache).  Strip each
-    -- ips entry to just the address component so address-only consumers
-    -- don't get confused by a `host:port` string in what they expected
-    -- to be a host.
-    for _, c in pairs(contacts) do
-        if c._ip_raw then
-            local default_port = tonumber(c.port)
-            c.endpoints = {}
-            local addr_only = {}
-            for i, raw in ipairs(c._ip_raw) do
-                local addr, port = parse_endpoint(raw, default_port)
-                c.endpoints[i] = { addr = addr, port = port, raw = raw }
-                addr_only[i] = addr
-            end
-            c.ips = addr_only
-            if c.endpoints[1] then c.ip = c.endpoints[1].addr end
-            c._ip_raw = nil
+    -- Build endpoints for each contact.
+    --
+    -- Order: default (unindexed ip/port) first, then indexed entries.
+    -- The default is pinned and immune to promotion reordering.
+    -- Indexed entries (ip[N]/port[N]) are subject to promotion.
+    -- A missing port[N] inherits the default port; a missing ip[N]
+    -- (when port[N] exists) inherits the default ip.
+    for cname, c in pairs(contacts) do
+        local default_ip = c.ip
+        local default_port = tonumber(c.port)
+        local idx_ips = c._indexed_ips or {}
+        local idx_ports = c._indexed_ports or {}
+
+        local max_idx = 0
+        for n in pairs(idx_ips) do if n > max_idx then max_idx = n end end
+        for n in pairs(idx_ports) do if n > max_idx then max_idx = n end end
+
+        c.endpoints = {}
+        c.ips = {}
+
+        -- Default endpoint (pinned at front, never promoted)
+        if default_ip then
+            c.endpoints[#c.endpoints + 1] = {
+                addr = default_ip, port = default_port,
+                is_default = true, contact_name = cname,
+            }
+            c.ips[#c.ips + 1] = default_ip
         end
+
+        -- Indexed endpoints
+        for n = 1, max_idx do
+            local ip = idx_ips[n]
+            local port = tonumber(idx_ports[n]) or default_port
+            if not ip and idx_ports[n] then
+                ip = default_ip
+            end
+            if ip then
+                c.endpoints[#c.endpoints + 1] = {
+                    addr = ip, port = port, is_default = false,
+                    index = n, contact_name = cname,
+                    raw = c._auto_indexed and ip or nil,
+                }
+                c.ips[#c.ips + 1] = ip
+            elseif idx_ports[n] then
+                log("warning: %s.port[%d] has no matching ip[%d] and no default %s.ip — skipped",
+                    cname, n, n, cname)
+            end
+        end
+
+        for _, ep in ipairs(c.endpoints) do
+            if not ep.port then
+                if ep.is_default then
+                    log("warning: %s has no port — set %s.port", cname, cname)
+                else
+                    log("warning: %s.ip[%d] has no port — set %s.port or %s.port[%d]",
+                        cname, ep.index, cname, cname, ep.index)
+                end
+            end
+        end
+
+        if c.endpoints[1] then c.ip = c.endpoints[1].addr end
+
+        c._indexed_ips = nil
+        c._indexed_ports = nil
+        c._auto_indexed = nil
     end
     return contacts
 end
@@ -713,12 +743,10 @@ local function contact_hosts(contact)
     return out
 end
 
--- #354: return a list of { addr, port, raw } for a contact, in preferred
--- order.  `port` reflects any per-line override parsed out of the raw
--- value, or falls back to `contact.port`.  `raw` is the original line
--- value and is used by promote_contact_address to locate the exact
--- line on disk when reordering.  Call sites that want to send to a
--- contact should use this instead of contact_hosts() + contact.port.
+-- Return a list of { addr, port, is_default, index, contact_name } for
+-- a contact, in preferred order.  Default (unindexed) endpoint comes
+-- first and is immune to promotion; indexed endpoints follow and are
+-- subject to auto-reordering on fallback success.
 local function contact_endpoints(contact)
     if type(contact.endpoints) == "table" and #contact.endpoints > 0 then
         return contact.endpoints
@@ -729,21 +757,15 @@ local function contact_endpoints(contact)
     local default_port = tonumber(contact.port)
     local hosts = contact_hosts(contact)
     for i, h in ipairs(hosts) do
-        out[i] = { addr = h, port = default_port, raw = h }
+        out[i] = { addr = h, port = default_port, is_default = (i == 1) }
     end
     return out
 end
 
--- #347 Phase 3: promote a non-first address to the top of its contact's
--- block on disk.  Called after the fallback layer sees a successful
--- retry so future cycles hit the live address first.
---
--- Only the `ip` lines for this contact are reordered; non-`ip` fields
--- (port, token, etc.) stay at their original positions.  A no-op when
--- the winner is already first or when the contact has fewer than two
--- addresses.  A no-op when the file wouldn't actually change — that
--- keeps the inotify watcher from firing and triggering a redundant
--- sync cycle.
+-- Promote a non-first unindexed ip line to the top of its contact's
+-- block on disk (backward compat for old-style multi-line configs).
+-- Only reorders bare `name.ip = ...` lines; indexed ip[N] lines are
+-- handled by promote_contact_index instead.
 local function promote_contact_address(name, winning_addr)
     if not name or not winning_addr or winning_addr == "" then return end
     local text = read_file(CONTACTS)
@@ -754,9 +776,6 @@ local function promote_contact_address(name, winning_addr)
         lines[#lines + 1] = line
     end
 
-    -- Collect ip-line positions and their parsed values (with quotes
-    -- stripped) for matching purposes.  Keep the original line text
-    -- around so we can put it back verbatim after reordering.
     local ip_positions, ip_entries = {}, {}
     for i, line in ipairs(lines) do
         local lname, lfield, lvalue = line:match("^%s*([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
@@ -777,7 +796,6 @@ local function promote_contact_address(name, winning_addr)
     end
     if not winner_idx or winner_idx == 1 then return end
 
-    -- Move the winner to position 1, keep the others in original order.
     local winner = table.remove(ip_entries, winner_idx)
     table.insert(ip_entries, 1, winner)
 
@@ -789,6 +807,95 @@ local function promote_contact_address(name, winning_addr)
     if new_text ~= text then
         write_file(CONTACTS, new_text)
         log("promoted %s for %s", winning_addr, name)
+    end
+end
+
+-- Promote an indexed endpoint to the first position.  Rotates both
+-- ip[N] and port[N] values so the winning (ip, port) pair moves to
+-- index [1].  Unindexed (default) ip/port lines are never touched.
+local function promote_contact_index(name, winning_index)
+    if not name or not winning_index or winning_index < 1 then return end
+    local text = read_file(CONTACTS)
+    if not text then return end
+
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local ip_by_idx = {}
+    local port_by_idx = {}
+    local first_line = nil
+    local remove_set = {}
+
+    for i, line in ipairs(lines) do
+        local lname, lfield, lidx =
+            line:match("^%s*([%w_%-]+)%.([%w_%-]+)%[(%d+)%]%s*=")
+        if lname == name and lidx then
+            lidx = tonumber(lidx)
+            local lvalue = line:match("=%s*(.+)$")
+            if lvalue then lvalue = lvalue:match("^%s*(.-)%s*$") end
+            if lfield == "ip" then
+                ip_by_idx[lidx] = lvalue
+                if not first_line then first_line = i end
+                remove_set[i] = true
+            elseif lfield == "port" then
+                port_by_idx[lidx] = lvalue
+                if not first_line then first_line = i end
+                remove_set[i] = true
+            end
+        end
+    end
+
+    local indices = {}
+    for idx in pairs(ip_by_idx) do indices[#indices + 1] = idx end
+    table.sort(indices)
+    if #indices < 2 then return end
+    if not ip_by_idx[winning_index] then return end
+    if winning_index == indices[1] then return end
+
+    -- Build (ip, port) pairs in current index order, rotate winner to front
+    local pairs_list = {}
+    for _, idx in ipairs(indices) do
+        pairs_list[#pairs_list + 1] = { ip = ip_by_idx[idx], port = port_by_idx[idx] }
+    end
+    local winner_pos
+    for k, idx in ipairs(indices) do
+        if idx == winning_index then winner_pos = k; break end
+    end
+    local winner = table.remove(pairs_list, winner_pos)
+    table.insert(pairs_list, 1, winner)
+
+    -- Remove old indexed lines (reverse order to preserve positions)
+    local remove_list = {}
+    for i in pairs(remove_set) do remove_list[#remove_list + 1] = i end
+    table.sort(remove_list)
+    for k = #remove_list, 1, -1 do
+        table.remove(lines, remove_list[k])
+    end
+
+    -- Calculate insertion point
+    local insert_at = first_line
+    for _, ri in ipairs(remove_list) do
+        if ri < first_line then insert_at = insert_at - 1 end
+    end
+
+    -- Rebuild lines with contiguous indices starting at 1
+    local new_lines = {}
+    for k, pair in ipairs(pairs_list) do
+        new_lines[#new_lines + 1] = name .. ".ip[" .. k .. "] = " .. pair.ip
+        if pair.port then
+            new_lines[#new_lines + 1] = name .. ".port[" .. k .. "] = " .. pair.port
+        end
+    end
+    for k = #new_lines, 1, -1 do
+        table.insert(lines, insert_at, new_lines[k])
+    end
+
+    local new_text = table.concat(lines, "\n")
+    if new_text ~= text then
+        write_file(CONTACTS, new_text)
+        log("promoted [%d] to first position for %s", winning_index, name)
     end
 end
 
@@ -2149,22 +2256,14 @@ local function http_post_batch(requests)
     return results
 end
 
--- Like http_post_batch, but when a request carries a `hosts` list (from
--- contact_hosts(), #347) and its first attempt fails with a connection-
--- level error, retry that single request serially against each remaining
--- host until one succeeds or the list is exhausted.  Application-level
--- errors (the peer answered with a non-OK HTTP status) are returned
--- as-is — a 404 or 400 doesn't get better by trying a different IP for
--- the same peer.
+-- Like http_post_batch, but when a request's first attempt fails with a
+-- connection-level error, retry serially against each remaining endpoint
+-- until one succeeds or the list is exhausted.  Application-level errors
+-- (HTTP 4xx/5xx) are returned as-is.
 --
 -- First-attempt parallelism is preserved; fallback is only serial for
 -- the entries that actually failed, which are usually a small minority.
 local function http_post_batch_with_fallback(requests)
-    -- #354: if a request carries `endpoints` (list of {addr, port, raw}),
-    -- that's the source of truth for both the primary attempt and each
-    -- fallback.  The first endpoint's addr/port is used for the primary
-    -- dispatch; subsequent endpoints are walked on connection failure.
-    -- Legacy call shape (host + hosts + port) still works unchanged.
     for _, req in ipairs(requests) do
         if req.endpoints and req.endpoints[1] then
             req.host = req.endpoints[1].addr
@@ -2173,7 +2272,7 @@ local function http_post_batch_with_fallback(requests)
     end
 
     local results = http_post_batch(requests)
-    local promotions = {}  -- raw -> true, deduped across the batch
+    local promotions = {}
     for i, req in ipairs(requests) do
         if results[i] and not results[i].ok and not results[i].status then
             local eps = req.endpoints
@@ -2190,59 +2289,34 @@ local function http_post_batch_with_fallback(requests)
                         log("fallback to %s:%s succeeded for %s",
                             ep.addr, tostring(ep.port), req.path or "?")
                         results[i] = r
-                        promotions[ep.raw or ep.addr] = true
+                        if not ep.is_default then
+                            if ep.index and not ep.raw then
+                                local key = (ep.contact_name or "") .. ":" .. ep.index
+                                promotions[key] = { type = "index",
+                                    name = ep.contact_name, index = ep.index }
+                            elseif ep.raw then
+                                promotions[ep.raw] = { type = "addr",
+                                    name = ep.contact_name, addr = ep.raw }
+                            end
+                        end
                         break
                     elseif r and r.status then
                         results[i] = r
                         break
                     end
                 end
-            else
-                local hosts = req.hosts
-                if hosts and #hosts > 1 then
-                    for k = 2, #hosts do
-                        if not hosts[k] or hosts[k] == "" then break end
-                        local single = {
-                            host = hosts[k], port = req.port, path = req.path,
-                            payload = req.payload, psk_key = req.psk_key,
-                        }
-                        local r = http_post_batch({single})[1]
-                        if r and r.ok then
-                            log("fallback to %s succeeded for %s",
-                                hosts[k], req.path or "?")
-                            results[i] = r
-                            promotions[hosts[k]] = true
-                            break
-                        elseif r and r.status then
-                            results[i] = r
-                            break
-                        end
-                    end
-                end
             end
         end
     end
 
-    -- Phase 3 (#347): rewrite contacts so each winning address jumps to
-    -- the top of its contact's block, so subsequent cycles skip the
-    -- dead entries they had to walk past this time.  Matching is done
-    -- against the raw line value (which may include a :port suffix)
-    -- so HOST:PORT lines are preserved verbatim.
     if next(promotions) then
         pcall(function()
-            local cs = load_contacts()
-            for raw in pairs(promotions) do
-                for cname, c in pairs(cs) do
-                    if c.endpoints then
-                        for _, ep in ipairs(c.endpoints) do
-                            if (ep.raw or ep.addr) == raw then
-                                promote_contact_address(cname, raw)
-                                goto next_addr
-                            end
-                        end
-                    end
+            for _, p in pairs(promotions) do
+                if p.type == "index" then
+                    promote_contact_index(p.name, p.index)
+                elseif p.type == "addr" then
+                    promote_contact_address(p.name, p.addr)
                 end
-                ::next_addr::
             end
         end)
     end

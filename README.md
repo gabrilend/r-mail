@@ -150,6 +150,22 @@ Both sides must have the same token for a given contact pair. Pick something lon
 
 You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md).
 
+#### Multiple addresses and per-address ports
+
+A contact can have multiple addresses. The daemon tries each one in order until a connection succeeds. Use `ip[N]` and `port[N]` for indexed entries:
+
+```
+alice.ip       = 203.0.113.1
+alice.port     = 8025
+alice.token    = "some-shared-secret"
+alice.ip[1]    = 192.168.1.10
+alice.port[1]  = 4858
+alice.ip[2]    = alice.duckdns.org
+alice.ip[3]    = 2001:db8::1
+```
+
+The unindexed `ip`/`port` is the default — always tried first. Indexed entries are tried after the default, in order. A missing `port[N]` inherits the default `port`. When a non-default address succeeds after the default fails, the daemon automatically reorders the indexed entries so the working address is tried first next time (the default is never reordered).
+
 ## Ports
 
 Each person runs their daemon on a single port. Unless provided, the install script generates a random port in the 50000–65000 range. That one port handles both sending and receiving — all your contacts deliver to the same port.

@@ -187,17 +187,19 @@ jump around.
 - [ ] Subsequent sync cycles after a promotion hit the new first address directly (no more fallback walk)
 - [ ] A malformed contacts file during promotion doesn't crash the sync cycle (pcall guard)
 
-### Per-IP ports (#354)
-- [ ] `alice.ip = 192.168.1.5:22` resolves to addr `192.168.1.5`, port `22`
-- [ ] `alice.ip = alice.duckdns.org:8025` resolves to addr `alice.duckdns.org`, port `8025`
-- [ ] `alice.ip = [2001:db8::1]:8025` resolves to addr `2001:db8::1`, port `8025`
-- [ ] `alice.ip = [2001:db8::1]` resolves to addr `2001:db8::1`, port inherited from `alice.port`
-- [ ] `alice.ip = 2001:db8::1` (bare IPv6, multi-colon) inherits port without trying to split
-- [ ] `alice.ip = 192.168.1.5` inherits port from `alice.port`
-- [ ] `contact.endpoints` preserves the raw line value for each entry (so promote can match it verbatim)
-- [ ] All six batch call sites send via `endpoints = contact_endpoints(c)`
+### Per-IP ports (#347 Phase 4)
+- [ ] `alice.ip[1] = 192.168.1.5` + `alice.port[1] = 22` creates endpoint with addr `192.168.1.5`, port `22`
+- [ ] `alice.ip[2] = host.example.com` without `alice.port[2]` inherits `alice.port`
+- [ ] Default `alice.ip` + `alice.port` (unindexed) is always the first endpoint tried
+- [ ] Default endpoint is immune to promotion reordering
+- [ ] Old-style config with multiple unindexed `name.ip` lines: first becomes default, rest auto-indexed
+- [ ] Old-style promotion (`promote_contact_address`) still works for auto-indexed entries
+- [ ] `promote_contact_index` rotates both `ip[N]` and `port[N]` values together
+- [ ] Promotion renumbers indices to be contiguous starting at 1
+- [ ] Orphan `port[N]` with matching `ip[N]` missing and no default ip: logged warning, endpoint skipped
+- [ ] Endpoint with no port (no `port[N]`, no default `port`): logged warning
+- [ ] All batch call sites send via `endpoints = contact_endpoints(c)`
 - [ ] Retry fallback uses the per-endpoint port, not a shared port
-- [ ] Promote preserves `HOST:PORT` syntax on the reordered line (no silent rewrite to bare HOST)
 
 ### IPv6 (#304)
 - [ ] IPv6 connections accepted alongside IPv4
@@ -242,19 +244,19 @@ jump around.
 ### Duplicate filename prevention (#315, Android side)
 - [ ] Cannot save outbox file whose converted filename matches existing outbox file
 
-### Cursor-aware scrolling (#316)
-**Shipped (base layer):**
-- [ ] Typing in the compose body keeps the cursor visible above the keyboard (no more typing into nothing)
+### Cursor-aware scrolling (#316 — closed 2026-04-14, second pass)
+**Shipped floor:**
+- [ ] Typing in the compose body keeps the cursor visible above the keyboard through many wraps in a row
+- [ ] After each wrap, the new line is fully visible (not half-clipped by the keyboard)
+- [ ] Caret lands roughly 3 lines above the keyboard, not right at the edge
+- [ ] Continued typing doesn't scroll until cursor reaches the last visible line
 - [ ] Tapping inside the body to reposition the cursor scrolls the view to bring that cursor location into view
 - [ ] Forward / Reply prefilled bodies still place the cursor sensibly (end of text)
 
-**Deferred (need on-device tuning):**
-- [ ] Cursor lands exactly 3 lines above the keyboard (not just "visible")
-- [ ] Continued typing doesn't scroll until cursor reaches last visible line
-- [ ] At last visible line, scrolls proportionally so line becomes third-from-bottom
-- [ ] Deleting from third line reverses scroll in same increments
-- [ ] Manual scroll resets the zone; typing resumes from new position
-- [ ] Typing below keyboard scrolls by ~3 lines, not 1
+**Parked (revisit if feel warrants):**
+- Per-character proportional scroll across the bottom line (horizontal drift)
+- Delete reverses the per-character scroll in the same increments
+- Manual scroll resets the zone; typing resumes from new position
 
 ### Sending progress animation (#322)
 - [ ] Green bar appears at the top of the Inbox panel after Send
