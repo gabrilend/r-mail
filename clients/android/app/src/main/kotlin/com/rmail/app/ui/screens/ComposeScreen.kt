@@ -1,12 +1,10 @@
 package com.rmail.app.ui.screens
 
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.documentfile.provider.DocumentFile
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -22,19 +20,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rmail.app.ui.MainViewModel
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 private data class ComposeAttachmentEntry(
     val uri: Uri,
@@ -132,8 +126,8 @@ fun ComposeScreen(
         }
     }
     val attachments = remember { mutableStateListOf<ComposeAttachmentEntry>() }
-    var subject by remember { mutableStateOf(parsed.subject) }
-    var body by remember { mutableStateOf(parsed.body) }
+    var subject by remember { mutableStateOf(TextFieldValue(parsed.subject)) }
+    var body by remember { mutableStateOf(TextFieldValue(parsed.body)) }
     val daemonName by vm.daemonName.collectAsState()
     val contactNames = remember(daemonName) {
         val names = vm.getContactNames().toMutableList()
@@ -206,14 +200,14 @@ fun ComposeScreen(
                                 return@IconButton
                             }
 
-                            val filename = if (subject.isNotBlank())
-                                sanitizeFilename(subject)
+                            val filename = if (subject.text.isNotBlank())
+                                sanitizeFilename(subject.text)
                             else
                                 vm.newOutboxFilename()
 
                             // Save immediately with local URIs, navigate away
                             val localPaths = attachments.map { it.uri.toString() }
-                            val content = buildOutboxContent(validRecipients, localPaths, body)
+                            val content = buildOutboxContent(validRecipients, localPaths, body.text)
                             vm.saveOutboxFile(filename, content)
                             // Upload attachments in background, updating the file as each completes
                             vm.uploadAttachmentsInBackground(filename, attachments.map { it.uri })
@@ -362,7 +356,7 @@ fun ComposeScreen(
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 decorationBox = { innerTextField ->
                     Box {
-                        if (body.isEmpty()) {
+                        if (body.text.isEmpty()) {
                             Text(
                                 "Message",
                                 style = TextStyle(
@@ -380,7 +374,7 @@ fun ComposeScreen(
     }
 }
 
-// ���─ Contact picker dropdown ─────────────────────────────────────────────────
+// ── Contact picker dropdown ─────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -439,66 +433,3 @@ private fun ContactPicker(
     }
 }
 
-// ── Attachment preview ──────────────────────────────────────────────────────
-
-@Composable
-private fun AttachmentPreview(entry: AttachmentEntry, modifier: Modifier = Modifier) {
-    val isImage = entry.mimeType?.startsWith("image/") == true
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier.padding(start = 8.dp)
-    ) {
-        if (isImage) {
-            AttachmentThumbnail(entry.uri)
-            Spacer(Modifier.width(10.dp))
-        }
-        Column {
-            Text(
-                entry.displayName,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1
-            )
-            val typeLabel = entry.mimeType?.substringAfter('/') ?: "file"
-            Text(
-                typeLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun AttachmentThumbnail(uri: Uri) {
-    val context = LocalContext.current
-    var bitmap by remember(uri) { mutableStateOf<ImageBitmap?>(null) }
-
-    LaunchedEffect(uri) {
-        bitmap = withContext(Dispatchers.IO) {
-            try {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    BitmapFactory.decodeStream(
-                        stream, null,
-                        BitmapFactory.Options().apply { inSampleSize = 4 }
-                    )?.asImageBitmap()
-                }
-            } catch (_: Exception) { null }
-        }
-    }
-
-    if (bitmap != null) {
-        Image(
-            bitmap!!,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            contentScale = ContentScale.Crop
-        )
-    } else {
-        Surface(
-            modifier = Modifier.size(48.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            content = {}
-        )
-    }
-}

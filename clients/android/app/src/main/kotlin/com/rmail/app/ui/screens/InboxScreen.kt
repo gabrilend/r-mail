@@ -60,6 +60,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.OffsetMapping
@@ -1570,20 +1571,15 @@ private fun ComposePanel(
             thickness = 1.5.dp,
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 
-        // Body — #316: cursor-aware scroll.  The body is wrapped with a
-        // BringIntoViewRequester whose .bringIntoView() fires whenever
-        // the cursor (selection end) moves.  The compose runtime + IME
-        // insets together scroll the parent so the cursor's line stays
-        // visible above the keyboard.
-        //
-        // Scope note: the original spec asked for a fancier "three-line
-        // zone, per-character incremental scroll, manual-scroll reset"
-        // model.  That needs hands-on tuning against a real device and
-        // keyboard, so the per-character polish is deferred.  Today's
-        // behavior covers the user-visible failure mode (cursor going
-        // behind the keyboard) cleanly.
-        var bodyValue by remember(body) {
-            mutableStateOf(TextFieldValue(body))
+        // Body — #316: cursor-aware scroll.  We track the TextLayoutResult
+        // via onTextLayout, and whenever the caret moves we ask the parent
+        // scroller to bring a rect around the caret into view.  The rect
+        // is inflated downward by a few line-heights so the requester keeps
+        // scrolling as the cursor approaches the bottom of the viewport —
+        // a bare caret-only rect is too small (it's always "already visible"
+        // by a pixel) and makes the scroller give up early.
+        var bodyValue by remember {
+            mutableStateOf(TextFieldValue(body, selection = TextRange(body.length)))
         }
         // Keep external `body` and internal TextFieldValue in sync when
         // the parent updates body (e.g. forward/reply prefill).
@@ -1592,9 +1588,18 @@ private fun ComposePanel(
                 bodyValue = TextFieldValue(body, selection = TextRange(body.length))
             }
         }
+        var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
         val cursorRequester = remember { BringIntoViewRequester() }
-        LaunchedEffect(bodyValue.selection.end) {
-            try { cursorRequester.bringIntoView() } catch (_: Exception) { /* no-op */ }
+        LaunchedEffect(bodyValue.selection.end, textLayout) {
+            val layout = textLayout ?: return@LaunchedEffect
+            val offset = bodyValue.selection.end.coerceIn(0, layout.layoutInput.text.length)
+            val caret = layout.getCursorRect(offset)
+            val line = layout.getLineForOffset(offset)
+            val lineHeight = layout.getLineBottom(line) - layout.getLineTop(line)
+            // Extend 3 line-heights below the caret so the scroller keeps a
+            // "3-line buffer" between the caret and the bottom of the viewport.
+            val buffered = caret.copy(bottom = caret.bottom + lineHeight * 3f)
+            try { cursorRequester.bringIntoView(buffered) } catch (_: Exception) { /* no-op */ }
         }
         BasicTextField(
             value = bodyValue,
@@ -1602,6 +1607,7 @@ private fun ComposePanel(
                 bodyValue = it
                 if (it.text != body) onBodyChange(it.text)
             },
+            onTextLayout = { textLayout = it },
             modifier = Modifier
                 .fillMaxWidth()
                 .defaultMinSize(minHeight = 300.dp)

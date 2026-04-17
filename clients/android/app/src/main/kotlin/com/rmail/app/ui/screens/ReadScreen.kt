@@ -76,7 +76,7 @@ fun ReadScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(filename) },
+                title = { },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -84,21 +84,22 @@ fun ReadScreen(
                 },
                 actions = {
                     if (!isOutbox && !msg.isConsent) {
-                        // #318: width controls (expand / shrink by 20 cols).
+                        // #318: zoom controls (+ = bigger text = fewer cols,
+                        // - = smaller text = more cols). Step 5 cols.
                         // Persisted as GlobalSettings.readerColumns.
                         IconButton(onClick = {
                             vm.globalSettings.readerColumns =
-                                (vm.globalSettings.readerColumns - 20).coerceAtLeast(40)
+                                (vm.globalSettings.readerColumns + 5).coerceAtMost(200)
                             vm.bumpReaderColumns()
                         }) {
-                            Icon(Icons.Default.Remove, contentDescription = "Narrower columns")
+                            Icon(Icons.Default.Remove, contentDescription = "Smaller text")
                         }
                         IconButton(onClick = {
                             vm.globalSettings.readerColumns =
-                                (vm.globalSettings.readerColumns + 20).coerceAtMost(200)
+                                (vm.globalSettings.readerColumns - 5).coerceAtLeast(10)
                             vm.bumpReaderColumns()
                         }) {
-                            Icon(Icons.Default.Add, contentDescription = "Wider columns")
+                            Icon(Icons.Default.Add, contentDescription = "Bigger text")
                         }
                     }
                     if (isOutbox) {
@@ -205,7 +206,7 @@ fun ReadScreen(
                     val scale: Float = maxWidth / widthAtRef
                     val scaled = refSize * scale
                     Text(
-                        text = msg.content,
+                        text = filename + "\n\n" + msg.content,
                         fontFamily = FontFamily.Monospace,
                         fontSize = scaled,
                         lineHeight = scaled * 1.2f

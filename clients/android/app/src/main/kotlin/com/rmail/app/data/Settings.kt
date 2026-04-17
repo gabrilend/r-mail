@@ -29,9 +29,8 @@ class Settings(context: Context) {
     // #318: monospace column width for the inbox message viewer.
     // Font size is computed so that `readerColumns` characters fit the
     // screen width.  Default 80 (classic terminal width).  User-
-    // adjustable via +/- controls in the Read screen's top bar, which
-    // step in increments of 20 (so common values are 60, 80, 100, 120).
+    // adjustable via +/- controls in the Read screen's top bar.
     var readerColumns: Int
         get() = prefs.getInt("reader_columns", 80)
-        set(v) = prefs.edit { putInt("reader_columns", v.coerceIn(40, 200)) }
+        set(v) = prefs.edit { putInt("reader_columns", v.coerceIn(10, 200)) }
 }
