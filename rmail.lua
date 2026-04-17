@@ -2325,6 +2325,111 @@ local function http_post_batch_with_fallback(requests)
 end
 
 
+-- ---- attach: glob expansion (#362) --------------------------------------
+--
+-- A user-written "attach:" line may contain shell-style glob metachars
+-- (`*`, `?`, `[...]`) in the filename component.  parse_outbox_file
+-- expands every glob line to one absolute-path "attach:" line per
+-- matching regular file, and rewrites the outbox file on disk so the
+-- rest of the pipeline (transfer tracking, remove_attach_from_file) is
+-- operating on stable literal paths.
+--
+-- Only the filename component is globbed — a glob in a directory
+-- component logs a warning and the line is left unchanged.
+
+local _glob_warned = {}
+
+local function _has_glob_chars(s)
+    return s:find("[%*%?%[]") ~= nil
+end
+
+local function _glob_to_lua_pattern(glob)
+    local out = {}
+    local i = 1
+    local n = #glob
+    while i <= n do
+        local c = glob:sub(i, i)
+        if c == "*" then
+            out[#out + 1] = "[^/]*"
+        elseif c == "?" then
+            out[#out + 1] = "[^/]"
+        elseif c == "[" then
+            local j = glob:find("]", i + 1, true)
+            if j then
+                local inner = glob:sub(i + 1, j - 1)
+                if inner:sub(1, 1) == "!" then inner = "^" .. inner:sub(2) end
+                out[#out + 1] = "[" .. inner .. "]"
+                i = j
+            else
+                out[#out + 1] = "%["
+            end
+        elseif c == "%" or c == "." or c == "(" or c == ")"
+            or c == "+" or c == "-" or c == "^" or c == "$" then
+            out[#out + 1] = "%" .. c
+        else
+            out[#out + 1] = c
+        end
+        i = i + 1
+    end
+    return "^" .. table.concat(out) .. "$"
+end
+
+local function _list_dir_files(dir)
+    -- Regular files only (no dirs, no dotfiles).  Silent — no per-session
+    -- warnings, unlike list_files which is tailored to INBOX/OUTBOX/etc.
+    local files = {}
+    local handle = io.popen('ls -1p ' .. shell_quote(dir) .. ' 2>/dev/null')
+    if handle then
+        for name in handle:lines() do
+            if name:sub(1, 1) ~= '.' and name:sub(-1) ~= '/' then
+                files[#files + 1] = name
+            end
+        end
+        handle:close()
+    end
+    return files
+end
+
+-- Expand a single attach: pattern.  Returns a list of absolute paths
+-- (sorted), or nil if expansion is not possible (non-absolute path,
+-- glob in a directory component).  A valid pattern with zero matches
+-- returns an empty list.
+local function _expand_attach_glob(pattern, outbox_file)
+    local expanded = expand_tilde(pattern)
+    if expanded:sub(1, 1) ~= "/" then
+        local key = outbox_file .. "\0rel\0" .. pattern
+        if not _glob_warned[key] then
+            _glob_warned[key] = true
+            log("attach: glob pattern must be absolute or ~-anchored: %s (%s)",
+                pattern, outbox_file)
+        end
+        return nil
+    end
+    local slash = expanded:match(".*()/")
+    if not slash then return nil end
+    local dir = expanded:sub(1, slash - 1)
+    local file_pat = expanded:sub(slash + 1)
+    if dir == "" then dir = "/" end
+    if _has_glob_chars(dir) then
+        local key = outbox_file .. "\0dir\0" .. pattern
+        if not _glob_warned[key] then
+            _glob_warned[key] = true
+            log("attach: glob in directory component not supported: %s (%s)",
+                pattern, outbox_file)
+        end
+        return nil
+    end
+    local lua_pat = _glob_to_lua_pattern(file_pat)
+    local matches = {}
+    for _, name in ipairs(_list_dir_files(dir)) do
+        if name:match(lua_pat) then
+            matches[#matches + 1] = dir .. "/" .. name
+        end
+    end
+    table.sort(matches)
+    return matches
+end
+
 local function parse_outbox_file(path)
     local text = read_file(path)
     if not text then return nil, nil end
@@ -2343,19 +2448,60 @@ local function parse_outbox_file(path)
             break
         end
     end
+    local body = text:sub(pos)
+
+    -- expand glob attach: lines.  One glob line with N matches becomes
+    -- N attach: lines (absolute paths, sorted).  Zero-match lines and
+    -- directory-glob lines stay unchanged so the user can see/fix them
+    -- in the outbox file; a once-per-session log warns about each.
+    local expanded_header = {}
+    local file_changed = false
+    for _, line in ipairs(header_lines) do
+        local is_attach = line:lower():match("^attach:") ~= nil
+        local fp = is_attach and
+            line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$") or nil
+        if fp and fp ~= "" and _has_glob_chars(fp) then
+            local matches = _expand_attach_glob(fp, path)
+            if matches and #matches > 0 then
+                for _, m in ipairs(matches) do
+                    expanded_header[#expanded_header + 1] = "attach: " .. m
+                end
+                log("attach: expanded %s -> %d file(s) in %s",
+                    fp, #matches, path:match("([^/]+)$") or path)
+                file_changed = true
+            elseif matches and #matches == 0 then
+                local key = path .. "\0zero\0" .. fp
+                if not _glob_warned[key] then
+                    _glob_warned[key] = true
+                    log("attach: no files match %s (%s)",
+                        fp, path:match("([^/]+)$") or path)
+                end
+                expanded_header[#expanded_header + 1] = line
+            else
+                -- nil: unexpandable (already warned).  Keep line as-is.
+                expanded_header[#expanded_header + 1] = line
+            end
+        else
+            expanded_header[#expanded_header + 1] = line
+        end
+    end
+
+    if file_changed then
+        write_file(path, table.concat(expanded_header, "\n") .. "\n" .. body)
+    end
 
     -- build per-recipient entries: each to: gets all attach: lines after it
     local entries = {}
-    for i, line in ipairs(header_lines) do
+    for i, line in ipairs(expanded_header) do
         if line:lower():match("^to:") then
             local name = line:match("^[Tt][Oo]:%s*(.-)%s*$")
             if name and name ~= "" then
                 local attachments = {}
-                for j = i + 1, #header_lines do
-                    if header_lines[j]:lower():match("^attach:") then
-                        local fp = header_lines[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
-                        if fp and fp ~= "" then
-                            attachments[#attachments + 1] = expand_tilde(fp)
+                for j = i + 1, #expanded_header do
+                    if expanded_header[j]:lower():match("^attach:") then
+                        local afp = expanded_header[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+                        if afp and afp ~= "" then
+                            attachments[#attachments + 1] = expand_tilde(afp)
                         end
                     end
                 end
@@ -2365,7 +2511,7 @@ local function parse_outbox_file(path)
     end
 
     if #entries == 0 then return nil, nil end
-    return entries, text:sub(pos)
+    return entries, body
 end
 
 

@@ -79,6 +79,18 @@ jump around.
 ### `attach:` paths (#101)
 - [ ] Paths with `~` expand to home directory
 
+### `attach:` glob expansion (#362)
+- [ ] `attach: ~/photos/*.jpg` in an outbox file is rewritten in place to one `attach:` line per matching file, absolute paths, sorted
+- [ ] `*` matches only regular files — directories and dotfiles in the glob dir are skipped
+- [ ] `?` and `[...]` character classes work (e.g. `app-[0-9][0-9].log`, `report-0?.pdf`)
+- [ ] Zero-match glob: line is left unchanged in the file, warning logged once per session (no spam on subsequent sync cycles)
+- [ ] Glob in directory component (e.g. `~/p*/file.jpg`): warning logged, line unchanged
+- [ ] Relative glob (no leading `/` or `~`): warning logged, line unchanged
+- [ ] Non-glob paths (no `*`, `?`, `[`) are untouched — no rewrite happens if a file only has literal attach: lines
+- [ ] After glob expansion, the normal attachment pipeline completes (consent form, chunk transfer, etc.) for each expanded file
+- [ ] When a transfer completes, `remove_attach_from_file` strips the specific expanded line, not the original glob (because the glob line no longer exists in the file)
+- [ ] Re-parsing an already-expanded file (with no globs left) produces no log output and no file write
+
 ### Large payloads (#204)
 - [ ] Large message sends don't truncate (no partial send bug)
 
