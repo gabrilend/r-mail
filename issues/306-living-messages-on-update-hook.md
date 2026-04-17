@@ -71,6 +71,43 @@ sha256sum "$1" | cut -d' ' -f1
 - Sender removes a to: line: existing deletion logic handles it (separate
   from update).
 
+## Sender namespacing (refinement needed)
+
+Currently, living messages are matched by message_id (UUID). But what happens
+when two different senders both send a living message with the same subject?
+
+Example:
+- Alice sends "status" to Bob (living message, uuid-1)
+- Carol sends "status" to Bob (living message, uuid-2)
+- Bob's inbox has two files... both named "status"?
+
+Current behavior: The second delivery would fail or overwrite, depending on
+how filename conflicts are handled (see issue #312).
+
+Proposed refinement: Ensure each living message is tied to one sender
+specifically. Options:
+
+1. **Namespace by sender**: Store as `alice/status` and `carol/status`
+   - Changes inbox structure (directories per sender)
+   - Clean separation, no conflicts possible
+
+2. **Append sender to filename**: Store as `status-from-alice`, `status-from-carol`
+   - Flat structure preserved
+   - Uglier filenames
+
+3. **Reject second sender**: If "status" exists from Alice, Carol's "status"
+   is rejected as a conflict
+   - Simplest, but might surprise users
+   - First-come-first-served on subject names
+
+4. **Use message_id only**: Ignore subject for matching, only use UUID
+   - Current implementation does this for updates
+   - But initial delivery still uses subject as filename
+
+This needs a design decision before the edge case bites someone.
+
+Source: ~/mail/inbox/rmail-improvements-too (reconstructed in notes/)
+
 ## Status
 
 Implemented. All changes in rmail.lua.
