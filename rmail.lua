@@ -1731,6 +1731,36 @@ local function release_zip(chunks, zip_id)
     end
 end
 
+-- {{{ outbox header scanning (#363)
+-- The outbox header block is a run of to:/attach: lines at the top of the
+-- file, with blank lines and // comments allowed interleaved.  Blanks and
+-- comments are preserved verbatim (the user may have inserted them for
+-- readability, or the daemon inserted a `// MISSING ATTACHMENT:` marker)
+-- but they don't terminate the header — scanning continues until the
+-- first line that is none of: to:, attach:, blank, //.
+local function _is_transparent_header_line(line)
+    return line:match("^%s*$") ~= nil or line:match("^%s*//") ~= nil
+end
+
+local function _scan_outbox_header(text)
+    local header_lines = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:")
+                or _is_transparent_header_line(line) then
+            header_lines[#header_lines + 1] = line
+            pos = line_end + 1
+        else
+            break
+        end
+    end
+    return header_lines, text:sub(pos)
+end
+-- }}}
+
 -- {{{ remove_recipient_from_file
 -- Remove a recipient's to: line from an outbox file.
 -- Also removes orphan attach: lines that no longer have a to: above them.
@@ -1739,21 +1769,7 @@ local function remove_recipient_from_file(filepath, recipient)
     local text = read_file(filepath)
     if not text then return 0 end
 
-    -- parse header lines
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
+    local header_lines, body = _scan_outbox_header(text)
 
     -- remove the matching to: line
     local kept = {}
@@ -2434,21 +2450,7 @@ local function parse_outbox_file(path)
     local text = read_file(path)
     if not text then return nil, nil end
 
-    -- collect all header lines (to: and attach:)
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
+    local header_lines, body = _scan_outbox_header(text)
 
     -- expand glob attach: lines.  One glob line with N matches becomes
     -- N attach: lines (absolute paths, sorted).  Zero-match lines and
@@ -2512,6 +2514,36 @@ local function parse_outbox_file(path)
 
     if #entries == 0 then return nil, nil end
     return entries, body
+end
+
+
+-- Insert a `// MISSING ATTACHMENT:` marker below the `attach:` line for
+-- the given filepath in an outbox file (#363).  Idempotent: if the marker
+-- already exists anywhere in the file, does nothing.  Logs only when the
+-- marker is actually inserted, so repeated sync cycles on an unresolved
+-- missing file don't spam the log.
+local function mark_missing_attachment(outbox_path, filepath, outbox_name)
+    local text = read_file(outbox_path)
+    if not text then return end
+    local marker = "// MISSING ATTACHMENT: " .. filepath
+    if text:find(marker, 1, true) then return end
+
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+        if fp == filepath then
+            local prefix = text:sub(1, line_end)
+            if prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end
+            local suffix = text:sub(line_end + 1)
+            local marker_line = marker .. " \xe2\x80\x94 file not found"
+            write_file(outbox_path, prefix .. marker_line .. "\n" .. suffix)
+            log("attach: file not found: %s (in %s)", filepath, outbox_name)
+            return
+        end
+        pos = line_end + 1
+    end
 end
 
 
@@ -2597,20 +2629,7 @@ end
 local function remove_attach_from_file(filepath, attach_path)
     local text = read_file(filepath)
     if not text then return end
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
+    local header_lines, body = _scan_outbox_header(text)
     local kept = {}
     for _, line in ipairs(header_lines) do
         if line:lower():match("^attach:") then
@@ -3578,7 +3597,10 @@ local function sync_outbox(my_name)
                                         in_progress = true; break
                                     end
                                 end
-                                if not in_progress then
+                                if not in_progress and not file_exists(filepath) then
+                                    mark_missing_attachment(
+                                        OUTBOX .. "/" .. name, filepath, name)
+                                elseif not in_progress then
                                     local att_id = uuid()
                                     local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
                                     local expected_size = measure_size(filepath) or 0

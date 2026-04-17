@@ -79,6 +79,18 @@ jump around.
 ### `attach:` paths (#101)
 - [ ] Paths with `~` expand to home directory
 
+### Outbox header robustness (#363)
+- [ ] Blank line between `to:` and `attach:` does NOT terminate the header — attach still recognized, attachment gets queued
+- [ ] Whitespace-only line (spaces/tabs, no content) between header lines treated the same as a truly blank line
+- [ ] Multiple blank lines between header items still allowed
+- [ ] First non-blank, non-header line still correctly ends the header block (body unchanged)
+- [ ] File with only headers + blank lines (no body) parses as body = ""
+- [ ] `remove_recipient_from_file` and `remove_attach_from_file` use the same blank-tolerant scanning rule — no orphan `attach:` lines left behind after a to: is removed
+- [ ] `attach:` path pointing to a non-existent file: daemon logs `attach: file not found: <path>` with the outbox filename, and inserts a `// MISSING ATTACHMENT:` marker line below the offending attach
+- [ ] Marker not duplicated on subsequent sync cycles (same `attach:` line, same missing file → one marker)
+- [ ] User fixing the path (making the file exist) lets the attachment proceed on the next sync cycle; stale `//` marker stays in the file until the user removes it
+- [ ] The fix does NOT reformat or remove blank lines the user intentionally put in their outbox file — file-on-disk only changes when glob expansion (#362) or a #363 marker needs to be written
+
 ### `attach:` glob expansion (#362)
 - [ ] `attach: ~/photos/*.jpg` in an outbox file is rewritten in place to one `attach:` line per matching file, absolute paths, sorted
 - [ ] `*` matches only regular files — directories and dotfiles in the glob dir are skipped
