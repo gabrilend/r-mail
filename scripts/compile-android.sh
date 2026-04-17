@@ -12,7 +12,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-APK="$ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
+APK="$ROOT/clients/android/app/build/outputs/apk/debug/app-debug.apk"
 
 ADB=""
 if [ -x /etc/profiles/per-user/ritz/bin/adb ]; then
@@ -43,7 +43,7 @@ fi
 
 if $do_test; then
     echo "Building..."
-    cd "$ROOT/android" && ./gradlew assembleDebug
+    cd "$ROOT/clients/android" && ./gradlew assembleDebug
     if [ $? -ne 0 ]; then
         echo "Build failed."
         exit 1

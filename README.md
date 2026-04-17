@@ -45,7 +45,7 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
-There is no history for deleted messages. If you'd like such functionality, check out the [scripting hooks](docs/scripting-tutorial.md), which enable whatever behavior you'd like, including backing up old messages.
+There is no history for deleted messages. If you'd like such functionality, check out the [scripting hooks](docs/.templates/scripting-tutorial.md), which enable whatever behavior you'd like, including backing up old messages.
 
 ### Attachments
 
@@ -87,7 +87,7 @@ deny
 
 Leave either `accept` or `deny` to make your choice. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
 
-For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/attachments.md](docs/attachments.md).
+For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/.templates/attachments.md](docs/.templates/attachments.md).
 
 ## Dependencies
 
@@ -114,7 +114,7 @@ To run manually:
 ./run-rmail.sh
 ```
 
-To run rmail automatically on boot, see [docs/service.md](docs/service.md).
+To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templates/service.md).
 
 ## Configuration
 
@@ -148,7 +148,23 @@ alice.token = "some-shared-secret"
 
 Both sides must have the same token for a given contact pair. Pick something long and random, but pick something different for each contact. I like to do words separated by dashes, like "apple-box-racecar-spelled-backwards-is-racecar"
 
-You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
+You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md).
+
+#### Multiple addresses and per-address ports
+
+A contact can have multiple addresses. The daemon tries each one in order until a connection succeeds. Use `ip[N]` and `port[N]` for indexed entries:
+
+```
+alice.ip       = 203.0.113.1
+alice.port     = 8025
+alice.token    = "some-shared-secret"
+alice.ip[1]    = 192.168.1.10
+alice.port[1]  = 4858
+alice.ip[2]    = alice.duckdns.org
+alice.ip[3]    = 2001:db8::1
+```
+
+The unindexed `ip`/`port` is the default — always tried first. Indexed entries are tried after the default, in order. A missing `port[N]` inherits the default `port`. When a non-default address succeeds after the default fails, the daemon automatically reorders the indexed entries so the working address is tried first next time (the default is never reordered).
 
 ## Ports
 
@@ -165,7 +181,7 @@ Local/LAN IP addresses are never shared with contacts, but you will need your lo
 
 If everyone is on separate networks, they can all use the same port number. Only your router cares about the port number. It's like filling out a paper slip and registering a name to your specific mailbox with your mailman when you first move in to a new place, but for a computer instead of a house.
 
-Not sure why any of this is necessary? See [docs/ports-explained.md](docs/ports-explained.md) for a plain-language walkthrough.
+Not sure why any of this is necessary? See [docs/.templates/ports-explained.md](docs/.templates/ports-explained.md) for a plain-language walkthrough.
 
 To find your **local IP** (for router port forwarding):
 
@@ -173,7 +189,7 @@ To find your **local IP** (for router port forwarding):
 ip addr show | grep 'inet '
 ```
 
-To find your **public IP** (what your contacts put in their file):
+To find your router's **public IP** (what your contacts put in their file):
 
 ```sh
 curl -s ifconfig.me           && echo "" || true
@@ -182,7 +198,7 @@ curl -s api.ipify.org         && echo "" || true
 curl -s checkip.amazonaws.com && echo "" || true
 ```
 
-All four should print the same IP. If they agree, that's your public IP.
+All four should print the same IP. If they agree, that's your router's public IP.
 
 ### Opening the firewall
 
@@ -208,6 +224,8 @@ tcp dport 8025 accept
 # iptables
 sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 ```
+
+Note that your router AND your OS must have an open port in their firewalls. There are two firewalls.
 
 To verify that the port is open, run this from a computer on the network:
 
@@ -259,7 +277,7 @@ Log into your router's admin panel and disable:
 - NAT-PMP
 - PCP (unless using authenticated PCP, which almost no routers support)
 
-Then set up a manual port forward for your rmail port. See [docs/nat-traversal-report.md](docs/nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
+Then set up a manual port forward for your rmail port. See [docs/.templates/nat-traversal-report.md](docs/.templates/nat-traversal-report.md) for a detailed analysis of these protocols and their security implications.
 
 To find your router's admin panel, first get your default gateway address:
 
@@ -306,7 +324,7 @@ Hooks let you run scripts in response to message events. Configure them in `~/.c
 - **`on_delete`**  — runs in the background when a message is deleted from inbox or outbox.
 - **`on_package`** — runs in the background after an attachment is fully received and saved.
 
-Hooks are a powerful feature — any executable works, in any language. For full documentation and examples in bash, Lua, and C, see [docs/scripting-tutorial.md](docs/scripting-tutorial.md).
+Hooks are a powerful feature — any executable works, in any language. For full documentation and examples in bash, Lua, and C, see [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md).
 
 ## Troubleshooting
 
@@ -336,9 +354,9 @@ If the port isn't open or forwarded, the connection will either time out (packet
 
 ## Docs
 
-- [docs/attachments.md](docs/attachments.md) — full attachment workflow, consent, configuration
-- [docs/scripting-tutorial.md](docs/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C
-- [docs/service.md](docs/service.md) — running rmail automatically on boot, multiple instances
-- [docs/protocol.md](docs/protocol.md) — wire protocol reference, sync timing
-- [docs/ports-explained.md](docs/ports-explained.md) — plain-language explanation of ports and port forwarding
-- [docs/nat-traversal-report.md](docs/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security
+- [docs/.templates/attachments.md](docs/.templates/attachments.md) — full attachment workflow, consent, configuration
+- [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C
+- [docs/.templates/service.md](docs/.templates/service.md) — running rmail automatically on boot, multiple instances
+- [docs/.templates/protocol.md](docs/.templates/protocol.md) — wire protocol reference, sync timing
+- [docs/.templates/ports-explained.md](docs/.templates/ports-explained.md) — plain-language explanation of ports and port forwarding
+- [docs/.templates/nat-traversal-report.md](docs/.templates/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security

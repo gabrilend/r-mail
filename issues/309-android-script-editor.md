@@ -1,307 +1,119 @@
-# In-app script editor for Android
+# In-app script editor for Android (low priority)
 
 ## Overview
 
-Users write hook scripts from inside the rmail app. Scripts react to rmail
-events (on_receive, on_send, on_update, etc.) and can interface with other
-apps on the phone.
+Users manage **phone-side** hook scripts from inside the rmail app.
+These scripts run on the phone and react only to rmail events that
+happen on the phone — incoming message delivered to the phone's inbox,
+message sent from the phone's outbox, phone-side update, and so on.
 
-The long-term vision: visual programming (FSM diagrams, Scratch-style blocks)
-that makes automation accessible to non-programmers. But start with text.
+## Architectural principle: phone and desktop hooks are separate
 
-## Why in-app editing?
+This is explicit and non-negotiable:
 
-Desktop editing (via synced phone config #308) is powerful but requires:
-- Sitting at a computer
-- Knowing the config format
-- Thinking ahead about what you want
+- **Desktop daemon** hooks live on the desktop filesystem and run
+  against messages passing through the desktop.
+- **Phone (thin client)** hooks live on the phone and run against
+  messages passing through the phone.
+- The two sets are **not shared** and **not synced**. A script written
+  on the phone does not end up on the desktop, and vice versa.
 
-In-app editing enables:
-- Quick tweaks while you're using the phone
-- "I want this message to do X" → write script right there
-- Experimentation without context-switching
+The reason is practical: cross-device script sync would require pushing
+files into the desktop filesystem from the phone, with all the trust,
+conflict, and format questions that implies. We don't have a plan for
+that, and we don't need one if each side owns its own hook surface.
 
-Both are valuable. In-app for quick/casual, desktop for complex/bulk.
+This separation also sidesteps #308 (synced phone config) for the
+hook-binding use case: the phone owns its own bindings.
 
-## Editor evolution
+## New hook category: sync-process hooks
 
-### Phase 1: Text editor
-- Simple text input field
-- Syntax highlighting (if easy)
-- Save/test/run buttons
-- Error display when script fails
-- Good enough for power users, foundation for later phases
+Once phone and desktop hooks are separate, there's an open slot for
+hooks that fire during the **sync between desktop and thin client** —
+at the boundary, rather than on either side. Examples of where that
+could be useful:
 
-### Phase 2: Template library
-- Pre-built scripts for common tasks
-- "Notify urgently when [contact] messages"
-- "Forward messages matching [pattern] to [contact]"
-- "Log all received messages to [file]"
-- User selects template, fills in blanks
+- Strip or rewrite fields on messages crossing the boundary.
+- Log/audit what leaves the desktop for the phone (and vice versa).
+- Defer or drop messages that shouldn't round-trip.
 
-### Phase 3: Block programming
-- Scratch-style drag-and-drop blocks
-- Visual representation of logic
-- Blocks compile to script text (can view/edit raw)
-- Lower barrier to entry
+Scope for this issue: acknowledge the category exists. Designing the
+sync-process hook set is a separate piece of work.
 
-### Phase 4: FSM diagrams
-- State machine visualization
-- States = conditions (inbox empty, message received, etc.)
-- Transitions = actions (send message, notify, etc.)
-- Good for complex multi-step workflows
-- "When I receive a message from X, wait 5 minutes, then forward to Y"
+## Script execution environment — open questions
 
-## Script capabilities
+Before designing the UI we need answers:
 
-### Available hooks (events)
-```
-on_receive      - message arrived in inbox
-on_send         - message sent from outbox
-on_update       - living message updated
-on_delete       - message deleted
-on_sync_start   - sync cycle beginning
-on_sync_complete- sync cycle finished
-on_error        - something failed
-```
+- **Language.** Lua (to match the daemon) is the obvious candidate, but
+  Android doesn't ship a Lua interpreter. What does?
+- **Interpreter.** Can we embed a Lua interpreter inside the Android
+  app (e.g. LuaJ, LuaJava, a native build)? What size/permission cost?
+- **Bridge.** Can a Lua script call into Kotlin to do things the user
+  actually cares about — read the inbox file, send an rmail message,
+  talk to the Android side of another app via content providers /
+  intents?
+- **Capability ceiling.** Given whatever the answers above are, can a
+  user write scripts that do *meaningful* things (not just log), or is
+  the environment so sandboxed that the feature doesn't pay for itself?
 
-### Available actions
-```
-notify(title, body)         - show notification
-notify_urgent(title, body)  - high-priority notification
-send_message(to, subject, body) - send rmail message
-forward(message, to)        - forward received message
-log(text)                   - append to log file
-run_intent(intent)          - launch Android intent
-read_content(uri)           - read from content provider
-```
+This is the main reason the issue is low priority: without a
+satisfying answer here, the UI work is premature.
 
-### Context variables
-```
-message.sender    - who sent it
-message.subject   - filename/subject
-message.body      - message content
-message.timestamp - when received
-device.battery    - current battery %
-device.network    - wifi/cellular/none
-device.location   - if permitted
-```
+## Design (contingent on the execution-environment questions)
 
-## Script language
+### Script storage
 
-### Option A: Lua
-- Matches desktop hooks
-- Full programming language
-- Need Lua interpreter on Android (LuaJ? native?)
-- Familiar to existing rmail users
+Each script is a plain text file stored on the phone. Phone-only —
+never synced to the desktop.
 
-### Option B: Custom DSL
-- Simpler, purpose-built
-- Easier to parse/validate
-- Compiles to actions
-- Less flexible
+### Editor
 
-### Option C: JSON/YAML rules
-- Declarative, not imperative
-- Easy to generate from visual editor
-- Limited expressiveness
-```yaml
-when: on_receive
-if: sender == "mom"
-then: notify_urgent("Mom messaged!")
-```
+A plain text editor for the script body. No FSM canvas, no block
+programming — those may come later but are out of scope here.
 
-**Recommendation:** Start with Option C (declarative rules) because:
-- Easy to generate from templates/blocks
-- Easy to validate
-- Can add Option A (Lua) later for power users
+The editor is not how a script gets wired up to a hook. To **use** a
+script, the user goes to the hook-config screen and picks a script
+from a list.
 
-## Example scripts
+### Hook configuration
 
-### Urgent notification for specific contact
-```yaml
-name: "mom-urgent"
-when: on_receive
-if: sender == "mom"
-then:
-  - notify_urgent:
-      title: "Mom"
-      body: "${message.body}"
-```
+For each phone-side hook (`on_receive`, `on_send`, `on_update`, …), the
+user has two ways to supply a script:
 
-### Forward work emails to desktop
-```yaml
-name: "work-forward"
-when: on_receive
-if: sender contains "@work.com"
-then:
-  - forward:
-      to: "desktop"
-      note: "Forwarded from phone"
-```
+1. **Pick from the list** of phone-side scripts already written.
+2. **Import from a text file** on the phone. The import dialog opens
+   to the rmail inbox by default, so a script received as an rmail
+   message is immediately visible and importable.
 
-### Log all messages
-```yaml
-name: "message-log"
-when: on_receive
-then:
-  - log: "${message.timestamp} | ${message.sender} | ${message.subject}"
-```
+(The earlier draft included a third option — "type a path to a script
+on the desktop daemon" — removed under the phone/desktop separation
+principle above.)
 
-### Cross-device automation
-```yaml
-name: "home-arrival"
-when: on_sync_complete
-if: device.network.ssid == "HomeWifi"
-then:
-  - send_message:
-      to: "desktop"
-      subject: "phone-arrived-home"
-      body: "Trigger welcome script"
-```
-Desktop's on_receive hook sees "phone-arrived-home" and runs welcome script.
+### Screen navigation — open design question
 
-## UI design
+Two new screens are implied but their entry points are undefined:
 
-### Script list screen
-- List of all scripts (name, hook type, enabled/disabled)
-- Toggle switch to enable/disable each
-- Tap to edit, long-press for delete/duplicate
-- FAB to create new script
+- Where does the user reach the **script editor** from? Which screen,
+  which button?
+- Where does the user reach the **hook-config screen** from? Which
+  screen, which button?
 
-### Script editor screen
-- Name field
-- Hook type dropdown (on_receive, on_send, etc.)
-- Condition builder (visual) or text field
-- Action list (add/remove/reorder)
-- Test button (simulate with fake message)
-- Save button
+Both answers should be recorded here before any UI work starts.
 
-### Error handling
-- If script fails, show error in-app
-- Option to disable script that keeps failing
-- Error log accessible from settings
+## Inter-device use
 
-## Inter-app communication
-
-### Android intents
-Scripts can launch other apps via intents:
-```yaml
-then:
-  - run_intent:
-      action: "android.intent.action.VIEW"
-      data: "https://example.com"
-```
-
-### Content providers
-Scripts can read data from other apps:
-```yaml
-# Read next calendar event
-- read_content:
-    uri: "content://com.android.calendar/events"
-    query: "dtstart > now()"
-    limit: 1
-```
-
-This is the bridge between rmail and the phone's ecosystem.
-
-## Security considerations
-
-### Script permissions
-- Scripts run with app's permissions
-- If app has calendar access, scripts can read calendar
-- No additional permission prompts per-script
-- User already trusts the app
-
-### Malicious scripts via sync
-- Desktop-edited scripts sync to phone and run
-- If attacker compromises desktop, they can run code on phone
-- Mitigation: trust model assumes user controls both
-- Future: script signing, review before execution
-
-### Resource limits
-- Scripts should timeout (prevent infinite loops)
-- Limit memory usage
-- Limit number of actions per execution
-- Rate-limit notifications
-
-## Testing and debugging
-
-### In-app test mode
-- "Test" button simulates hook with fake data
-- Shows what actions would execute
-- Displays any errors
-
-### Dry run
-- Execute script but don't actually perform actions
-- Log what would happen
-- Useful for complex scripts
-
-### Error log
-- Persistent log of script errors
-- Timestamp, script name, error message
-- Accessible from settings
-
-## Unanswered questions
-
-### Script storage format
-- YAML? JSON? Lua source?
-- Must be human-editable (for desktop editing)
-- Must be machine-parseable
-
-### Script execution environment
-- Kotlin/Android native interpreter?
-- Embedded Lua (LuaJ)?
-- Custom interpreter?
-
-### Sync granularity
-- Sync all scripts as blob (simple)
-- Sync individual scripts (complex, enables collaboration)
-
-### Version control
-- Keep history of script changes?
-- Undo/redo in editor?
-- Desktop git integration?
-
-## Implementation steps
-
-1. Define script data model (YAML schema)
-2. Implement script storage in phone config (#308)
-3. Build basic text editor UI
-4. Implement script parser/validator
-5. Implement action executors (notify, send, etc.)
-6. Hook scripts into rmail event system
-7. Add test mode
-8. Add template library
-9. (Future) Block editor
-10. (Future) FSM designer
+Scripts can send rmail messages to trigger actions on other devices.
+"Just write an rmail message" remains the universal interface for
+cross-device automation — and under the separation principle, it is
+the *only* way phone-side logic influences the desktop.
 
 ## Dependencies
 
-- Issue #308 (synced phone config) — scripts stored here
-- Daemon hook system — phone hooks mirror daemon hooks
-
-## Dependents
-
-- Issue #310 (periodics) — periodics are a type of script
-
-## Related concepts
-
-From the original mail:
-> "apps like your gallery or Facebook or games or calendar or whatever"
-
-Scripts are the glue between rmail and the phone ecosystem. The phone
-becomes programmable through rmail's event system.
-
-> "user designed networking for AI generated apps"
-
-The script system is infrastructure for personal automation. Each user's
-scripts are unique — generated or written for their specific needs.
+- Daemon hook system must be stable first.
+- No longer depends on #308 (synced phone config). Hook bindings live
+  only on the phone.
 
 ## Status
 
-Design phase.
-
-## Source
-
-Mail: ~/mail/inbox/Android — file processed and removed
+Design phase. **Low priority** — the cross-device utility is marginal,
+and the execution-environment questions are a hard prerequisite.

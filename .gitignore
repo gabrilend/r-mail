@@ -17,8 +17,12 @@ rmail-init
 .build-tmp/
 
 # Android SDK path (machine-specific)
-android/local.properties
+clients/android/local.properties
 # Android build outputs
-android/.gradle/
-android/app/build/
-android/build/
+clients/android/.gradle/
+clients/android/app/build/
+clients/android/build/
+
+# Generated docs (source of truth is docs/.templates/)
+docs/*.md
+!docs/looking-for-docs.md

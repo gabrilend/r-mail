@@ -5,49 +5,33 @@
 -- Configuration
 -- ============================================================
 
--- Resolve the mail directory from the command-line argument.
--- Usage: lua rmail.lua /path/to/mailbox
-local MAIL_ARG = arg and arg[1]
-if not MAIL_ARG or MAIL_ARG == "" then
-    io.stderr:write("usage: rmail.lua <mailbox-directory>\n")
+-- Resolve the mailbox directory and config file from the single command-line
+-- argument.  arg[1] can be either:
+--   • a directory        — the mailbox; config is found via a symlink inside
+--                          it or a ~/.config/rmail/config-<slug> file
+--   • a config file path — config loaded directly; mail = ... inside the
+--                          config specifies the mailbox
+-- The file form is preferred (the config is the source of truth) but the
+-- directory form remains so old service files keep working.
+local ARG = arg and arg[1]
+if not ARG or ARG == "" then
+    io.stderr:write("usage: rmail.lua <mailbox-directory | config-file>\n")
     io.stderr:write("  e.g. lua rmail.lua ~/mail\n")
+    io.stderr:write("       lua rmail.lua ~/.config/rmail/config-home-you-mail\n")
     os.exit(1)
 end
--- expand ~ to HOME
-MAIL_ARG = MAIL_ARG:gsub("^~", os.getenv("HOME") or "/tmp")
--- strip trailing slashes
-MAIL_ARG = MAIL_ARG:gsub("/+$", "")
+ARG = ARG:gsub("^~", os.getenv("HOME") or "/tmp")
+ARG = ARG:gsub("/+$", "")
 
--- Find config file:
--- 1. Symlink at <mailbox>/config (preferred — survives renames)
--- 2. Derived path: ~/.config/rmail/config-<path-with-dashes>
--- 3. Error out
-local function find_config_path(mail_dir)
-    -- try symlink/file in the mailbox directory
-    local symlink_path = mail_dir .. "/config"
-    local f = io.open(symlink_path, "r")
-    if f then f:close(); return symlink_path end
-    -- derive from mail directory path: /home/ritz/mail -> config-home-ritz-mail
-    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
-    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
-    f = io.open(derived, "r")
-    if f then f:close(); return derived end
-    return nil
+local function is_dir(path)
+    local f = io.open(path .. "/.", "r")
+    if f then f:close(); return true end
+    return false
 end
 
-local CONFIG_PATH = find_config_path(MAIL_ARG)
-if not CONFIG_PATH then
-    io.stderr:write("error: no config file found\n")
-    io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
-    local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
-    io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
-    io.stderr:write("  run scripts/install.sh to create one\n")
-    os.exit(1)
-end
-
-local function load_config()
-    local f = io.open(CONFIG_PATH, "r")
-    if not f then return {} end
+local function parse_config_file(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
     local cfg = {}
     for line in f:lines() do
         line = line:match("^%s*(.-)%s*$")
@@ -65,6 +49,49 @@ local function load_config()
     f:close()
     return cfg
 end
+
+local function find_config_path(mail_dir)
+    -- 1. Symlink/file at <mailbox>/config (survives renames)
+    local symlink_path = mail_dir .. "/config"
+    local f = io.open(symlink_path, "r")
+    if f then f:close(); return symlink_path end
+    -- 2. Derived path: ~/.config/rmail/config-<mail-dir-with-slashes-as-dashes>
+    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
+    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
+    f = io.open(derived, "r")
+    if f then f:close(); return derived end
+    return nil
+end
+
+local CONFIG_PATH, MAIL_ARG
+if is_dir(ARG) then
+    MAIL_ARG = ARG
+    CONFIG_PATH = find_config_path(MAIL_ARG)
+    if not CONFIG_PATH then
+        io.stderr:write("error: no config file found\n")
+        io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
+        local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
+        io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
+        io.stderr:write("  run scripts/install.sh to create one\n")
+        os.exit(1)
+    end
+else
+    -- Treat the argument as a config file path directly
+    CONFIG_PATH = ARG
+    local probe = parse_config_file(CONFIG_PATH)
+    if not probe then
+        io.stderr:write("error: cannot open config file: " .. CONFIG_PATH .. "\n")
+        os.exit(1)
+    end
+    if not probe.mail or probe.mail == "" then
+        io.stderr:write("error: config " .. CONFIG_PATH .. " has no `mail = ...` line\n")
+        io.stderr:write("  add the mailbox path, or launch with the mailbox dir as the argument\n")
+        os.exit(1)
+    end
+    MAIL_ARG = probe.mail:gsub("^~", os.getenv("HOME") or "/tmp"):gsub("/+$", "")
+end
+
+local function load_config() return parse_config_file(CONFIG_PATH) or {} end
 
 local config = load_config()
 
@@ -90,14 +117,24 @@ local cfg = {
     auto_port_forward = config.auto_port_forward == true,
 }
 
--- Hook scripts
+-- Hook scripts.  The config parser doesn't strip quotes, so a user who
+-- disabled a hook with `on_receive = ""` would end up with a two-char
+-- string that's still truthy; normalise empty-looking values to nil so
+-- `if hooks.on_receive then` correctly skips disabled hooks instead of
+-- running the quotes as a shell command.
+local function _hook_or_nil(v)
+    if v == nil or v == false then return nil end
+    if v == "" or v == '""' or v == "''" then return nil end
+    return v
+end
+
 local hooks = {
-    on_receive_raw = config.on_receive_raw,
-    on_receive     = config.on_receive,
-    on_package     = config.on_package,
-    on_send        = config.on_send,
-    on_delete      = config.on_delete,
-    on_update      = config.on_update,
+    on_receive_raw = _hook_or_nil(config.on_receive_raw),
+    on_receive     = _hook_or_nil(config.on_receive),
+    on_package     = _hook_or_nil(config.on_package),
+    on_send        = _hook_or_nil(config.on_send),
+    on_delete      = _hook_or_nil(config.on_delete),
+    on_update      = _hook_or_nil(config.on_update),
 }
 
 -- Aliases for frequently-used paths (reduces table lookups in hot paths)
@@ -117,6 +154,8 @@ local DEPS_REGISTRY = {
                  description = "AES-256-GCM encryption via rmail_crypto.so"},
     dkjson    = {min = "2.5",   max = "2.8",   default = "2.8",   required = true,
                  description = "JSON encoding/decoding"},
+    inotify   = {min = "1.0",   max = "1.0",   default = "1.0",   required = true,
+                 description = "outbox file-change watcher (Linux inotify)"},
     miniupnpc = {min = "2.0",   max = "2.3.3", default = "2.3.3", required = false,
                  description = "UPnP port forwarding (optional)"},
     libnatpmp = {min = "0.0.1", max = "latest", default = "latest", required = false,
@@ -202,13 +241,85 @@ local function file_exists(path)
     return false
 end
 
+local inotify = require("rmail_inotify")
+
+local function inotify_wrap(fd)
+    return setmetatable({}, {
+        __index = { getfd = function() return fd end }
+    })
+end
+
+local function start_dir_watcher(path)
+    local fd = inotify.init()
+    if not fd then error("inotify_init failed") end
+    local mask = inotify.IN_CLOSE_WRITE + inotify.IN_CREATE +
+                 inotify.IN_DELETE + inotify.IN_MOVED_TO
+    local wd = inotify.add_watch(fd, path, mask)
+    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. path) end
+    return fd, inotify_wrap(fd)
+end
+
+local function start_file_watcher(path)
+    local fd = inotify.init()
+    if not fd then error("inotify_init failed") end
+    local mask = inotify.IN_CLOSE_WRITE + inotify.IN_MODIFY
+    local wd = inotify.add_watch(fd, path, mask)
+    if not wd then inotify.close(fd); error("inotify_add_watch failed on " .. path) end
+    return fd, inotify_wrap(fd)
+end
+
+-- Per-session cache of directories we've already warned about,
+-- keyed by absolute "<parent-dir>/<subdir>" so the same stray dir
+-- doesn't log once per sync cycle.  Cleared on daemon restart,
+-- which is exactly often enough for a warning — if the dir is
+-- still there the user will see the warning again next startup.
+local _listed_dir_warned = {}
+
 local function list_files(dir)
+    -- `ls -1p` appends a trailing `/` to directory entries (POSIX).
+    -- Skip those + dotfiles so every returned name is a regular file
+    -- the caller can read.  Without this, a user-created subdirectory
+    -- in inbox/ whose name happened to match a consent/progress file
+    -- would make consent_cancelled() see a failed read and cancel the
+    -- transfer (#356), and a dir whose name matched an in-flight
+    -- message would block the delete-notify path in sync_inbox.
+    --
+    -- Directories found in a watched location are skipped *and*
+    -- logged once per session.  The message is tailored by dir: the
+    -- outbox case tells the user how to send the directory as an
+    -- attachment (the most likely intent), the inbox case tells them
+    -- rmail doesn't write directories there, and the attachments
+    -- case just notes we're ignoring it — user-organised subfolders
+    -- under attachments/ are legitimate.
     local files = {}
-    local handle = io.popen('ls -1 "' .. dir .. '" 2>/dev/null')
+    local handle = io.popen('ls -1p "' .. dir .. '" 2>/dev/null')
     if handle then
         for name in handle:lines() do
             if name:sub(1, 1) ~= '.' then
-                files[#files + 1] = name
+                if name:sub(-1) == '/' then
+                    local real = name:sub(1, -2)
+                    local key = dir .. "/" .. real
+                    if not _listed_dir_warned[key] then
+                        _listed_dir_warned[key] = true
+                        local abs = dir .. "/" .. real
+                        if OUTBOX and dir == OUTBOX then
+                            log("ignoring directory %s in outbox — rmail " ..
+                                "sends regular files.  To send the directory " ..
+                                "as an attachment, create a new outbox " ..
+                                "message with a line like:", abs)
+                            log("    attach: %s", abs)
+                        elseif INBOX and dir == INBOX then
+                            log("ignoring directory %s in inbox — rmail " ..
+                                "doesn't put directories there; your daemon " ..
+                                "didn't create this one", abs)
+                        else
+                            log("ignoring directory %s — rmail only " ..
+                                "processes regular files at this path", abs)
+                        end
+                    end
+                else
+                    files[#files + 1] = name
+                end
             end
         end
         handle:close()
@@ -218,6 +329,58 @@ end
 
 local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+-- ---- Progress-file helpers (#328) ---------------------------------------
+--
+-- Some files get rewritten per-chunk during attachment transfer — the
+-- receiver's consent/progress file and the sender's `transfers` file.
+-- That's a lot of writes to persistent storage for content that's pure
+-- status and loses its meaning on reboot anyway.  The fix is to keep a
+-- persistent *symlink* on the mailbox path and point it at a tmpfs
+-- target that absorbs the churn.
+--
+-- The symlink is the user-facing contract (deleting it cancels the
+-- transfer; editing the file to contain "deny" also cancels).  The
+-- target goes away on reboot; that's fine — we recreate it lazily on
+-- the next write.  Distinguishing "user deleted the file" from "tmpfs
+-- was wiped" matters for correctness, so code paths that interpret
+-- file absence use path_state() instead of plain file_exists().
+
+local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
+
+-- Return "live" (regular file or symlink with a live target), "dangling"
+-- (symlink whose target is gone — typically after a reboot wiped /tmp),
+-- or "absent" (nothing at this path).  `test -e` follows symlinks so it
+-- distinguishes live from dangling without any lfs dependency.
+local function path_state(path)
+    local h = io.popen(string.format(
+        "if [ -e %s ]; then echo live; " ..
+        "elif [ -L %s ]; then echo dangling; " ..
+        "else echo absent; fi",
+        shell_quote(path), shell_quote(path)))
+    if not h then return "absent" end
+    local out = h:read("*l") or "absent"
+    h:close()
+    return out
+end
+
+local function progress_tmpfs_path(name)
+    return TMPFS_PROGRESS_DIR .. "/" .. name
+end
+
+-- Write ephemeral status content to a symlink-backed tmpfs path.
+-- Ensures /tmp/rmail-progress/ exists, writes the content to the tmpfs
+-- target, and makes sure link_path is a symlink pointing there.  ln -sf
+-- replaces an existing regular file or stale symlink in place, so this
+-- call is safe whether link_path was previously a persistent file (the
+-- initial consent prompt), a live symlink (mid-transfer), or a dangling
+-- symlink (after a reboot wiped /tmp).
+local function write_progress_file(link_path, tmpfs_name, content)
+    local target = progress_tmpfs_path(tmpfs_name)
+    os.execute("mkdir -p " .. shell_quote(TMPFS_PROGRESS_DIR))
+    write_file(target, content)
+    os.execute("ln -sf " .. shell_quote(target) .. " " .. shell_quote(link_path))
 end
 
 -- {{{ expand_tilde
@@ -256,9 +419,67 @@ local function tcp_for(addr)
     if is_ipv6(addr) then return socket.tcp6() else return socket.tcp() end
 end
 
--- Get the best address for a contact: prefer IPv6 if available, fall back to IPv4.
+-- Get the best single address for a contact.
+--
+-- DEPRECATED for new code: prefer `contact_hosts(contact)` and loop over
+-- the returned list (so every configured address gets its turn on
+-- connection failure — see #347 Phase 2).  This single-address helper
+-- exists only for callers that need "just show me one address" (logs,
+-- UI summaries, one-shot probes).  The choice here matches the first
+-- entry in contact_hosts().
 local function contact_addr(contact)
     return contact.ipv6 or contact.ip
+end
+
+-- ---- Hostname support for contact.ip ------------------------------------
+--
+-- Contacts can set `.ip = hostname.example.com` instead of a raw IP.  Outbound
+-- TCP already resolves hostnames via luasocket.  The inbound-comparison paths
+-- (LAN optimisation, connection-timeout fallback, LAN discovery) do literal
+-- string equality against a raw IP, so we need to resolve hostnames before
+-- comparing.  Cache the resolution briefly — dynamic-DNS TTLs are measured
+-- in seconds-to-minutes and we don't want to hit the resolver on every sync
+-- cycle.
+
+local dns_cache = {}
+local DNS_TTL_SEC = 60
+
+-- True if the address is a bare IPv4 dotted quad.
+local function is_ipv4(addr)
+    if not addr then return false end
+    local a, b, c, d = addr:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return false end
+    for _, part in ipairs({a, b, c, d}) do
+        if tonumber(part) > 255 then return false end
+    end
+    return true
+end
+
+-- True if the address looks like a hostname (anything that isn't a raw IP).
+local function is_hostname(addr)
+    return addr ~= nil and addr ~= "" and not is_ipv4(addr) and not is_ipv6(addr)
+end
+
+-- Resolve a contact address to a raw IP string, caching for DNS_TTL_SEC.
+-- IPv4/IPv6 literals are returned unchanged.  Hostnames that fail to resolve
+-- return nil (caller treats that as "no match").
+local function resolve_contact_host(addr)
+    if not is_hostname(addr) then return addr end
+    local now = os.time()
+    local entry = dns_cache[addr]
+    if entry and now - entry.t < DNS_TTL_SEC then
+        return entry.ip
+    end
+    local ip, err = socket.dns.toip(addr)
+    if ip then
+        dns_cache[addr] = {ip = ip, t = now}
+        return ip
+    end
+    -- log() isn't in scope this early in the file; stderr is fine for a
+    -- rare, recoverable condition.
+    io.stderr:write(string.format(
+        "DNS lookup failed for '%s': %s\n", addr, tostring(err)))
+    return nil
 end
 
 local function sanitize_filename(name)
@@ -304,6 +525,37 @@ local function log(fmt, ...)
     io.stderr:flush()
 end
 
+-- ---- Per-cycle reachability tracking (#324) -----------------------------
+--
+-- Without this, one offline contact produces N separate "failed to notify
+-- X" lines per sync cycle (one per queued op).  Each op site now reports
+-- its outcome here instead; run_sync_cycle flushes a single
+-- "unreachable contacts: a, b, c" line at the end.  A contact is called
+-- unreachable only if every op for them failed — one success anywhere in
+-- the cycle keeps them off the summary.
+
+local _cycle_contact_stats = {}
+
+local function note_contact_result(contact, ok)
+    if not contact or contact == "" then return end
+    local s = _cycle_contact_stats[contact]
+    if not s then s = {ok = 0, fail = 0}; _cycle_contact_stats[contact] = s end
+    if ok then s.ok = s.ok + 1 else s.fail = s.fail + 1 end
+end
+
+local function flush_unreachable_summary()
+    local unreachable = {}
+    for name, s in pairs(_cycle_contact_stats) do
+        if s.fail > 0 and s.ok == 0 then
+            unreachable[#unreachable + 1] = name
+        end
+    end
+    _cycle_contact_stats = {}
+    if #unreachable == 0 then return end
+    table.sort(unreachable)
+    log("unreachable contacts this cycle: %s", table.concat(unreachable, ", "))
+end
+
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
@@ -336,21 +588,315 @@ local function load_contacts()
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         line = line:match("^%s*(.-)%s*$")
         if line ~= "" and not line:match("^[/#]") then
-            local name, field, value = line:match("^([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+            -- Try indexed field first: name.field[N] = value
+            local name, field, idx, value =
+                line:match("^([%w_%-]+)%.([%w_%-]+)%[(%d+)%]%s*=%s*(.+)$")
+            if not name then
+                name, field, value =
+                    line:match("^([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+                idx = nil
+            end
             if name and field and value then
                 value = value:match("^%s*(.-)%s*$")
                 local unquoted = value:match('^"(.*)"$')
                 if unquoted then value = unquoted end
                 if not contacts[name] then contacts[name] = {} end
-                contacts[name][field] = value
+                local c = contacts[name]
+                if idx then
+                    idx = tonumber(idx)
+                    if field == "ip" then
+                        if not c._indexed_ips then c._indexed_ips = {} end
+                        c._indexed_ips[idx] = value
+                    elseif field == "port" then
+                        if not c._indexed_ports then c._indexed_ports = {} end
+                        c._indexed_ports[idx] = value
+                    end
+                elseif field == "ip" then
+                    if not c.ip then
+                        c.ip = value
+                    else
+                        -- Additional unindexed ip lines: auto-index them
+                        -- for backward compat with the old multi-line format.
+                        if not c._indexed_ips then c._indexed_ips = {} end
+                        local max_i = 0
+                        for n in pairs(c._indexed_ips) do
+                            if n > max_i then max_i = n end
+                        end
+                        c._indexed_ips[max_i + 1] = value
+                        c._auto_indexed = true
+                    end
+                else
+                    c[field] = value
+                end
             else
-                -- bare name line: create empty entry as a placeholder
                 local bare = line:match("^([%w_%-]+)$")
                 if bare and not contacts[bare] then contacts[bare] = {} end
             end
         end
     end
+    -- Fold legacy .ipv6 into the address list.  The field stays set so
+    -- back-compat readers (contact_addr) keep working.
+    for _, c in pairs(contacts) do
+        if c.ipv6 then
+            if not c.ip then
+                c.ip = c.ipv6
+            else
+                local dominated = c.ip == c.ipv6
+                if not dominated and c._indexed_ips then
+                    for _, v in pairs(c._indexed_ips) do
+                        if v == c.ipv6 then dominated = true; break end
+                    end
+                end
+                if not dominated then
+                    c._indexed_ips = c._indexed_ips or {}
+                    local max_i = 0
+                    for n in pairs(c._indexed_ips) do
+                        if n > max_i then max_i = n end
+                    end
+                    c._indexed_ips[max_i + 1] = c.ipv6
+                end
+            end
+        end
+    end
+    -- Build endpoints for each contact.
+    --
+    -- Order: default (unindexed ip/port) first, then indexed entries.
+    -- The default is pinned and immune to promotion reordering.
+    -- Indexed entries (ip[N]/port[N]) are subject to promotion.
+    -- A missing port[N] inherits the default port; a missing ip[N]
+    -- (when port[N] exists) inherits the default ip.
+    for cname, c in pairs(contacts) do
+        local default_ip = c.ip
+        local default_port = tonumber(c.port)
+        local idx_ips = c._indexed_ips or {}
+        local idx_ports = c._indexed_ports or {}
+
+        local max_idx = 0
+        for n in pairs(idx_ips) do if n > max_idx then max_idx = n end end
+        for n in pairs(idx_ports) do if n > max_idx then max_idx = n end end
+
+        c.endpoints = {}
+        c.ips = {}
+
+        -- Default endpoint (pinned at front, never promoted)
+        if default_ip then
+            c.endpoints[#c.endpoints + 1] = {
+                addr = default_ip, port = default_port,
+                is_default = true, contact_name = cname,
+            }
+            c.ips[#c.ips + 1] = default_ip
+        end
+
+        -- Indexed endpoints
+        for n = 1, max_idx do
+            local ip = idx_ips[n]
+            local port = tonumber(idx_ports[n]) or default_port
+            if not ip and idx_ports[n] then
+                ip = default_ip
+            end
+            if ip then
+                c.endpoints[#c.endpoints + 1] = {
+                    addr = ip, port = port, is_default = false,
+                    index = n, contact_name = cname,
+                    raw = c._auto_indexed and ip or nil,
+                }
+                c.ips[#c.ips + 1] = ip
+            elseif idx_ports[n] then
+                log("warning: %s.port[%d] has no matching ip[%d] and no default %s.ip — skipped",
+                    cname, n, n, cname)
+            end
+        end
+
+        for _, ep in ipairs(c.endpoints) do
+            if not ep.port then
+                if ep.is_default then
+                    log("warning: %s has no port — set %s.port", cname, cname)
+                else
+                    log("warning: %s.ip[%d] has no port — set %s.port or %s.port[%d]",
+                        cname, ep.index, cname, cname, ep.index)
+                end
+            end
+        end
+
+        if c.endpoints[1] then c.ip = c.endpoints[1].addr end
+
+        c._indexed_ips = nil
+        c._indexed_ports = nil
+        c._auto_indexed = nil
+    end
     return contacts
+end
+
+-- All addresses for a contact, in preferred order.  Returns at least one
+-- entry if the contact has any address set; empty list otherwise.  Meant
+-- for Phase 2 of #347 (retry-on-failure loops); callers that only need a
+-- single address should keep using contact_addr().
+local function contact_hosts(contact)
+    if type(contact.ips) == "table" and #contact.ips > 0 then
+        return contact.ips
+    end
+    local out = {}
+    if contact.ipv6 then out[#out + 1] = contact.ipv6 end
+    if contact.ip and contact.ip ~= contact.ipv6 then
+        out[#out + 1] = contact.ip
+    end
+    return out
+end
+
+-- Return a list of { addr, port, is_default, index, contact_name } for
+-- a contact, in preferred order.  Default (unindexed) endpoint comes
+-- first and is immune to promotion; indexed endpoints follow and are
+-- subject to auto-reordering on fallback success.
+local function contact_endpoints(contact)
+    if type(contact.endpoints) == "table" and #contact.endpoints > 0 then
+        return contact.endpoints
+    end
+    -- Fallback for call paths that built a contact ad-hoc without going
+    -- through load_contacts (mostly tests and legacy migration code).
+    local out = {}
+    local default_port = tonumber(contact.port)
+    local hosts = contact_hosts(contact)
+    for i, h in ipairs(hosts) do
+        out[i] = { addr = h, port = default_port, is_default = (i == 1) }
+    end
+    return out
+end
+
+-- Promote a non-first unindexed ip line to the top of its contact's
+-- block on disk (backward compat for old-style multi-line configs).
+-- Only reorders bare `name.ip = ...` lines; indexed ip[N] lines are
+-- handled by promote_contact_index instead.
+local function promote_contact_address(name, winning_addr)
+    if not name or not winning_addr or winning_addr == "" then return end
+    local text = read_file(CONTACTS)
+    if not text then return end
+
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local ip_positions, ip_entries = {}, {}
+    for i, line in ipairs(lines) do
+        local lname, lfield, lvalue = line:match("^%s*([%w_%-]+)%.([%w_%-]+)%s*=%s*(.+)$")
+        if lname == name and lfield == "ip" and lvalue then
+            local val = lvalue:match("^%s*(.-)%s*$")
+            local unquoted = val:match('^"(.*)"$')
+            if unquoted then val = unquoted end
+            ip_positions[#ip_positions + 1] = i
+            ip_entries[#ip_entries + 1] = { line = line, value = val }
+        end
+    end
+
+    if #ip_entries < 2 then return end
+
+    local winner_idx
+    for k, e in ipairs(ip_entries) do
+        if e.value == winning_addr then winner_idx = k; break end
+    end
+    if not winner_idx or winner_idx == 1 then return end
+
+    local winner = table.remove(ip_entries, winner_idx)
+    table.insert(ip_entries, 1, winner)
+
+    for k, pos in ipairs(ip_positions) do
+        lines[pos] = ip_entries[k].line
+    end
+
+    local new_text = table.concat(lines, "\n")
+    if new_text ~= text then
+        write_file(CONTACTS, new_text)
+        log("promoted %s for %s", winning_addr, name)
+    end
+end
+
+-- Promote an indexed endpoint to the first position.  Rotates both
+-- ip[N] and port[N] values so the winning (ip, port) pair moves to
+-- index [1].  Unindexed (default) ip/port lines are never touched.
+local function promote_contact_index(name, winning_index)
+    if not name or not winning_index or winning_index < 1 then return end
+    local text = read_file(CONTACTS)
+    if not text then return end
+
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+
+    local ip_by_idx = {}
+    local port_by_idx = {}
+    local first_line = nil
+    local remove_set = {}
+
+    for i, line in ipairs(lines) do
+        local lname, lfield, lidx =
+            line:match("^%s*([%w_%-]+)%.([%w_%-]+)%[(%d+)%]%s*=")
+        if lname == name and lidx then
+            lidx = tonumber(lidx)
+            local lvalue = line:match("=%s*(.+)$")
+            if lvalue then lvalue = lvalue:match("^%s*(.-)%s*$") end
+            if lfield == "ip" then
+                ip_by_idx[lidx] = lvalue
+                if not first_line then first_line = i end
+                remove_set[i] = true
+            elseif lfield == "port" then
+                port_by_idx[lidx] = lvalue
+                if not first_line then first_line = i end
+                remove_set[i] = true
+            end
+        end
+    end
+
+    local indices = {}
+    for idx in pairs(ip_by_idx) do indices[#indices + 1] = idx end
+    table.sort(indices)
+    if #indices < 2 then return end
+    if not ip_by_idx[winning_index] then return end
+    if winning_index == indices[1] then return end
+
+    -- Build (ip, port) pairs in current index order, rotate winner to front
+    local pairs_list = {}
+    for _, idx in ipairs(indices) do
+        pairs_list[#pairs_list + 1] = { ip = ip_by_idx[idx], port = port_by_idx[idx] }
+    end
+    local winner_pos
+    for k, idx in ipairs(indices) do
+        if idx == winning_index then winner_pos = k; break end
+    end
+    local winner = table.remove(pairs_list, winner_pos)
+    table.insert(pairs_list, 1, winner)
+
+    -- Remove old indexed lines (reverse order to preserve positions)
+    local remove_list = {}
+    for i in pairs(remove_set) do remove_list[#remove_list + 1] = i end
+    table.sort(remove_list)
+    for k = #remove_list, 1, -1 do
+        table.remove(lines, remove_list[k])
+    end
+
+    -- Calculate insertion point
+    local insert_at = first_line
+    for _, ri in ipairs(remove_list) do
+        if ri < first_line then insert_at = insert_at - 1 end
+    end
+
+    -- Rebuild lines with contiguous indices starting at 1
+    local new_lines = {}
+    for k, pair in ipairs(pairs_list) do
+        new_lines[#new_lines + 1] = name .. ".ip[" .. k .. "] = " .. pair.ip
+        if pair.port then
+            new_lines[#new_lines + 1] = name .. ".port[" .. k .. "] = " .. pair.port
+        end
+    end
+    for k = #new_lines, 1, -1 do
+        table.insert(lines, insert_at, new_lines[k])
+    end
+
+    local new_text = table.concat(lines, "\n")
+    if new_text ~= text then
+        write_file(CONTACTS, new_text)
+        log("promoted [%d] to first position for %s", winning_index, name)
+    end
 end
 
 -- write or update specific fields for one contact in the contacts file,
@@ -394,7 +940,11 @@ local function write_contact_fields(name, fields)
     write_file(CONTACTS, table.concat(lines, "\n") .. "\n")
 end
 
--- align the = signs within each contact's block; run once at startup
+-- Normalise the contacts file:
+--   1. Scattered lines for the same contact are grouped together at the
+--      position of that contact's first line (#347 auto-grouping).
+--   2. The = signs within each grouped block are aligned.
+-- Runs at startup and whenever the contacts file changes.
 local function align_contacts()
     local text = read_file(CONTACTS)
     if not text then return end
@@ -404,24 +954,64 @@ local function align_contacts()
         lines[#lines + 1] = line
     end
 
+    -- Pass 1: discover which contact each line belongs to and gather
+    -- every line's index per contact, in file order.  first_index[n] is
+    -- where we'll emit all of contact n's lines together.
+    local line_owner = {}     -- line index -> contact name (nil if not a contact line)
+    local per_contact = {}    -- name -> list of line indices in file order
+    local first_index = {}    -- name -> earliest index for that contact
+    for i, line in ipairs(lines) do
+        local n = line:match("^([%w_%-]+)%.")
+        if n then
+            line_owner[i] = n
+            if not per_contact[n] then
+                per_contact[n] = {}
+                first_index[n] = i
+            end
+            per_contact[n][#per_contact[n] + 1] = i
+        end
+    end
+
+    -- Pass 2: emit.  Non-contact lines (comments, blanks, section
+    -- headers) stay at their original position.  The first time we see
+    -- a contact's first line, we emit every one of that contact's
+    -- lines at that point and mark them so their original later
+    -- positions produce nothing.
+    local emitted = {}
+    local grouped = {}
+    for i, line in ipairs(lines) do
+        local n = line_owner[i]
+        if n then
+            if i == first_index[n] then
+                for _, idx in ipairs(per_contact[n]) do
+                    grouped[#grouped + 1] = lines[idx]
+                    emitted[idx] = true
+                end
+            end
+            -- else: already emitted with its first-index sibling; skip
+        else
+            grouped[#grouped + 1] = line
+        end
+    end
+
+    -- Pass 3: align = signs within each contiguous contact block.
+    -- Because Pass 2 grouped everything, blocks are now contiguous by
+    -- construction.
     local result = {}
     local i = 1
-    while i <= #lines do
-        local name = lines[i]:match("^([%w_%-]+)%.")
+    while i <= #grouped do
+        local name = grouped[i]:match("^([%w_%-]+)%.")
         if name then
-            -- collect all consecutive lines for this contact
             local block, j = {}, i
-            while j <= #lines and lines[j]:match("^([%w_%-]+)%.") == name do
-                block[#block + 1] = lines[j]
+            while j <= #grouped and grouped[j]:match("^([%w_%-]+)%.") == name do
+                block[#block + 1] = grouped[j]
                 j = j + 1
             end
-            -- find max key length (everything before the =)
             local max_pre = 0
             for _, bline in ipairs(block) do
                 local pre = bline:match("^(.-)%s*=")
                 if pre then max_pre = math.max(max_pre, #pre) end
             end
-            -- reformat with aligned =
             for _, bline in ipairs(block) do
                 local pre, val = bline:match("^(.-)%s*=%s*(.+)$")
                 if pre and val then
@@ -432,7 +1022,7 @@ local function align_contacts()
             end
             i = j
         else
-            result[#result + 1] = lines[i]
+            result[#result + 1] = grouped[i]
             i = i + 1
         end
     end
@@ -449,6 +1039,210 @@ end
 
 local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
+end
+
+-- ---- PII helpers (#348) -------------------------------------------------
+--
+-- Several state files key their entries by contact name (nat warnings,
+-- pending address notifications).  Persisting the name in plaintext is
+-- a PII leak: anyone with read access to .state/ learns who the user
+-- talks to.  Hashing the name keeps the lookup working (same input
+-- → same key) while hiding the identity.
+--
+-- The hash isn't cryptographically secret by itself — an attacker with
+-- the contacts file can just rehash every contact to reverse the map.
+-- The threat model is "attacker has .state/ but not contacts" (backups
+-- split across machines, forensic snapshots, etc.); for that case,
+-- hashing is enough.  A stronger defence would store a per-install
+-- random salt in STATE, but that adds moving parts for a modest gain;
+-- deferred.
+
+local function hex_sha256(data)
+    local bytes = crypto.sha256(data)
+    local hex = ""
+    for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
+    return hex
+end
+
+local function hash_contact_name(name)
+    return hex_sha256("rmail:contact:" .. name)
+end
+
+-- In-place migration of a state table whose keys were plaintext contact
+-- names pre-#348.  New keys are 64-character hex (sha256 digest); anything
+-- else is assumed legacy and rehashed.  Safe to call on already-hashed
+-- state — it's a no-op in that case.
+local function migrate_hashed_state(state)
+    if type(state) ~= "table" then return {} end
+    local migrated = {}
+    for k, v in pairs(state) do
+        if type(k) == "string" and #k == 64 and k:match("^%x+$") then
+            migrated[k] = v
+        elseif type(k) == "string" then
+            migrated[hash_contact_name(k)] = v
+        end
+    end
+    return migrated
+end
+
+local function _is_hash(s)
+    return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
+end
+
+-- chunks-outgoing.json stores a `.to` field per transfer naming the
+-- recipient contact.  Persist it as a hash, but keep the name in memory
+-- so existing consumers (contacts[transfer.to], logs, note_contact_result)
+-- don't have to change.  These wrappers do the translation at the disk
+-- boundary: load resolves hash→name using the current contacts file;
+-- save deep-copies and hashes the .to field of the copy.
+--
+-- A transfer whose .to hash can't be resolved (contact renamed/deleted
+-- since save) keeps the hash as its .to value; downstream code already
+-- handles "unknown contact" by skipping/logging that transfer.
+-- The wrapper body uses raw read_file / write_file rather than
+-- load_state / save_state so a global replace_all of
+-- `load_chunks_outgoing()` → `load_chunks_outgoing()`
+-- (and matching save) doesn't accidentally rewrite the implementation
+-- into calling itself.
+local _CHUNKS_PATH = "chunks-outgoing.json"
+local function load_chunks_outgoing()
+    local text = read_file(STATE .. "/" .. _CHUNKS_PATH)
+    local state = (text and text ~= "") and json.decode(text) or {}
+    if type(state) ~= "table" then return {} end
+    local contacts = load_contacts()
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
+    for _, transfer in pairs(state) do
+        if _is_hash(transfer.to) and hash_to_name[transfer.to] then
+            transfer.to = hash_to_name[transfer.to]
+        end
+    end
+    return state
+end
+
+local function save_chunks_outgoing(state)
+    local snapshot = {}
+    for k, v in pairs(state) do
+        local copy = {}
+        for fk, fv in pairs(v) do
+            -- compressed_path was dropped earlier in #348 (derived via
+            -- zip_path_for(zip_id)); legacy entries loaded from disk may
+            -- still have the field.  Don't propagate it back out.
+            if fk ~= "compressed_path" then copy[fk] = fv end
+        end
+        if type(copy.to) == "string" and not _is_hash(copy.to) then
+            copy.to = hash_contact_name(copy.to)
+        end
+        snapshot[k] = copy
+    end
+    write_file(STATE .. "/" .. _CHUNKS_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
+end
+
+-- consent-pending.json: receiver-side attachment-consent tracking.  Each
+-- entry carries a `.from` (the sender's contact name) that we hash on
+-- disk and resolve to a name on load.  Same wrapper pattern as chunks-
+-- outgoing; same behaviour when a stored hash can't be resolved.
+local _CPENDING_PATH = "consent-pending.json"
+
+local function load_consent_pending()
+    local text = read_file(STATE .. "/" .. _CPENDING_PATH)
+    local state = (text and text ~= "") and json.decode(text) or {}
+    if type(state) ~= "table" then return {} end
+    local contacts = load_contacts()
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
+    for _, entry in pairs(state) do
+        local f = entry["from"]
+        if _is_hash(f) and hash_to_name[f] then
+            entry["from"] = hash_to_name[f]
+        end
+    end
+    return state
+end
+
+local function save_consent_pending(state)
+    local snapshot = {}
+    for k, v in pairs(state) do
+        local copy = {}
+        for fk, fv in pairs(v) do copy[fk] = fv end
+        if type(copy["from"]) == "string" and not _is_hash(copy["from"]) then
+            copy["from"] = hash_contact_name(copy["from"])
+        end
+        snapshot[k] = copy
+    end
+    write_file(STATE .. "/" .. _CPENDING_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
+end
+
+-- consent-responses.json: queued accept/decline replies to other contacts.
+-- Array of entries, each with a `.to` (recipient contact name).
+local _CRESP_PATH = "consent-responses.json"
+
+local function load_consent_responses()
+    local text = read_file(STATE .. "/" .. _CRESP_PATH)
+    local state = (text and text ~= "") and json.decode(text) or {}
+    if type(state) ~= "table" then return {} end
+    local contacts = load_contacts()
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
+    for _, entry in ipairs(state) do
+        if _is_hash(entry.to) and hash_to_name[entry.to] then
+            entry.to = hash_to_name[entry.to]
+        end
+    end
+    return state
+end
+
+local function save_consent_responses(state)
+    local snapshot = {}
+    for i, v in ipairs(state) do
+        local copy = {}
+        for fk, fv in pairs(v) do copy[fk] = fv end
+        if type(copy.to) == "string" and not _is_hash(copy.to) then
+            copy.to = hash_contact_name(copy.to)
+        end
+        snapshot[i] = copy
+    end
+    write_file(STATE .. "/" .. _CRESP_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
+end
+
+-- outbox.json carries per-recipient tokens in meta.recipients[name].token
+-- pre-#348.  The token is a literal duplicate of the contact's token from
+-- the contacts file and is the shared secret for that peer — storing it
+-- in .state/ meant a copy of every shared secret leaked into a second
+-- file.  save_outbox_state strips the .token field from every recipient
+-- record on write; new writes already stopped adding it.  Legacy tokens
+-- in loaded state get scrubbed on the next save.
+local _OUTBOX_PATH = "outbox.json"
+
+local function save_outbox_state(state)
+    local snapshot = {}
+    for fname, meta in pairs(state) do
+        local meta_copy = {}
+        for k, v in pairs(meta) do meta_copy[k] = v end
+        if type(meta.recipients) == "table" then
+            local rcopy = {}
+            for rname, rmeta in pairs(meta.recipients) do
+                local rc = {}
+                for rk, rv in pairs(rmeta) do
+                    if rk ~= "token" then rc[rk] = rv end
+                end
+                rcopy[rname] = rc
+            end
+            meta_copy.recipients = rcopy
+        end
+        snapshot[fname] = meta_copy
+    end
+    write_file(STATE .. "/" .. _OUTBOX_PATH,
+        json.encode(snapshot, {indent = true}) .. "\n")
 end
 
 -- ============================================================
@@ -602,8 +1396,9 @@ function nat.create_mapping(port)
 end
 
 function nat.security_check(my_name)
-    local warned = load_state("nat_security_warned.json")
-    if type(warned) ~= "table" then warned = {} end
+    -- Warned contacts are tracked by hashed name (#348) so the .state
+    -- file doesn't leak the contact list in plaintext.
+    local warned = migrate_hashed_state(load_state("nat_security_warned.json"))
 
     local vulnerabilities = {}
 
@@ -628,7 +1423,7 @@ function nat.security_check(my_name)
             local contacts = load_contacts()
             local recipients = {}
             for name, c in pairs(contacts) do
-                if name ~= my_name and not c.own and warned[name] then
+                if name ~= my_name and not c.own and warned[hash_contact_name(name)] then
                     recipients[#recipients + 1] = name
                 end
             end
@@ -665,7 +1460,7 @@ function nat.security_check(my_name)
     local contacts = load_contacts()
     local recipients = {}
     for name, c in pairs(contacts) do
-        if name ~= my_name and not c.own and not warned[name] then
+        if name ~= my_name and not c.own and not warned[hash_contact_name(name)] then
             recipients[#recipients + 1] = name
         end
     end
@@ -686,10 +1481,12 @@ function nat.security_check(my_name)
             "This is an automated message from rmail's security check."
         write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
         log("security warning sent to %d new contact(s)", #recipients)
-        -- record that these contacts were warned
-        local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+        -- Record presence only (#348).  Pre-#348 stored a timestamp value
+        -- here, but it was never read back — the lookup was `warned[name]`
+        -- (truthy check) everywhere.  Using `true` instead of a timestamp
+        -- drops one more piece of when-did-they-talk metadata from .state.
         for _, name in ipairs(recipients) do
-            warned[name] = timestamp
+            warned[hash_contact_name(name)] = true
         end
         save_state("nat_security_warned.json", warned)
     end
@@ -798,12 +1595,50 @@ local function handle_deliver_message(data, sender)
     if not body then body = "" end
     local filename = sanitize_filename(subject)
     local target = INBOX .. "/" .. filename
+    -- #349: auto-body deliveries carry a stub body generated by the
+    -- sender, but the sender doesn't know where OUR attachments live.
+    -- Overwrite with a stub that names our own paths.attachments so
+    -- the user can go straight to the file.
+    if data.auto_body then
+        body = string.format(
+            "[body too large for a single message — delivered as attachment at %s/%s]",
+            paths.attachments, filename)
+    end
     if file_exists(target) then
         local existing = inbox_state[filename]
         if existing and existing["from"] ~= sender then
+            -- Different sender with the same subject: disambiguate by
+            -- tagging the filename with the sender.
             filename = sanitize_filename(subject .. "-from-" .. sender)
             target = INBOX .. "/" .. filename
+        elseif existing and existing["from"] == sender and
+               existing.message_id ~= message_id then
+            -- #315: same sender, same sanitised subject, different
+            -- message.  The earlier deliver-attachments-to-existing
+            -- check above fires only when message_ids match, so this
+            -- branch is truly a collision between two separate
+            -- messages.  Disambiguate by appending a short suffix
+            -- derived from the new message_id; the recipient sees
+            -- both messages as distinct files.
+            local suffix = (message_id or ""):gsub("[^%w]", ""):sub(1, 6)
+            if suffix == "" then suffix = "2" end
+            filename = sanitize_filename(subject .. "-" .. suffix)
+            target = INBOX .. "/" .. filename
+            -- Loop guard: if this filename is *also* taken somehow
+            -- (extremely unlikely — 6 hex chars of message_id), keep
+            -- appending numeric suffixes until we find a free slot.
+            local n = 2
+            while file_exists(target) do
+                filename = sanitize_filename(subject .. "-" .. suffix .. "-" .. n)
+                target = INBOX .. "/" .. filename
+                n = n + 1
+                if n > 99 then break end
+            end
         end
+        -- The remaining case (existing AND same sender AND same
+        -- message_id) is already handled by the early return above
+        -- — that's the "more attachments being delivered for the same
+        -- message" path.  We shouldn't reach here for that case.
     end
 
     if hooks.on_receive_raw then
@@ -843,6 +1678,16 @@ local function handle_deliver_update(data, sender)
         if meta.message_id == message_id and meta["from"] == sender then
             local target = INBOX .. "/" .. filename
 
+            -- If the user already deleted the inbox file on disk but our
+            -- sync_inbox hasn't run yet to reconcile state, we must not
+            -- recreate it here — that would silently undo the user's
+            -- delete.  Return 404 so the sender treats this as "they
+            -- deleted" and cleans up its own state.  See #323 (race
+            -- between sender update and receiver local delete).
+            if not file_exists(target) then
+                return 404, {error = "message not found"}
+            end
+
             if hooks.on_update then
                 local transformed = run_hook(hooks.on_update, sender, target, new_body)
                 if transformed and transformed ~= "" then new_body = transformed end
@@ -858,23 +1703,30 @@ local function handle_deliver_update(data, sender)
     return 404, {error = "message not found"}
 end
 
-local function delete_inbox_attachments(meta)
-    if not meta.attachments then return end
-    for aname, ameta in pairs(meta.attachments) do
-        if ameta.path and file_exists(ameta.path) then
-            os.remove(ameta.path)
-            log("deleted attachment: %s", aname)
-        end
-    end
-end
+-- #355: we intentionally do NOT cascade inbox-message deletions into
+-- attachment-file deletions.  Attachments are files the user owns —
+-- deleting a message shouldn't vapourise its PDF or photo.  The
+-- previous helper (delete_inbox_attachments) was removed along with
+-- its four call sites.  If disk cleanup is ever needed we can add a
+-- separate user-invoked tool, but it shouldn't be automatic on
+-- message deletion.
 
 -- delete a zip if no other active transfer still references it
-local function release_zip(chunks, zip_id, compressed_path)
+-- Zip files for outbound attachments always live at
+-- paths.pending .. "/rmail-<zip_id>.zip" (see compress_attachment).  Pre-#348
+-- the path was also cached in chunks-outgoing.json as transfer.compressed_path;
+-- dropped there to reduce state-file PII.  Compute it on the fly instead.
+local function zip_path_for(zip_id)
+    return paths.pending .. "/rmail-" .. zip_id .. ".zip"
+end
+
+local function release_zip(chunks, zip_id)
     for _, t in pairs(chunks) do
         if t.zip_id == zip_id then return end  -- still in use
     end
-    if compressed_path and file_exists(compressed_path) then
-        os.remove(compressed_path)
+    local zip_path = zip_path_for(zip_id)
+    if file_exists(zip_path) then
+        os.remove(zip_path)
         log("deleted shared zip %s (no more recipients)", zip_id)
     end
 end
@@ -985,11 +1837,12 @@ local function handle_delete(data, sender)
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
             end
-            delete_inbox_attachments(meta)
+            -- #355: attachments in paths.attachments intentionally left
+            -- alone; they're user-owned files.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             -- cancel any pending consent or in-progress chunks from this sender for this message
-            local cpending = load_state("consent-pending.json")
+            local cpending = load_consent_pending()
             local cp_changed = false
             for att_id, entry in pairs(cpending) do
                 if entry["from"] == sender and entry.message_id == message_id then
@@ -1002,7 +1855,7 @@ local function handle_delete(data, sender)
                     log("cancelled consent for %s from %s (sender deleted)", att_id, sender)
                 end
             end
-            if cp_changed then save_state("consent-pending.json", cpending) end
+            if cp_changed then save_consent_pending(cpending) end
             return 200, {ok = true}
         end
     end
@@ -1020,19 +1873,19 @@ local function handle_delete(data, sender)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_state("outbox.json", outbox_state)
+                    save_outbox_state(outbox_state)
                     -- cancel any outgoing chunk transfers to this recipient for this message
-                    local att_state = load_state("chunks-outgoing.json")
+                    local att_state = load_chunks_outgoing()
                     local att_changed = false
                     for att_id, transfer in pairs(att_state) do
                         if transfer.to == sender and transfer.message_id == message_id then
                             att_state[att_id] = nil
-                            release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                            release_zip(att_state, transfer.zip_id)
                             att_changed = true
                             log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
                         end
                     end
-                    if att_changed then save_state("chunks-outgoing.json", att_state) end
+                    if att_changed then save_chunks_outgoing(att_state) end
                     return 200, {ok = true}
                 end
             end
@@ -1051,14 +1904,33 @@ local function handle_update_address(data, sender)
         return 404, {error = "sender not in contacts"}
     end
 
-    local fields = {ip = new_ip}
+    -- If the existing .ip is a DNS hostname, don't overwrite it — the whole
+    -- point of using a hostname is that DNS re-resolution handles IP changes.
+    -- We still accept a port change, and still invalidate the cached lookup
+    -- so the next comparison picks up the new IP immediately.
+    local preserve_hostname = is_hostname(contacts[sender].ip)
+    -- If the contact is configured with multiple IPs (#347), the user is
+    -- managing that list explicitly.  A single address update can't know
+    -- which of the N addresses was superseded, so leave all of them alone
+    -- and just take the port update if any.
+    local has_multi = type(contacts[sender].ips) == "table" and #contacts[sender].ips > 1
+    local fields = {}
+    if not preserve_hostname and not has_multi then fields.ip = new_ip end
     if new_port then fields.port = new_port end
-    write_contact_fields(sender, fields)
+    if next(fields) then write_contact_fields(sender, fields) end
 
-    log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+    if preserve_hostname then
+        log("address update from %s: keeping hostname '%s' (will re-resolve to %s)",
+            sender, contacts[sender].ip, new_ip)
+        dns_cache[contacts[sender].ip] = nil
+    else
+        log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+    end
 
-    -- drop a notification in inbox if the sender requested it
-    if data.notify ~= false then
+    -- drop a notification in inbox if the sender requested it.
+    -- Hostname contacts don't need a notification — DNS re-resolution handles
+    -- IP churn invisibly, which is exactly why the user chose a hostname.
+    if data.notify ~= false and not preserve_hostname then
         local filename = "address-update-" .. sender
         local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
             ".\nYour contacts file has been updated automatically."
@@ -1384,6 +2256,74 @@ local function http_post_batch(requests)
     return results
 end
 
+-- Like http_post_batch, but when a request's first attempt fails with a
+-- connection-level error, retry serially against each remaining endpoint
+-- until one succeeds or the list is exhausted.  Application-level errors
+-- (HTTP 4xx/5xx) are returned as-is.
+--
+-- First-attempt parallelism is preserved; fallback is only serial for
+-- the entries that actually failed, which are usually a small minority.
+local function http_post_batch_with_fallback(requests)
+    for _, req in ipairs(requests) do
+        if req.endpoints and req.endpoints[1] then
+            req.host = req.endpoints[1].addr
+            req.port = req.endpoints[1].port
+        end
+    end
+
+    local results = http_post_batch(requests)
+    local promotions = {}
+    for i, req in ipairs(requests) do
+        if results[i] and not results[i].ok and not results[i].status then
+            local eps = req.endpoints
+            if eps and #eps > 1 then
+                for k = 2, #eps do
+                    local ep = eps[k]
+                    if not ep or not ep.addr or ep.addr == "" then break end
+                    local single = {
+                        host = ep.addr, port = ep.port, path = req.path,
+                        payload = req.payload, psk_key = req.psk_key,
+                    }
+                    local r = http_post_batch({single})[1]
+                    if r and r.ok then
+                        log("fallback to %s:%s succeeded for %s",
+                            ep.addr, tostring(ep.port), req.path or "?")
+                        results[i] = r
+                        if not ep.is_default then
+                            if ep.index and not ep.raw then
+                                local key = (ep.contact_name or "") .. ":" .. ep.index
+                                promotions[key] = { type = "index",
+                                    name = ep.contact_name, index = ep.index }
+                            elseif ep.raw then
+                                promotions[ep.raw] = { type = "addr",
+                                    name = ep.contact_name, addr = ep.raw }
+                            end
+                        end
+                        break
+                    elseif r and r.status then
+                        results[i] = r
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if next(promotions) then
+        pcall(function()
+            for _, p in pairs(promotions) do
+                if p.type == "index" then
+                    promote_contact_index(p.name, p.index)
+                elseif p.type == "addr" then
+                    promote_contact_address(p.name, p.addr)
+                end
+            end
+        end)
+    end
+
+    return results
+end
+
 
 local function parse_outbox_file(path)
     local text = read_file(path)
@@ -1543,10 +2483,21 @@ end
 
 local function handle_attachment_request(data, sender)
     local att_id = data.attachment_id
-    local filename = (data.filename or "unknown"):gsub("[\n\r]", "")
+    -- Fully sanitize: any path separators or wacky characters in the sender's
+    -- filename become safe for use as a local inbox/attachments path. The
+    -- sanitized name is what the user sees in the consent form and what the
+    -- saved attachment will actually be called.
+    local filename = sanitize_filename(data.filename or "")
     local expected_size = tonumber(data.expected_size) or 0
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
+
+    local pending = load_consent_pending()
+    -- Idempotent: if we already have an entry for this att_id, a retry from
+    -- the sender must not clobber the user's in-progress decision.
+    if pending[att_id] then
+        return 200, {ok = true}
+    end
 
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local avail, total = check_disk_space(paths.attachments)
@@ -1556,10 +2507,23 @@ local function handle_attachment_request(data, sender)
     if total and total > 0 then
         pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
     end
-    local subject = (data.subject or ""):gsub("[\n\r]", "")
-    local base = subject ~= "" and subject or filename:gsub("%.[^%.]+$", "")
-    if base == "" then base = filename end
+    -- Key the consent file by attachment filename (not outbox subject) so
+    -- two attachments on the same outbox message get distinct files. On
+    -- collision (same filename already in inbox or tracked by another
+    -- pending entry), append a short att_id prefix to disambiguate.
+    local base = filename ~= "" and filename or "attachment"
     local consent_file = sanitize_filename(base .. "-consent-to-download-form")
+    local function name_in_use(name)
+        if file_exists(INBOX .. "/" .. name) then return true end
+        for other_id, entry in pairs(pending) do
+            if other_id ~= att_id and entry.inbox_file == name then return true end
+        end
+        return false
+    end
+    if name_in_use(consent_file) then
+        consent_file = sanitize_filename(
+            base .. "-" .. att_id:sub(1, 8) .. "-consent-to-download-form")
+    end
     write_file(INBOX .. "/" .. consent_file, string.format(
         "%s wants to send you an attachment.\n\n" ..
         "  File:          %s\n" ..
@@ -1569,7 +2533,6 @@ local function handle_attachment_request(data, sender)
         "Delete one line and leave your choice behind for the system to read:\n\naccept\ndeny",
         sender, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
 
-    local pending = load_state("consent-pending.json")
     pending[att_id] = {
         inbox_file  = consent_file,
         ["from"]    = sender,
@@ -1578,15 +2541,36 @@ local function handle_attachment_request(data, sender)
         message_id  = message_id,
         status      = "pending",
     }
-    save_state("consent-pending.json", pending)
+    save_consent_pending(pending)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
     return 200, {ok = true}
 end
 
+-- True if the user cancelled the transfer — either by deleting the
+-- inbox consent/progress file, or by editing it to contain a line
+-- that reads exactly "deny".
+--
+-- Since #328 the progress file can be a symlink into tmpfs.  A reboot
+-- wipes tmpfs and the symlink ends up dangling, but the user didn't
+-- actually cancel — treat that state as "not cancelled" so the next
+-- chunk arrival recreates the target and the transfer resumes.
+local function consent_cancelled(inbox_file)
+    local path = INBOX .. "/" .. inbox_file
+    local state = path_state(path)
+    if state == "absent" then return true end
+    if state == "dangling" then return false end
+    local content = read_file(path)
+    if not content then return true end  -- defence-in-depth
+    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+        if line:match("^%s*(.-)%s*$") == "deny" then return true end
+    end
+    return false
+end
+
 local function check_consent_pending()
-    local pending = load_state("consent-pending.json")
+    local pending = load_consent_pending()
     if not next(pending) then return false end
-    local responses = load_state("consent-responses.json")
+    local responses = load_consent_responses()
     if type(responses) ~= "table" then responses = {} end
     -- ensure array form (dkjson may decode [] as {})
     local changed = false
@@ -1616,9 +2600,10 @@ local function check_consent_pending()
                 changed = true
             end
         elseif entry.status == "receiving" then
-            if not file_exists(INBOX .. "/" .. entry.inbox_file) then
+            if consent_cancelled(entry.inbox_file) then
                 os.execute('rm -rf ' .. shell_quote(
                     paths.pending .. "/.pending/" .. att_id))
+                os.remove(INBOX .. "/" .. entry.inbox_file)
                 entry.status = "cancel_pending"
                 changed = true
                 log("attachment transfer cancelled by user: %s from %s", att_id, entry["from"])
@@ -1626,14 +2611,14 @@ local function check_consent_pending()
         end
     end
     if changed then
-        save_state("consent-pending.json", pending)
-        save_state("consent-responses.json", responses)
+        save_consent_pending(pending)
+        save_consent_responses(responses)
     end
     return changed
 end
 
 local function send_consent_responses(my_name)
-    local responses = load_state("consent-responses.json")
+    local responses = load_consent_responses()
     if type(responses) ~= "table" or not responses[1] then return false end
     local contacts = load_contacts()
     local requests, valid = {}, {}
@@ -1642,7 +2627,8 @@ local function send_consent_responses(my_name)
         if c and c.ip then
             valid[#valid + 1] = resp
             requests[#requests + 1] = {
-                host = contact_addr(c), port = c.port, path = "/deliver",
+                endpoints = contact_endpoints(c),
+                path = "/deliver",
                 payload = json.encode({
                     type = "attachment_response",
                     attachment_id = resp.attachment_id,
@@ -1654,38 +2640,46 @@ local function send_consent_responses(my_name)
         end
     end
     if #requests == 0 then return false end
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     local remaining = {}
-    local pending = load_state("consent-pending.json")
+    local pending = load_consent_pending()
     for i, resp in ipairs(valid) do
+        note_contact_result(resp.to, results[i].ok)
         if results[i].ok then
             log("sent consent %s to %s", resp.consent and "accepted" or "declined", resp.to)
             local entry = pending[resp.attachment_id]
             if entry then
                 if resp.consent then
-                    write_file(INBOX .. "/" .. entry.inbox_file,
+                    -- Progress file goes onto tmpfs from now on (#328).
+                    -- The consent prompt was a regular file; from this
+                    -- write forward it's a symlink into /tmp.
+                    write_progress_file(
+                        INBOX .. "/" .. entry.inbox_file,
+                        "consent-" .. resp.attachment_id,
                         "Sending: " .. entry["from"] .. "'s attachment " .. entry.filename ..
                         " is being transferred.")
                     entry.status = "receiving"
                     entry.start_time = os.time()
                 else
-                    write_file(INBOX .. "/" .. entry.inbox_file,
-                        "You declined " .. entry["from"] .. "'s attachment " .. entry.filename .. ".")
+                    -- User declined — clear the consent file off their
+                    -- inbox so they don't have to think about it again.
+                    os.remove(INBOX .. "/" .. entry.inbox_file)
                     pending[resp.attachment_id] = nil
                 end
             end
         else
             remaining[#remaining + 1] = resp
-            log("failed to send consent response to %s (will retry)", resp.to)
+            -- The per-op failure detail is captured in the unreachable
+            -- summary at cycle end (#324); no per-contact log here.
         end
     end
-    save_state("consent-pending.json", pending)
-    save_state("consent-responses.json", remaining)
+    save_consent_pending(pending)
+    save_consent_responses(remaining)
     return #remaining < #valid
 end
 
 local function send_attachment_cancellations(my_name)
-    local pending = load_state("consent-pending.json")
+    local pending = load_consent_pending()
     if not next(pending) then return false end
     local contacts = load_contacts()
     local to_cancel = {}
@@ -1701,7 +2695,8 @@ local function send_attachment_cancellations(my_name)
         if c and c.ip then
             valid[#valid + 1] = item
             requests[#requests + 1] = {
-                host = contact_addr(c), port = c.port, path = "/delete",
+                endpoints = contact_endpoints(c),
+                path = "/delete",
                 payload = json.encode({
                     message_id = item.entry.message_id,
                 }),
@@ -1712,19 +2707,19 @@ local function send_attachment_cancellations(my_name)
         end
     end
     if #requests == 0 then
-        save_state("consent-pending.json", pending)
+        save_consent_pending(pending)
         return true
     end
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     for i, item in ipairs(valid) do
+        note_contact_result(item.entry["from"], results[i].ok)
         if results[i].ok then
             pending[item.att_id] = nil
             log("notified %s of attachment cancellation: %s", item.entry["from"], item.att_id)
-        else
-            log("failed to notify %s of attachment cancellation (will retry)", item.entry["from"])
         end
+        -- failure: detail rolls into the unreachable summary (#324)
     end
-    save_state("consent-pending.json", pending)
+    save_consent_pending(pending)
     return true
 end
 
@@ -1732,7 +2727,6 @@ local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
     local total_chunks = tonumber(data.total_chunks)
-    local filename = data.filename or "unknown"
     local chunk_checksum = data.chunk_checksum
     local total_checksum = data.total_checksum
     if not att_id or chunk_index == nil or not total_chunks or not data.data then
@@ -1741,10 +2735,16 @@ local function handle_attachment_chunk(data, sender)
     local raw = mime.unb64(data.data)
     if not raw then return 400, {error = "invalid base64"} end
 
-    -- Check cancellation before storing anything
-    local cprog = load_state("consent-pending.json")
+    -- Require matching request state. Without an attachment_request + user
+    -- consent, we have no business accepting or extracting chunks, and we
+    -- mustn't trust a per-chunk filename for any local path.
+    local cprog = load_consent_pending()
     local cpe = cprog[att_id]
-    if cpe and cpe.status == "cancel_pending" then
+    if not cpe then
+        return 404, {error = "unknown attachment_id"}
+    end
+    local filename = cpe.filename  -- sanitized at request time
+    if cpe.status == "cancel_pending" then
         return 200, {ok = false, cancelled = true}
     end
 
@@ -1752,10 +2752,63 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(pending_dir))
     local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
 
-    if chunk_checksum and sha256_of_bytes(raw) ~= chunk_checksum then
+    local valid = not chunk_checksum or sha256_of_bytes(raw) == chunk_checksum
+    if not valid then
         -- discard bad chunk; it stays missing in the response
         log("chunk %d checksum mismatch from %s for %s", chunk_index, sender, filename)
     else
+        -- Enforce the sender's declared expected_size.  Without this check, a
+        -- malicious or buggy sender could advertise a small attachment in the
+        -- consent prompt and then stream arbitrary amounts of data, exhausting
+        -- the recipient's disk after consent was already granted.
+        if cpe and cpe.expected_size and cpe.expected_size > 0 then
+            -- Lazy-initialise bytes_received from any existing on-disk chunks,
+            -- so a transfer started before this check was added gets a correct
+            -- running total the first time it arrives.
+            if cpe.bytes_received == nil then
+                local sum = 0
+                for i = 0, (total_chunks or 0) - 1 do
+                    local f = io.open(pending_dir .. "/chunk-" .. tostring(i), "rb")
+                    if f then
+                        f:seek("end"); sum = sum + f:seek(); f:close()
+                    end
+                end
+                cpe.bytes_received = sum
+            end
+
+            -- If this chunk overwrites an existing one (sender retry), only the
+            -- size delta counts.
+            local existing = 0
+            local f_old = io.open(chunk_path, "rb")
+            if f_old then
+                f_old:seek("end"); existing = f_old:seek(); f_old:close()
+            end
+            local projected = cpe.bytes_received + (#raw - existing)
+
+            -- 10% headroom plus a 4KB floor: zipping incompressible data (jpg,
+            -- mp3, already-compressed files) can inflate slightly due to zip
+            -- metadata.  The floor covers tiny attachments where 10% rounds
+            -- to almost nothing.
+            local limit = math.floor(cpe.expected_size * 1.1) + 4096
+            if projected > limit then
+                log("oversize transfer from %s: %s declared %s, " ..
+                    "cumulative would reach %s (limit %s) — rejecting",
+                    sender, filename, fmt_bytes(cpe.expected_size),
+                    fmt_bytes(projected), fmt_bytes(limit))
+                os.execute('rm -rf ' .. shell_quote(pending_dir))
+                os.remove(INBOX .. "/" .. cpe.inbox_file)
+                cpe.status = "cancel_pending"
+                cpe.rejection_reason = "oversize"
+                cprog[att_id] = cpe
+                save_consent_pending(cprog)
+                return 200, {ok = false, cancelled = true}
+            end
+
+            cpe.bytes_received = projected
+            cprog[att_id] = cpe
+            save_consent_pending(cprog)
+        end
+
         write_file_binary(chunk_path, raw)
     end
 
@@ -1767,14 +2820,16 @@ local function handle_attachment_chunk(data, sender)
         end
     end
 
-    if cpe and cpe.status == "receiving" then
-        -- Check if user deleted the progress file (cancellation during transfer)
-        if not file_exists(INBOX .. "/" .. cpe.inbox_file) then
+    if cpe.status == "receiving" then
+        -- User cancelled mid-transfer: either deleted the progress file or
+        -- wrote "deny" into it.
+        if consent_cancelled(cpe.inbox_file) then
             os.execute('rm -rf ' .. shell_quote(
                 paths.pending .. "/.pending/" .. att_id))
+            os.remove(INBOX .. "/" .. cpe.inbox_file)
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
-            save_state("consent-pending.json", cprog)
+            save_consent_pending(cprog)
             log("attachment transfer cancelled by user: %s from %s", att_id, sender)
             return 200, {ok = false, cancelled = true}
         end
@@ -1787,10 +2842,13 @@ local function handle_attachment_chunk(data, sender)
                     "\nAverage: %.1f seconds per chunk.", elapsed / received)
             end
         end
-        write_file(INBOX .. "/" .. cpe.inbox_file, string.format(
-            "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nDelete this file to cancel and clean up partial downloads.",
-            filename, sender, received, total_chunks,
-            math.floor(received / total_chunks * 100), avg_str))
+        write_progress_file(
+            INBOX .. "/" .. cpe.inbox_file,
+            "consent-" .. att_id,
+            string.format(
+                "Receiving %s from %s \xe2\x80\x94 %d / %d chunks (%d%%)%s\n\nTo cancel: delete this file, or add a line that reads: deny",
+                filename, sender, received, total_chunks,
+                math.floor(received / total_chunks * 100), avg_str))
     end
 
     if #missing > 0 then
@@ -1856,12 +2914,13 @@ local function handle_attachment_chunk(data, sender)
 
     if cprog[att_id] then
         if cprog[att_id].status ~= "cancel_pending" then
-            write_file(INBOX .. "/" .. cprog[att_id].inbox_file, string.format(
-                "Transfer complete:\n%s's attachment %s has arrived.\nSaved to: %s",
-                sender, filename, target))
+            -- Transfer finished successfully; the attachment lives in
+            -- paths.attachments. The inbox consent/progress file has done
+            -- its job — remove it so completed transfers don't pile up.
+            os.remove(INBOX .. "/" .. cprog[att_id].inbox_file)
         end
         cprog[att_id] = nil
-        save_state("consent-pending.json", cprog)
+        save_consent_pending(cprog)
     end
 
     os.execute('rm -rf ' .. shell_quote(pending_dir))
@@ -1875,7 +2934,7 @@ local function handle_attachment_response(data, sender)
     local att_id = data.attachment_id
     local consent = data.consent
     if not att_id then return 400, {error = "missing attachment_id"} end
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     local transfer = chunks[att_id]
     if not transfer then return 200, {ok = true} end
     if consent then
@@ -1885,15 +2944,15 @@ local function handle_attachment_response(data, sender)
         transfer.missing = m
         log("consent granted by %s for %s", sender, transfer.filename)
     else
-        if transfer.compressed_path and file_exists(transfer.compressed_path) then
-            os.remove(transfer.compressed_path)
+        if transfer.zip_id and file_exists(zip_path_for(transfer.zip_id)) then
+            os.remove(zip_path_for(transfer.zip_id))
         end
         write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
             sender .. " declined your attachment " .. transfer.filename .. ".")
         chunks[att_id] = nil
         log("consent declined by %s for %s", sender, transfer.filename)
     end
-    save_state("chunks-outgoing.json", chunks)
+    save_chunks_outgoing(chunks)
     return 200, {ok = true}
 end
 
@@ -1923,8 +2982,18 @@ local function write_transfers_file(att_state)
         end
     end
 
+    -- Per-mailbox tmpfs name — stable across restarts, unique across
+    -- multiple rmail instances running on the same host.
+    local mail_slug = MAIL:gsub("^/", ""):gsub("/", "-")
+    local tmpfs_name = "transfers-" .. mail_slug
+
     if #path_order == 0 then
-        if file_exists(paths.transfers) then os.remove(paths.transfers) end
+        -- Remove both the persistent symlink and the tmpfs target.  Either
+        -- may already be gone (dangling symlink after reboot, or fresh
+        -- start with no transfers yet) — os.remove is idempotent-ish and
+        -- we don't care if it fails.
+        os.remove(paths.transfers)
+        os.remove(progress_tmpfs_path(tmpfs_name))
         return
     end
 
@@ -1945,7 +3014,7 @@ local function write_transfers_file(att_state)
         end
     end
     lines[#lines + 1] = sep
-    write_file(paths.transfers, table.concat(lines, "\n") .. "\n")
+    write_progress_file(paths.transfers, tmpfs_name, table.concat(lines, "\n") .. "\n")
 end
 
 -- Check ~/mail/transfers for user-initiated cancellations.
@@ -1956,7 +3025,7 @@ local function check_transfers_file_cancellations()
     local content = read_file(paths.transfers)
     if not content then return end
 
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     if not next(chunks) then return end
 
     -- Parse file into {path -> {contact_name -> true}}
@@ -1989,20 +3058,20 @@ local function check_transfers_file_cancellations()
 
     local changed = false
     for att_id, transfer in pairs(to_cancel) do
-        release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+        release_zip(chunks, transfer.zip_id)
         chunks[att_id] = nil
         log("transfer cancelled via transfers file: %s to %s", transfer.filename, transfer.to)
         changed = true
     end
 
     if changed then
-        save_state("chunks-outgoing.json", chunks)
+        save_chunks_outgoing(chunks)
         write_transfers_file(chunks)
     end
 end
 
 local function send_next_chunks(my_name)
-    local chunks = load_state("chunks-outgoing.json")
+    local chunks = load_chunks_outgoing()
     if not next(chunks) then return false end
     local contacts = load_contacts()
     local did_work = false
@@ -2014,13 +3083,14 @@ local function send_next_chunks(my_name)
             log("chunk transfer: unknown contact %s, skipping", transfer.to)
             goto continue
         end
-        if not file_exists(transfer.compressed_path) then
+        local zip_path = zip_path_for(transfer.zip_id)
+        if not file_exists(zip_path) then
             log("chunk transfer: zip missing for %s, cancelling", att_id)
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             changed = true; goto continue
         end
-        local f = io.open(transfer.compressed_path, "rb")
+        local f = io.open(zip_path, "rb")
         if not f then goto continue end
         local missing = transfer.missing or {}
         local aborted = false
@@ -2032,8 +3102,9 @@ local function send_next_chunks(my_name)
                 log("chunk read error at %d for %s", chunk_index, att_id)
                 aborted = true; break
             end
-            local results = http_post_batch({{
-                host = contact_addr(contact), port = contact.port, path = "/deliver",
+            local results = http_post_batch_with_fallback({{
+                endpoints = contact_endpoints(contact),
+                path = "/deliver",
                 payload = json.encode({
                     type = "attachment_chunk",
                     attachment_id = att_id,
@@ -2054,20 +3125,25 @@ local function send_next_chunks(my_name)
                 if type(new_missing) == "table" then
                     transfer.missing = new_missing
                 end
+                note_contact_result(transfer.to, true)
                 changed = true; did_work = true
                 if #transfer.missing == 0 then break end
             elseif resp.cancelled then
+                -- Cancelled by receiver is reachability success from our
+                -- perspective — we heard back.
+                note_contact_result(transfer.to, true)
                 log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
                 cancelled = true; break
             else
-                log("chunk %d/%d failed for %s -> %s, will retry",
-                    chunk_index + 1, transfer.total_chunks, transfer.filename, transfer.to)
+                note_contact_result(transfer.to, false)
+                -- Chunk-specific detail dropped; reachability rolls into
+                -- the unreachable summary (#324).
                 aborted = true; break
             end
         end
         f:close()
         if cancelled then
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             chunks[att_id] = nil
             changed = true
         elseif not aborted and #transfer.missing == 0 then
@@ -2077,15 +3153,26 @@ local function send_next_chunks(my_name)
         end
         ::continue::
     end
-    -- clean up completed transfers and release shared zips
+    -- clean up completed transfers and release shared zips.  This is
+    -- the typical completion path (status flips to "complete" above and
+    -- we clear the entry in the same call); the secondary cleanup in
+    -- sync_outbox exists only as a belt-and-braces for entries that
+    -- somehow persist across cycles.
     for att_id, transfer in pairs(chunks) do
         if transfer.status == "complete" then
+            -- #349: auto-body transfers put their source under pending/;
+            -- delete it now that the last chunk has been acked.  No
+            -- outbox attach: line to strip (there never was one).
+            if transfer.auto_body and transfer.original_path
+               and file_exists(transfer.original_path) then
+                os.remove(transfer.original_path)
+            end
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id, transfer.compressed_path)
+            release_zip(chunks, transfer.zip_id)
             changed = true
         end
     end
-    if changed then save_state("chunks-outgoing.json", chunks) end
+    if changed then save_chunks_outgoing(chunks) end
     return did_work
 end
 
@@ -2114,7 +3201,7 @@ local function self_delete_from_inbox(my_name, message_id)
                 log("self-delete from inbox: %s", filename)
             end
             if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
-            delete_inbox_attachments(meta)
+            -- #355: attachments left in place — user owns them.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             return
@@ -2134,7 +3221,7 @@ local function self_delete_from_outbox(my_name, message_id)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_state("outbox.json", outbox_state)
+                    save_outbox_state(outbox_state)
                     return
                 end
             end
@@ -2145,40 +3232,65 @@ end
 local function sync_outbox(my_name)
     local contacts = load_contacts()
     local state = load_state("outbox.json")
-    local att_state = load_state("chunks-outgoing.json")
+    local att_state = load_chunks_outgoing()
     local att_state_changed = false
     local did_work = false
 
     -- clean up completed transfers: remove attach: lines from outbox files
     for att_id, transfer in pairs(att_state) do
         if transfer.status == "complete" then
-            local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
-            if file_exists(outbox_path) then
-                remove_attach_from_file(outbox_path, transfer.original_path)
+            if transfer.auto_body then
+                -- #349: no outbox attach: line to strip (the body came
+                -- from op.body, not a user-visible attach line), but
+                -- the /tmp auto-body source file needs cleaning up.
+                if transfer.original_path
+                   and file_exists(transfer.original_path) then
+                    os.remove(transfer.original_path)
+                end
+                log("auto-body transfer complete to %s (%s)",
+                    transfer.to, transfer.outbox_file)
+            else
+                local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
+                if file_exists(outbox_path) then
+                    remove_attach_from_file(outbox_path, transfer.original_path)
+                end
+                log("attachment transfer complete, removed attach: %s",
+                    transfer.filename)
             end
             att_state[att_id] = nil
             att_state_changed = true
             did_work = true
-            log("attachment transfer complete, removed attach: %s", transfer.filename)
         end
     end
 
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- detect contact renames via stored token
-    local contact_by_token = {}
+    -- detect contact renames via stored token fingerprint.  Pre-#348 this
+    -- matched against rmeta.token (the raw shared secret duplicated into
+    -- state).  Post-#348 we only persist hash_token(token) as token_hash,
+    -- so the lookup table is keyed by that same hash.  Legacy entries
+    -- still carrying .token keep working during the transition because
+    -- we also populate the lookup from plaintext tokens.
+    local contact_by_token_hash = {}
+    local contact_by_token_plain = {}
     for cname, contact in pairs(contacts) do
         if cname ~= my_name and contact.token then
-            contact_by_token[contact.token] = cname
+            contact_by_token_hash[hex_sha256(contact.token)] = cname
+            contact_by_token_plain[contact.token] = cname
         end
     end
     for fname, fmeta in pairs(state) do
         if fmeta.recipients then
             local renames = {}
             for rname, rmeta in pairs(fmeta.recipients) do
-                if rmeta.token and not contacts[rname] then
-                    local new_name = contact_by_token[rmeta.token]
+                if not contacts[rname] then
+                    local new_name = nil
+                    if rmeta.token_hash then
+                        new_name = contact_by_token_hash[rmeta.token_hash]
+                    elseif rmeta.token then
+                        new_name = contact_by_token_plain[rmeta.token]
+                    end
                     if new_name and not fmeta.recipients[new_name] then
                         renames[rname] = new_name
                     end
@@ -2330,9 +3442,9 @@ local function sync_outbox(my_name)
                                         if t.outbox_file == name and
                                            t.original_path == filepath and
                                            t.zip_id and
-                                           file_exists(t.compressed_path) then
+                                           file_exists(zip_path_for(t.zip_id)) then
                                             zip_id       = t.zip_id
-                                            zip_path     = t.compressed_path
+                                            zip_path     = zip_path_for(t.zip_id)
                                             checksum     = t.total_checksum
                                             total_chunks = t.total_chunks
                                             break
@@ -2353,7 +3465,8 @@ local function sync_outbox(my_name)
                                             to = rname, outbox_file = name,
                                             original_path = filepath, filename = basename,
                                             zip_id = zip_id,
-                                            compressed_path = zip_path,
+                                            -- compressed_path dropped (#348):
+                                            -- derive via zip_path_for(zip_id).
                                             total_chunks = total_chunks,
                                             total_checksum = checksum,
                                             expected_size = expected_size,
@@ -2455,30 +3568,149 @@ local function sync_outbox(my_name)
             if op.type == "deliver" then
                 local body_size = #(op.body or "")
                 if body_size > 131072 then
+                    -- #349 auto-body-to-attachment.  The deliver payload
+                    -- is capped at 128 KB; larger bodies get re-routed
+                    -- through the standard attachment pipeline so the
+                    -- send succeeds instead of failing with an error
+                    -- file.  The receiver sees the normal consent form
+                    -- for an attachment named body.txt; acceptance
+                    -- delivers the full body to their attachments dir.
+                    -- A short stub is sent as the message body so the
+                    -- inbox message isn't empty.
                     local kb = math.floor(body_size / 1024)
-                    local err_body = string.format(
-                        "error sending \"%s\": message body is too large (%d KB).\n" ..
-                        "The maximum message body size is 128 KB.\n" ..
-                        "To send large content, use an attach: line in your outbox file instead.",
-                        op.subject or op.filename or "untitled", kb)
-                    write_file(INBOX .. "/error-" .. sanitize_filename(op.subject or op.filename or "untitled"), err_body)
-                    -- mark state to prevent retry
-                    if state[op.filename] then
-                        state[op.filename].recipients[op.recipient] = {error = "body_too_large"}
+                    -- Reuse an existing in-flight entry on retries so a
+                    -- second sync cycle doesn't produce a duplicate
+                    -- attachment_id for the same (recipient, message).
+                    local existing_att_id
+                    for aid, t in pairs(att_state) do
+                        if t.auto_body and t.to == op.recipient
+                           and t.message_id == op.message_id then
+                            existing_att_id = aid
+                            break
+                        end
                     end
-                    log("body too large (%d KB), not sending %s to %s", kb, op.filename, op.recipient)
-                    did_work = true
-                    op.skip = true
+                    local att_id_to_send, expected_for_request, display_filename
+                    if existing_att_id then
+                        local existing = att_state[existing_att_id]
+                        -- Only keep re-issuing the request while the
+                        -- receiver hasn't consented yet.  Once the
+                        -- receiver accepts (status → sending) or the
+                        -- transfer is otherwise past consent, the
+                        -- chunk-sender takes over.
+                        if existing.status == "awaiting_consent" then
+                            att_id_to_send = existing_att_id
+                            expected_for_request = existing.expected_size
+                            display_filename = existing.filename
+                        end
+                    else
+                        -- Name the source file after the outbox
+                        -- message itself so it lands in the
+                        -- receiver's attachments dir under the same
+                        -- name as the subject they saw in their
+                        -- inbox.  No suffix needed — the attachments
+                        -- dir is a separate namespace from inbox, so
+                        -- there's no collision.
+                        local body_fn = sanitize_filename(
+                            op.filename or "message")
+                        local tmp_path = paths.pending .. "/" .. body_fn
+                        os.execute('mkdir -p ' .. shell_quote(paths.pending))
+                        write_file(tmp_path, op.body or "")
+                        local att_id = uuid()
+                        local zip_path, checksum, comp_size =
+                            compress_attachment(tmp_path, att_id)
+                        if zip_path and comp_size then
+                            local total_chunks = math.max(1,
+                                math.ceil(comp_size / cfg.chunk_size))
+                            att_state[att_id] = {
+                                to = op.recipient, outbox_file = op.filename,
+                                original_path = tmp_path, filename = body_fn,
+                                zip_id = att_id,
+                                -- compressed_path dropped (#348):
+                                -- derive via zip_path_for(zip_id).
+                                total_chunks = total_chunks,
+                                total_checksum = checksum,
+                                expected_size = body_size,
+                                message_id = op.message_id,
+                                status = "awaiting_consent",
+                                auto_body = true,
+                            }
+                            att_state_changed = true
+                            att_id_to_send = att_id
+                            expected_for_request = body_size
+                            display_filename = body_fn
+                            log("auto-body: %s to %s (%d KB queued as %s)",
+                                op.filename, op.recipient, kb, body_fn)
+                        else
+                            local err_body = string.format(
+                                "error sending \"%s\": message body is too " ..
+                                "large (%d KB) and the daemon could not " ..
+                                "compress it for attachment delivery.\n" ..
+                                "Use an attach: line in your outbox file " ..
+                                "instead.",
+                                op.subject or op.filename or "untitled", kb)
+                            write_file(INBOX .. "/error-" .. sanitize_filename(
+                                op.subject or op.filename or "untitled"),
+                                err_body)
+                            if state[op.filename] then
+                                state[op.filename].recipients[op.recipient] =
+                                    {error = "body_too_large"}
+                            end
+                            log("auto-body conversion failed for %s to %s",
+                                op.filename, op.recipient)
+                            did_work = true
+                            op.skip = true
+                        end
+                    end
+                    -- Queue (or re-queue) the attachment_request when
+                    -- it's still awaiting consent.  Deliberately not
+                    -- tied to this op via req_to_op — it shouldn't
+                    -- gate the deliver's success tracking, and the
+                    -- receiver's handler is idempotent on a repeat
+                    -- att_id (#346).
+                    if att_id_to_send then
+                        requests[#requests + 1] = {
+                            endpoints = contact_endpoints(op.contact),
+                            path = "/deliver",
+                            payload = json.encode({
+                                type = "attachment_request",
+                                attachment_id = att_id_to_send,
+                                message_id = op.message_id,
+                                filename = display_filename,
+                                subject = op.filename,
+                                expected_size = expected_for_request,
+                            }),
+                            psk_key = op.contact.token,
+                        }
+                    end
+                    -- Replace the body with a short stub (fits well
+                    -- under 128 KB).  We still send a stub so the
+                    -- wire has something when the receiver is an old
+                    -- daemon that doesn't honour the auto_body flag;
+                    -- new daemons overwrite it with their own
+                    -- attachments-path-aware stub on arrival.
+                    if not op.skip then
+                        op.body = string.format(
+                            "[body too large for a single message — " ..
+                            "%d KB delivered as attachment %s]",
+                            kb, display_filename or "body.txt")
+                        op.auto_body = true
+                    end
                 end
                 if not op.skip then
                     path = "/deliver"
                     local send_body = op.body
+                    -- on_send gets the body we're actually sending.
+                    -- For auto-body messages that's the stub; the
+                    -- hook can still inspect/transform it safely.
+                    -- Original oversized body never reaches the hook
+                    -- (ARG_MAX would truncate it anyway).
                     if hooks.on_send then
                         local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
                         if transformed and transformed ~= "" then send_body = transformed end
                     end
                     data = {type = "message",
-                            subject = op.subject, message_id = op.message_id, body = send_body}
+                            subject = op.subject, message_id = op.message_id, body = send_body,
+                            auto_body = op.auto_body or nil}
                 end
             elseif op.type == "update" then
                 path = "/deliver"
@@ -2504,7 +3736,7 @@ local function sync_outbox(my_name)
             if not op.skip then
                 local j = #requests + 1
                 requests[j] = {
-                    host = contact_addr(op.contact), port = op.contact.port,
+                    endpoints = contact_endpoints(op.contact),
                     path = path, payload = json.encode(data),
                     psk_key = op.contact.token,
                 }
@@ -2512,7 +3744,7 @@ local function sync_outbox(my_name)
             end
         end
 
-        local raw_results = http_post_batch(requests)
+        local raw_results = http_post_batch_with_fallback(requests)
         -- expand results back to ops indexing
         local results = {}
         for j, oi in ipairs(req_to_op) do
@@ -2521,6 +3753,13 @@ local function sync_outbox(my_name)
 
         -- Phase 3: process results
         for i, op in ipairs(ops) do
+            -- Record contact reachability for the cycle-end summary (#324).
+            -- 404 counts as reachable — we heard back, the recipient just
+            -- said "already done on my end".
+            if not op.skip then
+                local reachable = results[i].ok or results[i].status == 404
+                note_contact_result(op.recipient, reachable)
+            end
             if op.skip then
                 -- already handled in Phase 2
             elseif op.type == "notify_removal" then
@@ -2531,22 +3770,30 @@ local function sync_outbox(my_name)
                         log("notified %s of removal: %s", op.recipient, op.filename)
                         did_work = true
                     end
-                else
-                    log("failed to notify %s of removal: %s (will retry)", op.recipient, op.filename)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
+                        -- #348: store only the hex sha256 of the token,
+                        -- not the token itself.  The rename-detection
+                        -- path still works (it hashes contacts' tokens
+                        -- into the same space) and .state/ no longer
+                        -- duplicates shared secrets out of the contacts
+                        -- file.
+                        local thash = nil
+                        if op.contact and op.contact.token then
+                            thash = hex_sha256(op.contact.token)
+                        end
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
-                            token = op.contact.token,
+                            token_hash = thash,
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
                     did_work = true
-                else
-                    log("failed to send %s to %s", op.filename, op.recipient)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             elseif op.type == "update" then
                 if results[i].ok then
                     log("updated: %s -> %s", op.filename, op.recipient)
@@ -2558,9 +3805,8 @@ local function sync_outbox(my_name)
                     end
                     log("update 404: %s removed %s from inbox", op.recipient, op.filename)
                     did_work = true
-                else
-                    log("failed to update %s for %s (will retry)", op.filename, op.recipient)
                 end
+                -- other failures: roll into the unreachable summary (#324)
             elseif op.type == "attachment_request" then
                 if results[i].ok then
                     log("sent attachment request to %s: %s", op.recipient, op.att_filename)
@@ -2570,10 +3816,11 @@ local function sync_outbox(my_name)
                     local transfer = att_state[op.att_id]
                     if transfer then
                         att_state[op.att_id] = nil
-                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        release_zip(att_state, transfer.zip_id)
                         att_state_changed = true
                     end
-                    log("failed to send attachment request to %s (will retry)", op.recipient)
+                    -- the release-and-cleanup is the action; reachability
+                    -- detail rolls into the unreachable summary (#324)
                 end
             elseif op.type == "notify_deletion" then
                 if results[i].ok or results[i].status == 404 then
@@ -2582,9 +3829,8 @@ local function sync_outbox(my_name)
                     end
                     log("notified %s of deletion: %s", op.recipient, op.filename)
                     did_work = true
-                else
-                    log("failed to notify %s of deletion: %s (will retry)", op.recipient, op.filename)
                 end
+                -- failure: rolls into the unreachable summary (#324)
             end
         end
     end
@@ -2598,7 +3844,7 @@ local function sync_outbox(my_name)
                 for att_id, transfer in pairs(att_state) do
                     if transfer.outbox_file == name then
                         att_state[att_id] = nil
-                        release_zip(att_state, transfer.zip_id, transfer.compressed_path)
+                        release_zip(att_state, transfer.zip_id)
                         att_state_changed = true
                         log("cancelled outgoing chunks for %s (outbox file deleted)", att_id)
                     end
@@ -2617,8 +3863,8 @@ local function sync_outbox(my_name)
         end
     end
 
-    if att_state_changed then save_state("chunks-outgoing.json", att_state) end
-    save_state("outbox.json", state)
+    if att_state_changed then save_chunks_outgoing(att_state) end
+    save_outbox_state(state)
     return did_work
 end
 
@@ -2635,8 +3881,10 @@ local function sync_inbox(my_name)
     for name, meta in pairs(state) do
         if not current[name] then
             if not meta.pending_delete then
-                -- first time: clean up local attachments, mark pending
-                delete_inbox_attachments(meta)
+                -- first time: fire on_delete and mark pending.  #355:
+                -- we don't touch paths.attachments — the user owns
+                -- those files and may want to keep them even though
+                -- they cleared the message from their inbox.
                 if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true
                 did_work = true
@@ -2666,7 +3914,7 @@ local function sync_inbox(my_name)
         local requests = {}
         for i, op in ipairs(ops) do
             requests[i] = {
-                host = contact_addr(op.contact), port = op.contact.port,
+                endpoints = contact_endpoints(op.contact),
                 path = "/delete",
                 payload = json.encode({
                     message_id = op.message_id,
@@ -2674,15 +3922,16 @@ local function sync_inbox(my_name)
                 psk_key = op.contact.token,
             }
         end
-        local results = http_post_batch(requests)
+        local results = http_post_batch_with_fallback(requests)
         for i, op in ipairs(ops) do
-            if results[i].ok or results[i].status == 404 then
+            local reachable = results[i].ok or results[i].status == 404
+            note_contact_result(op.sender, reachable)
+            if reachable then
                 state[op.filename] = nil
                 log("notified %s of inbox deletion: %s", op.sender, op.filename)
                 did_work = true
-            else
-                log("failed to notify %s of inbox deletion: %s (will retry)", op.sender, op.filename)
             end
+            -- failure: rolls into the unreachable summary (#324)
         end
     end
 
@@ -2690,47 +3939,161 @@ local function sync_inbox(my_name)
     return did_work
 end
 
-local IP_SERVICES = {
-    {host = "ifconfig.me",            path = "/"},
-    {host = "icanhazip.com",          path = "/"},
-    {host = "api.ipify.org",          path = "/"},
-    {host = "checkip.amazonaws.com",  path = "/"},
-}
+-- ---- Public-IP discovery via DNS --------------------------------------
+--
+-- Three well-known DNS providers (OpenDNS/Cisco, Cloudflare, Google) will
+-- answer a special query with the client's observed source IP.  UDP to
+-- port 53 is almost never blocked (breaking it breaks everything), the
+-- round-trip is ~5ms versus 50-200ms for HTTP, and the operators already
+-- terminate DNS traffic by design — there's no third-party "what's my
+-- IP" service snooping on the request.
+--
+-- socket.dns.toip() can't do this because it uses the system resolver
+-- and we need to pick the server.  So we craft the DNS packet ourselves.
 
-local function fetch_public_ip(service)
-    local conn = socket.tcp()
-    conn:settimeout(5)
-    local ok, err = conn:connect(service.host, 80)
-    if not ok then conn:close(); return nil end
-    conn:send("GET " .. service.path .. " HTTP/1.0\r\n" ..
-        "Host: " .. service.host .. "\r\nConnection: close\r\n\r\n")
+local function uint16_be(n)
+    return string.char(math.floor(n / 256) % 256, n % 256)
+end
 
-    local status_line = conn:receive("*l")
-    if not status_line or not status_line:find(" 200 ") then conn:close(); return nil end
+local function parse_uint16_be(s, pos)
+    local a, b = string.byte(s, pos, pos + 1)
+    return a * 256 + b
+end
 
-    while true do
-        local line = conn:receive("*l")
-        if not line or line == "" then break end
+-- Encode a dotted hostname as DNS length-prefixed labels plus null terminator.
+local function encode_dns_name(name)
+    local out = {}
+    for label in (name .. "."):gmatch("([^.]*)%.") do
+        if #label > 0 then
+            out[#out + 1] = string.char(#label)
+            out[#out + 1] = label
+        end
+    end
+    out[#out + 1] = "\0"
+    return table.concat(out)
+end
+
+-- Send a DNS query to resolver_ip:53 and return the first answer.
+-- qtype is 1 (A) or 16 (TXT).  qclass is usually 1 (IN); Cloudflare's
+-- whoami uses 3 (CHAOS).  For A the return is a dotted-quad string; for
+-- TXT it's the raw contents of the first TXT string.  Returns nil on any
+-- failure (network, malformed reply, unsupported record type).
+local function dns_query_public_ip(name, qtype, qclass, resolver_ip)
+    local udp = socket.udp()
+    if not udp then return nil end
+    udp:settimeout(2)
+    local ok = udp:setpeername(resolver_ip, 53)
+    if not ok then udp:close(); return nil end
+
+    local id = math.random(0, 0xffff)
+    local query = uint16_be(id)           -- transaction ID
+        .. uint16_be(0x0100)              -- flags: standard query, recursion desired
+        .. uint16_be(1)                   -- QDCOUNT
+        .. uint16_be(0)                   -- ANCOUNT
+        .. uint16_be(0)                   -- NSCOUNT
+        .. uint16_be(0)                   -- ARCOUNT
+        .. encode_dns_name(name)
+        .. uint16_be(qtype)               -- QTYPE
+        .. uint16_be(qclass)              -- QCLASS
+
+    udp:send(query)
+    local reply = udp:receive()
+    udp:close()
+    if not reply or #reply < 12 then return nil end
+    if parse_uint16_be(reply, 1) ~= id then return nil end
+    if parse_uint16_be(reply, 7) == 0 then return nil end  -- ANCOUNT
+
+    -- skip the question section (name + qtype + qclass)
+    local pos = 13
+    while pos <= #reply and reply:byte(pos) ~= 0 do
+        pos = pos + reply:byte(pos) + 1
+    end
+    pos = pos + 1 + 4  -- null terminator + qtype + qclass
+
+    -- first answer: name is usually a compressed pointer (2 bytes starting with 0xc0)
+    if pos > #reply then return nil end
+    if reply:byte(pos) >= 0xc0 then
+        pos = pos + 2
+    else
+        while pos <= #reply and reply:byte(pos) ~= 0 do
+            pos = pos + reply:byte(pos) + 1
+        end
+        pos = pos + 1
     end
 
-    local ip = conn:receive("*l")
-    conn:close()
-    if ip then ip = ip:match("^%s*(.-)%s*$") end
+    if pos + 10 > #reply then return nil end
+    local rtype = parse_uint16_be(reply, pos); pos = pos + 2
+    pos = pos + 2  -- rclass
+    pos = pos + 4  -- ttl
+    local rdlen = parse_uint16_be(reply, pos); pos = pos + 2
+
+    if rtype == 1 and rdlen == 4 and pos + 3 <= #reply then
+        local a, b, c, d = string.byte(reply, pos, pos + 3)
+        return string.format("%d.%d.%d.%d", a, b, c, d)
+    elseif rtype == 16 and rdlen >= 1 and pos < #reply then
+        -- TXT record: first byte of RDATA is a length, then that many bytes
+        -- of string.  The IP-reporting services always put the IP in a single
+        -- TXT string.
+        local txtlen = reply:byte(pos)
+        if pos + txtlen > #reply then return nil end
+        return reply:sub(pos + 1, pos + txtlen)
+    end
+    return nil
+end
+
+-- Providers that will return the querying client's IP in a DNS response.
+-- Listed with redundant resolver IPs per provider so a single unreachable
+-- anycast endpoint doesn't kill the whole provider's option.  verify_ip_change
+-- uses `provider` to ensure cross-provider confirmation, not just cross-IP.
+-- qclass: 1 = IN (Internet — the standard class), 3 = CH (CHAOS class,
+-- which Cloudflare uses for its whoami query by convention).
+local IP_SERVICES = {
+    -- OpenDNS (Cisco) — A record in IN class, simplest
+    {provider = "opendns",    name = "myip.opendns.com",        qtype = 1,  qclass = 1, resolver = "208.67.222.222"},
+    {provider = "opendns",    name = "myip.opendns.com",        qtype = 1,  qclass = 1, resolver = "208.67.220.220"},
+    -- Cloudflare — TXT record in CHAOS class
+    {provider = "cloudflare", name = "whoami.cloudflare",       qtype = 16, qclass = 3, resolver = "1.1.1.1"},
+    {provider = "cloudflare", name = "whoami.cloudflare",       qtype = 16, qclass = 3, resolver = "1.0.0.1"},
+    -- Google — TXT record in IN class on Google's authoritative nameservers
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.32.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.34.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.36.10"},
+    {provider = "google",     name = "o-o.myaddr.l.google.com", qtype = 16, qclass = 1, resolver = "216.239.38.10"},
+}
+
+-- Return a shuffled copy of IP_SERVICES.  check_public_ip iterates in random
+-- order so one resolver doesn't get pinned as the primary; traffic spreads
+-- across the list and transient failures don't always hit the same host.
+local function shuffled_ip_services()
+    local out = {}
+    for i, v in ipairs(IP_SERVICES) do out[i] = v end
+    for i = #out, 2, -1 do
+        local j = math.random(i)
+        out[i], out[j] = out[j], out[i]
+    end
+    return out
+end
+
+local function fetch_public_ip(service)
+    local ip = dns_query_public_ip(service.name, service.qtype, service.qclass, service.resolver)
     if ip and ip:match("^%d+%.%d+%.%d+%.%d+$") then return ip end
     return nil
 end
 
 local function check_public_ip()
-    for _, service in ipairs(IP_SERVICES) do
+    for _, service in ipairs(shuffled_ip_services()) do
         local ip = fetch_public_ip(service)
         if ip then return ip, service end
     end
     return nil
 end
 
+-- Confirm a detected IP with a *different provider* — not just a different
+-- resolver IP.  Two Cloudflare anycast endpoints would always agree whether
+-- the answer is right or wrong; genuine verification needs independent paths.
 local function verify_ip_change(new_ip, used_service)
-    for _, service in ipairs(IP_SERVICES) do
-        if service.host ~= used_service.host then
+    for _, service in ipairs(shuffled_ip_services()) do
+        if service.provider ~= used_service.provider then
             local ip = fetch_public_ip(service)
             if ip then return ip == new_ip end
         end
@@ -2756,21 +4119,22 @@ local function detect_ip_change(my_name, port)
         return
     end
 
-    -- verify with a second service before notifying
+    -- verify with a different provider before notifying
     if not verify_ip_change(new_ip, service) then
-        log("public IP change not confirmed (%s reported %s)", service.host, new_ip)
+        log("public IP change not confirmed (%s reported %s)", service.provider, new_ip)
         return
     end
 
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
     write_file(STATE .. "/public_ip", new_ip)
 
-    -- write pending notifications for all contacts
+    -- write pending notifications for all contacts.  Keyed by hashed
+    -- name (#348) so .state/ doesn't carry the contact list verbatim.
     local contacts = load_contacts()
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     for name, contact in pairs(contacts) do
         if name ~= my_name and contact.ip then
-            pending[name] = {ip = new_ip, port = port}
+            pending[hash_contact_name(name)] = {ip = new_ip, port = port}
         end
     end
     save_state("pending-address.json", pending)
@@ -2814,35 +4178,44 @@ local function detect_ipv6_change(my_name, port)
     log("public IPv6 changed: %s -> %s", stored_ip, new_ip)
     write_file(STATE .. "/public_ipv6", new_ip)
 
-    -- Queue notifications for contacts that have an ipv6 field
+    -- Queue notifications for contacts that have an ipv6 field.  Same
+    -- hashed-name keying as the IPv4 path (#348).
     local contacts = load_contacts()
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     for name, contact in pairs(contacts) do
         if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip)) then
-            pending[name] = pending[name] or {}
-            pending[name].ipv6 = new_ip
-            pending[name].port = port
+            local k = hash_contact_name(name)
+            pending[k] = pending[k] or {}
+            pending[k].ipv6 = new_ip
+            pending[k].port = port
         end
     end
     save_state("pending-address.json", pending)
 end
 
 local function sync_address_notifications(my_name)
-    local pending = load_state("pending-address.json")
+    local pending = migrate_hashed_state(load_state("pending-address.json"))
     if not next(pending) then return false end
 
     local contacts = load_contacts()
-    local ops = {}
+    -- The file keys are hashed contact names (#348); build a lookup
+    -- on the fly.  A few contacts' worth of sha256 is cheap.
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
 
-    for name, info in pairs(pending) do
-        if contacts[name] and contacts[name].ip then
+    local ops = {}
+    for hash, info in pairs(pending) do
+        local name = hash_to_name[hash]
+        if name and contacts[name] and contacts[name].ip then
             ops[#ops + 1] = {
-                name = name, contact = contacts[name],
+                name = name, hash = hash, contact = contacts[name],
                 ip = info.ip, port = info.port,
             }
         else
             -- contact removed, drop the pending notification
-            pending[name] = nil
+            pending[hash] = nil
         end
     end
 
@@ -2854,7 +4227,7 @@ local function sync_address_notifications(my_name)
     local requests = {}
     for i, op in ipairs(ops) do
         requests[i] = {
-            host = contact_addr(op.contact), port = op.contact.port,
+            endpoints = contact_endpoints(op.contact),
             path = "/update-address",
             payload = json.encode({
                 ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
@@ -2863,16 +4236,16 @@ local function sync_address_notifications(my_name)
         }
     end
 
-    local results = http_post_batch(requests)
+    local results = http_post_batch_with_fallback(requests)
     local did_work = false
     for i, op in ipairs(ops) do
+        note_contact_result(op.name, results[i].ok)
         if results[i].ok then
-            pending[op.name] = nil
+            pending[op.hash] = nil  -- file is keyed by hash (#348)
             log("notified %s of address change", op.name)
             did_work = true
-        else
-            log("failed to notify %s of address change (will retry)", op.name)
         end
+        -- failure: rolls into the unreachable summary (#324)
     end
 
     save_state("pending-address.json", pending)
@@ -2918,10 +4291,7 @@ local function serialize_contacts_canonical()
 end
 
 local function canonical_contacts_hash()
-    local bytes = crypto.sha256(serialize_contacts_canonical())
-    local hex = ""
-    for i = 1, #bytes do hex = hex .. string.format("%02x", bytes:byte(i)) end
-    return hex
+    return hex_sha256(serialize_contacts_canonical())
 end
 
 -- GET /peer-address — return the caller's stored address (ip/port) from our contacts file.
@@ -2961,7 +4331,8 @@ local function handle_api_sync(data, caller_name, my_name)
                 if file_exists(INBOX .. "/" .. filename) then
                     os.remove(INBOX .. "/" .. filename)
                 end
-                delete_inbox_attachments(meta)
+                -- #355: attachments stay in paths.attachments; user
+                -- owns them.
                 if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true  -- sync_inbox will notify original sender
                 log("phone deleted inbox: %s (from %s)", filename, meta["from"] or "?")
@@ -3339,7 +4710,7 @@ local function do_resolve_lan_host(lan_peers, host, target_port)
     if host ~= my_public then return nil end
     local contacts = load_contacts()
     for name, c in pairs(contacts) do
-        if c.ip == host and tostring(c.port or "") == tostring(target_port) then
+        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) then
             local lan_ip = c.lan_ip or lan_peers[name]
             if lan_ip then
                 log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
@@ -3367,7 +4738,7 @@ local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
     local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
     local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
     for name, c in pairs(contacts) do
-        if c.ip == my_public_ip and c.token and c.port then
+        if resolve_contact_host(c.ip) == my_public_ip and c.token and c.port then
             local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
             local key = derive_key(c.token)
             local encrypted = encrypt_packet(key, payload)
@@ -3442,7 +4813,7 @@ local function do_on_connection_timeout(rt, host, target_port)
     if not my_lan_ip then return end
     local contacts = load_contacts()
     for name, c in pairs(contacts) do
-        if c.ip == host and tostring(c.port or "") == tostring(target_port) and c.token then
+        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) and c.token then
             if rt.lan.discovery_sent[name] then return end
             rt.lan.discovery_sent[name] = true
             local payload = "RMAIL-DISCOVER " .. rt.my_name .. " " .. rt.port .. " " .. my_lan_ip
@@ -3655,7 +5026,10 @@ local function run_sync_cycle(rt)
     local w5 = send_consent_responses(rt.my_name)
     local w6 = send_next_chunks(rt.my_name)
     local w7 = send_attachment_cancellations(rt.my_name)
-    write_transfers_file(load_state("chunks-outgoing.json"))
+    write_transfers_file(load_chunks_outgoing())
+    -- One summary log for contacts whose every op failed this cycle
+    -- (#324), instead of a separate "failed to X" line per queued op.
+    flush_unreachable_summary()
     if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
         rt.interval = math.max(rt.min_interval, rt.interval - 240)
         log("had work, interval -> %ds", rt.interval)
@@ -3701,11 +5075,18 @@ local function init_runtime()
         max_interval = 30,   -- TODO: increase for production
         last_sync    = socket.gettime(),
         lan = { udp = nil, peers = {}, discovery_sent = {} },
+        outbox_inotify_fd = nil,
     }
 
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
     log("AES-256-GCM encryption enabled")
+
+    -- Watch outbox and contacts for changes — triggers immediate sync via inotify
+    rt.outbox_inotify_fd, rt.outbox_inotify_sock = start_dir_watcher(OUTBOX)
+    log("outbox inotify watcher active (fd %d)", rt.outbox_inotify_fd)
+    rt.contacts_inotify_fd, rt.contacts_inotify_sock = start_file_watcher(CONTACTS)
+    log("contacts inotify watcher active (fd %d)", rt.contacts_inotify_fd)
 
     pcall(nat.cleanup_old_mapping)
     pcall(nat.security_check, rt.my_name)
@@ -3886,8 +5267,9 @@ local function main()
     end
 
     while true do
-        -- Build socket lists for select
-        local recvt = {rt.server}
+        -- Build socket lists for select — includes inotify fd so the kernel
+        -- wakes us on outbox file changes without polling
+        local recvt = {rt.server, rt.outbox_inotify_sock, rt.contacts_inotify_sock}
         if rt.server6 then recvt[#recvt + 1] = rt.server6 end
         local sendt = {}
         for raw_sock, info in pairs(clients) do
@@ -3898,15 +5280,26 @@ local function main()
             end
         end
 
+        -- Sleep until: a socket has data, an outbox file changes, or it's
+        -- time for the next sync cycle.  No wasted wakeups.
+        local time_to_sync = math.max(0, rt.interval - (socket.gettime() - rt.last_sync))
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
-            0.5)
+            time_to_sync)
 
         -- Handle readable sockets
+        local outbox_changed = false
+        local contacts_changed = false
         if readable then
             for _, sock in ipairs(readable) do
-                if sock == rt.server or sock == rt.server6 then
+                if sock == rt.outbox_inotify_sock then
+                    inotify.read(rt.outbox_inotify_fd)
+                    outbox_changed = true
+                elseif sock == rt.contacts_inotify_sock then
+                    inotify.read(rt.contacts_inotify_fd)
+                    contacts_changed = true
+                elseif sock == rt.server or sock == rt.server6 then
                     local raw_client = sock:accept()
                     if raw_client then
                         local async_client = make_async_socket(raw_client)
@@ -3955,38 +5348,42 @@ local function main()
             end
         end
 
-        -- Clean up stale connections (idle > 30s)
+        -- Sync cycle: runs on outbox/contacts change OR when the interval expires
         local now = socket.gettime()
-        for raw_sock, info in pairs(clients) do
-            if now - info.last_activity > 30 then
-                pcall(function() raw_sock:close() end)
-                clients[raw_sock] = nil
+        if contacts_changed then
+            log("contacts file changed, re-aligning and syncing")
+            align_contacts()
+            -- Drain inotify events from our own align_contacts() write
+            inotify.read(rt.contacts_inotify_fd)
+        end
+        if outbox_changed then
+            log("outbox change detected, syncing")
+        end
+        if outbox_changed or contacts_changed or now - rt.last_sync >= rt.interval then
+            for raw_sock, info in pairs(clients) do
+                if now - info.last_activity > 30 then
+                    pcall(function() raw_sock:close() end)
+                    clients[raw_sock] = nil
+                end
             end
-        end
 
-        -- UDP discovery (non-blocking)
-        pcall(poll_udp_cycle, rt)
-
-        -- Sync cycle (runs inline, not as a coroutine — simpler state management)
-        if file_exists(STATE .. "/sync-now") then
-            os.remove(STATE .. "/sync-now")
-            rt.last_sync = 0
-            log("manual sync triggered")
-        end
-        if now - rt.last_sync >= rt.interval then
             rt.lan.discovery_sent = {}
+            pcall(poll_udp_cycle, rt)
             local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
             rt.last_sync = now
-        end
 
-        -- NAT renewal
-        if rt.nat_mapping then
-            if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
-                local ok_r, res = pcall(nat.create_mapping, rt.port)
-                if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
-                rt.nat_mapping.last_renewed = now
+            if rt.nat_mapping then
+                if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
+                    local ok_r, res = pcall(nat.create_mapping, rt.port)
+                    if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
+                    rt.nat_mapping.last_renewed = now
+                end
             end
+
+            -- Drain any inotify events caused by the sync cycle itself
+            inotify.read(rt.outbox_inotify_fd)
+            inotify.read(rt.contacts_inotify_fd)
         end
     end
 end
