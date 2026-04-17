@@ -157,13 +157,20 @@ Use `helpers/rfield.sh` to read arbitrary contact fields — see the
 [helper scripts](helper-scripts.md#rfieldsh--read-a-contact-field) reference.
 Here's a quick example in `on_send`:
 
+Pass the contacts file path explicitly — it's the `contacts` file
+inside whichever mailbox this hook belongs to.  For a standard install
+that's `<mail-dir>/contacts` (the same `mail = ...` value from your
+config file):
+
 ```sh
 #!/bin/sh
 recipient="$1"
 subject="$2"
 body="$3"
 
-phone=$(helpers/rfield.sh "$recipient" phone 2>/dev/null)
+CONTACTS="$HOME/mail/contacts"   # adjust to your mailbox
+
+phone=$(helpers/rfield.sh "$CONTACTS" "$recipient" phone 2>/dev/null)
 if [ -n "$phone" ]; then
     printf '%s\n\ncc: %s' "$body" "$phone"
 else

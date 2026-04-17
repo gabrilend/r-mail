@@ -116,17 +116,27 @@ esac
 
 ## rfield.sh — read a contact field
 
-Reads an arbitrary field from the contacts file by name.
+Reads an arbitrary field from a contacts file by name.  Takes the
+contacts file path explicitly — no config lookup, no implicit `$HOME`
+fallback — so it works the same from any hook, any mailbox, and from a
+portable mailbox drive.
 
 ```
-helpers/rfield.sh <name> <field>
+helpers/rfield.sh <contacts-file> <name> <field>
 ```
 
 **Examples:**
 
 ```sh
-helpers/rfield.sh alice phone     # → 555-1234
-helpers/rfield.sh alice notify    # → email@example.com
+helpers/rfield.sh ~/mail/contacts alice phone     # → 555-1234
+helpers/rfield.sh ~/mail/contacts alice notify    # → email@example.com
+```
+
+From a hook, pass whichever `contacts` file belongs to the mailbox
+this hook is installed in:
+
+```sh
+phone=$(helpers/rfield.sh "$HOME/mail/contacts" "$sender" phone 2>/dev/null)
 ```
 
 Contacts can store any fields you like alongside the required `ip`, `port`,
