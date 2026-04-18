@@ -1141,79 +1141,6 @@ local function save_chunks_outgoing(state)
         json.encode(snapshot, {indent = true}) .. "\n")
 end
 
--- consent-pending.json: receiver-side attachment-consent tracking.  Each
--- entry carries a `.from` (the sender's contact name) that we hash on
--- disk and resolve to a name on load.  Same wrapper pattern as chunks-
--- outgoing; same behaviour when a stored hash can't be resolved.
-local _CPENDING_PATH = "consent-pending.json"
-
-local function load_consent_pending()
-    local text = read_file(STATE .. "/" .. _CPENDING_PATH)
-    local state = (text and text ~= "") and json.decode(text) or {}
-    if type(state) ~= "table" then return {} end
-    local contacts = load_contacts()
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-    for _, entry in pairs(state) do
-        local f = entry["from"]
-        if _is_hash(f) and hash_to_name[f] then
-            entry["from"] = hash_to_name[f]
-        end
-    end
-    return state
-end
-
-local function save_consent_pending(state)
-    local snapshot = {}
-    for k, v in pairs(state) do
-        local copy = {}
-        for fk, fv in pairs(v) do copy[fk] = fv end
-        if type(copy["from"]) == "string" and not _is_hash(copy["from"]) then
-            copy["from"] = hash_contact_name(copy["from"])
-        end
-        snapshot[k] = copy
-    end
-    write_file(STATE .. "/" .. _CPENDING_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
-
--- consent-responses.json: queued accept/decline replies to other contacts.
--- Array of entries, each with a `.to` (recipient contact name).
-local _CRESP_PATH = "consent-responses.json"
-
-local function load_consent_responses()
-    local text = read_file(STATE .. "/" .. _CRESP_PATH)
-    local state = (text and text ~= "") and json.decode(text) or {}
-    if type(state) ~= "table" then return {} end
-    local contacts = load_contacts()
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-    for _, entry in ipairs(state) do
-        if _is_hash(entry.to) and hash_to_name[entry.to] then
-            entry.to = hash_to_name[entry.to]
-        end
-    end
-    return state
-end
-
-local function save_consent_responses(state)
-    local snapshot = {}
-    for i, v in ipairs(state) do
-        local copy = {}
-        for fk, fv in pairs(v) do copy[fk] = fv end
-        if type(copy.to) == "string" and not _is_hash(copy.to) then
-            copy.to = hash_contact_name(copy.to)
-        end
-        snapshot[i] = copy
-    end
-    write_file(STATE .. "/" .. _CRESP_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
-
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
 -- ============================================================
@@ -1827,7 +1754,7 @@ local function handle_delete(data, sender)
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             -- cancel any pending consent or in-progress chunks from this sender for this message
-            local cpending = load_consent_pending()
+            local cpending = load_state("consent-pending.json")
             local cp_changed = false
             for att_id, entry in pairs(cpending) do
                 if entry["from"] == sender and entry.message_id == message_id then
@@ -1840,7 +1767,7 @@ local function handle_delete(data, sender)
                     log("cancelled consent for %s from %s (sender deleted)", att_id, sender)
                 end
             end
-            if cp_changed then save_consent_pending(cpending) end
+            if cp_changed then save_state("consent-pending.json", cpending) end
             return 200, {ok = true}
         end
     end
@@ -2626,7 +2553,7 @@ local function handle_attachment_request(data, sender)
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
 
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     -- Idempotent: if we already have an entry for this att_id, a retry from
     -- the sender must not clobber the user's in-progress decision.
     if pending[att_id] then
@@ -2675,7 +2602,7 @@ local function handle_attachment_request(data, sender)
         message_id  = message_id,
         status      = "pending",
     }
-    save_consent_pending(pending)
+    save_state("consent-pending.json", pending)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
     return 200, {ok = true}
 end
@@ -2702,9 +2629,9 @@ local function consent_cancelled(inbox_file)
 end
 
 local function check_consent_pending()
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
-    local responses = load_consent_responses()
+    local responses = load_state("consent-responses.json")
     if type(responses) ~= "table" then responses = {} end
     -- ensure array form (dkjson may decode [] as {})
     local changed = false
@@ -2745,14 +2672,14 @@ local function check_consent_pending()
         end
     end
     if changed then
-        save_consent_pending(pending)
-        save_consent_responses(responses)
+        save_state("consent-pending.json", pending)
+        save_state("consent-responses.json", responses)
     end
     return changed
 end
 
 local function send_consent_responses(my_name)
-    local responses = load_consent_responses()
+    local responses = load_state("consent-responses.json")
     if type(responses) ~= "table" or not responses[1] then return false end
     local contacts = load_contacts()
     local requests, valid = {}, {}
@@ -2776,7 +2703,7 @@ local function send_consent_responses(my_name)
     if #requests == 0 then return false end
     local results = http_post_batch_with_fallback(requests)
     local remaining = {}
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     for i, resp in ipairs(valid) do
         note_contact_result(resp.to, results[i].ok)
         if results[i].ok then
@@ -2807,13 +2734,13 @@ local function send_consent_responses(my_name)
             -- summary at cycle end (#324); no per-contact log here.
         end
     end
-    save_consent_pending(pending)
-    save_consent_responses(remaining)
+    save_state("consent-pending.json", pending)
+    save_state("consent-responses.json", remaining)
     return #remaining < #valid
 end
 
 local function send_attachment_cancellations(my_name)
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
     local contacts = load_contacts()
     local to_cancel = {}
@@ -2841,7 +2768,7 @@ local function send_attachment_cancellations(my_name)
         end
     end
     if #requests == 0 then
-        save_consent_pending(pending)
+        save_state("consent-pending.json", pending)
         return true
     end
     local results = http_post_batch_with_fallback(requests)
@@ -2853,7 +2780,7 @@ local function send_attachment_cancellations(my_name)
         end
         -- failure: detail rolls into the unreachable summary (#324)
     end
-    save_consent_pending(pending)
+    save_state("consent-pending.json", pending)
     return true
 end
 
@@ -2872,7 +2799,7 @@ local function handle_attachment_chunk(data, sender)
     -- Require matching request state. Without an attachment_request + user
     -- consent, we have no business accepting or extracting chunks, and we
     -- mustn't trust a per-chunk filename for any local path.
-    local cprog = load_consent_pending()
+    local cprog = load_state("consent-pending.json")
     local cpe = cprog[att_id]
     if not cpe then
         return 404, {error = "unknown attachment_id"}
@@ -2934,13 +2861,13 @@ local function handle_attachment_chunk(data, sender)
                 cpe.status = "cancel_pending"
                 cpe.rejection_reason = "oversize"
                 cprog[att_id] = cpe
-                save_consent_pending(cprog)
+                save_state("consent-pending.json", cprog)
                 return 200, {ok = false, cancelled = true}
             end
 
             cpe.bytes_received = projected
             cprog[att_id] = cpe
-            save_consent_pending(cprog)
+            save_state("consent-pending.json", cprog)
         end
 
         write_file_binary(chunk_path, raw)
@@ -2963,7 +2890,7 @@ local function handle_attachment_chunk(data, sender)
             os.remove(INBOX .. "/" .. cpe.inbox_file)
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
-            save_consent_pending(cprog)
+            save_state("consent-pending.json", cprog)
             log("attachment transfer cancelled by user: %s from %s", att_id, sender)
             return 200, {ok = false, cancelled = true}
         end
@@ -3054,7 +2981,7 @@ local function handle_attachment_chunk(data, sender)
             os.remove(INBOX .. "/" .. cprog[att_id].inbox_file)
         end
         cprog[att_id] = nil
-        save_consent_pending(cprog)
+        save_state("consent-pending.json", cprog)
     end
 
     os.execute('rm -rf ' .. shell_quote(pending_dir))
