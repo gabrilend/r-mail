@@ -1089,36 +1089,17 @@ local function _is_hash(s)
     return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
 end
 
--- chunks-outgoing.json stores a `.to` field per transfer naming the
--- recipient contact.  Persist it as a hash, but keep the name in memory
--- so existing consumers (contacts[transfer.to], logs, note_contact_result)
--- don't have to change.  These wrappers do the translation at the disk
--- boundary: load resolves hash→name using the current contacts file;
--- save deep-copies and hashes the .to field of the copy.
---
--- A transfer whose .to hash can't be resolved (contact renamed/deleted
--- since save) keeps the hash as its .to value; downstream code already
--- handles "unknown contact" by skipping/logging that transfer.
--- The wrapper body uses raw read_file / write_file rather than
--- load_state / save_state so a global replace_all of
--- `load_chunks_outgoing()` → `load_chunks_outgoing()`
--- (and matching save) doesn't accidentally rewrite the implementation
--- into calling itself.
+-- chunks-outgoing.json: attachment-transfer resume state.  The wrapper
+-- currently only strips .compressed_path on save (a vestigial #348 step
+-- 2 leftover; revisited in the step-2 revert that follows).  Once that
+-- lands too, the wrappers go away and callers use load_state /
+-- save_state directly.
 local _CHUNKS_PATH = "chunks-outgoing.json"
+
 local function load_chunks_outgoing()
     local text = read_file(STATE .. "/" .. _CHUNKS_PATH)
     local state = (text and text ~= "") and json.decode(text) or {}
     if type(state) ~= "table" then return {} end
-    local contacts = load_contacts()
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-    for _, transfer in pairs(state) do
-        if _is_hash(transfer.to) and hash_to_name[transfer.to] then
-            transfer.to = hash_to_name[transfer.to]
-        end
-    end
     return state
 end
 
@@ -1131,9 +1112,6 @@ local function save_chunks_outgoing(state)
             -- zip_path_for(zip_id)); legacy entries loaded from disk may
             -- still have the field.  Don't propagate it back out.
             if fk ~= "compressed_path" then copy[fk] = fv end
-        end
-        if type(copy.to) == "string" and not _is_hash(copy.to) then
-            copy.to = hash_contact_name(copy.to)
         end
         snapshot[k] = copy
     end
