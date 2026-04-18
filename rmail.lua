@@ -1089,35 +1089,6 @@ local function _is_hash(s)
     return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
 end
 
--- chunks-outgoing.json: attachment-transfer resume state.  The wrapper
--- currently only strips .compressed_path on save (a vestigial #348 step
--- 2 leftover; revisited in the step-2 revert that follows).  Once that
--- lands too, the wrappers go away and callers use load_state /
--- save_state directly.
-local _CHUNKS_PATH = "chunks-outgoing.json"
-
-local function load_chunks_outgoing()
-    local text = read_file(STATE .. "/" .. _CHUNKS_PATH)
-    local state = (text and text ~= "") and json.decode(text) or {}
-    if type(state) ~= "table" then return {} end
-    return state
-end
-
-local function save_chunks_outgoing(state)
-    local snapshot = {}
-    for k, v in pairs(state) do
-        local copy = {}
-        for fk, fv in pairs(v) do
-            -- compressed_path was dropped earlier in #348 (derived via
-            -- zip_path_for(zip_id)); legacy entries loaded from disk may
-            -- still have the field.  Don't propagate it back out.
-            if fk ~= "compressed_path" then copy[fk] = fv end
-        end
-        snapshot[k] = copy
-    end
-    write_file(STATE .. "/" .. _CHUNKS_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
 
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
@@ -1585,23 +1556,18 @@ end
 -- separate user-invoked tool, but it shouldn't be automatic on
 -- message deletion.
 
--- delete a zip if no other active transfer still references it
--- Zip files for outbound attachments always live at
--- paths.pending .. "/rmail-<zip_id>.zip" (see compress_attachment).  Pre-#348
--- the path was also cached in chunks-outgoing.json as transfer.compressed_path;
--- dropped there to reduce state-file PII.  Compute it on the fly instead.
-local function zip_path_for(zip_id)
-    return paths.pending .. "/rmail-" .. zip_id .. ".zip"
-end
-
-local function release_zip(chunks, zip_id)
+-- delete a zip if no other active transfer still references it.
+-- Shared-zip identity is the compressed zip's path itself; transfers
+-- for the same outbox message + source file share the same zip on
+-- disk, so they share the same .compressed_path value in state.
+local function release_zip(chunks, compressed_path)
+    if not compressed_path then return end
     for _, t in pairs(chunks) do
-        if t.zip_id == zip_id then return end  -- still in use
+        if t.compressed_path == compressed_path then return end  -- still in use
     end
-    local zip_path = zip_path_for(zip_id)
-    if file_exists(zip_path) then
-        os.remove(zip_path)
-        log("deleted shared zip %s (no more recipients)", zip_id)
+    if file_exists(compressed_path) then
+        os.remove(compressed_path)
+        log("deleted shared zip %s (no more recipients)", compressed_path)
     end
 end
 
@@ -1765,17 +1731,17 @@ local function handle_delete(data, sender)
                     end
                     save_state("outbox.json", outbox_state)
                     -- cancel any outgoing chunk transfers to this recipient for this message
-                    local att_state = load_chunks_outgoing()
+                    local att_state = load_state("chunks-outgoing.json")
                     local att_changed = false
                     for att_id, transfer in pairs(att_state) do
                         if transfer.to == sender and transfer.message_id == message_id then
                             att_state[att_id] = nil
-                            release_zip(att_state, transfer.zip_id)
+                            release_zip(att_state, transfer.compressed_path)
                             att_changed = true
                             log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
                         end
                     end
-                    if att_changed then save_chunks_outgoing(att_state) end
+                    if att_changed then save_state("chunks-outgoing.json", att_state) end
                     return 200, {ok = true}
                 end
             end
@@ -2480,9 +2446,9 @@ local function sha256_of_bytes(data)
     return result
 end
 
-local function compress_attachment(filepath, zip_id)
+local function compress_attachment(filepath)
     os.execute('mkdir -p ' .. shell_quote(paths.pending))
-    local zip_path = paths.pending .. "/rmail-" .. zip_id .. ".zip"
+    local zip_path = paths.pending .. "/rmail-" .. uuid() .. ".zip"
     local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
     local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
     if is_dir_h then is_dir_h:close() end
@@ -2973,7 +2939,7 @@ local function handle_attachment_response(data, sender)
     local att_id = data.attachment_id
     local consent = data.consent
     if not att_id then return 400, {error = "missing attachment_id"} end
-    local chunks = load_chunks_outgoing()
+    local chunks = load_state("chunks-outgoing.json")
     local transfer = chunks[att_id]
     if not transfer then return 200, {ok = true} end
     if consent then
@@ -2983,15 +2949,15 @@ local function handle_attachment_response(data, sender)
         transfer.missing = m
         log("consent granted by %s for %s", sender, transfer.filename)
     else
-        if transfer.zip_id and file_exists(zip_path_for(transfer.zip_id)) then
-            os.remove(zip_path_for(transfer.zip_id))
+        if transfer.compressed_path and file_exists(transfer.compressed_path) then
+            os.remove(transfer.compressed_path)
         end
         write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
             sender .. " declined your attachment " .. transfer.filename .. ".")
         chunks[att_id] = nil
         log("consent declined by %s for %s", sender, transfer.filename)
     end
-    save_chunks_outgoing(chunks)
+    save_state("chunks-outgoing.json", chunks)
     return 200, {ok = true}
 end
 
@@ -3064,7 +3030,7 @@ local function check_transfers_file_cancellations()
     local content = read_file(paths.transfers)
     if not content then return end
 
-    local chunks = load_chunks_outgoing()
+    local chunks = load_state("chunks-outgoing.json")
     if not next(chunks) then return end
 
     -- Parse file into {path -> {contact_name -> true}}
@@ -3097,20 +3063,20 @@ local function check_transfers_file_cancellations()
 
     local changed = false
     for att_id, transfer in pairs(to_cancel) do
-        release_zip(chunks, transfer.zip_id)
+        release_zip(chunks, transfer.compressed_path)
         chunks[att_id] = nil
         log("transfer cancelled via transfers file: %s to %s", transfer.filename, transfer.to)
         changed = true
     end
 
     if changed then
-        save_chunks_outgoing(chunks)
+        save_state("chunks-outgoing.json", chunks)
         write_transfers_file(chunks)
     end
 end
 
 local function send_next_chunks(my_name)
-    local chunks = load_chunks_outgoing()
+    local chunks = load_state("chunks-outgoing.json")
     if not next(chunks) then return false end
     local contacts = load_contacts()
     local did_work = false
@@ -3122,11 +3088,11 @@ local function send_next_chunks(my_name)
             log("chunk transfer: unknown contact %s, skipping", transfer.to)
             goto continue
         end
-        local zip_path = zip_path_for(transfer.zip_id)
+        local zip_path = transfer.compressed_path
         if not file_exists(zip_path) then
             log("chunk transfer: zip missing for %s, cancelling", att_id)
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id)
+            release_zip(chunks, transfer.compressed_path)
             changed = true; goto continue
         end
         local f = io.open(zip_path, "rb")
@@ -3182,7 +3148,7 @@ local function send_next_chunks(my_name)
         end
         f:close()
         if cancelled then
-            release_zip(chunks, transfer.zip_id)
+            release_zip(chunks, transfer.compressed_path)
             chunks[att_id] = nil
             changed = true
         elseif not aborted and #transfer.missing == 0 then
@@ -3207,11 +3173,11 @@ local function send_next_chunks(my_name)
                 os.remove(transfer.original_path)
             end
             chunks[att_id] = nil
-            release_zip(chunks, transfer.zip_id)
+            release_zip(chunks, transfer.compressed_path)
             changed = true
         end
     end
-    if changed then save_chunks_outgoing(chunks) end
+    if changed then save_state("chunks-outgoing.json", chunks) end
     return did_work
 end
 
@@ -3271,7 +3237,7 @@ end
 local function sync_outbox(my_name)
     local contacts = load_contacts()
     local state = load_state("outbox.json")
-    local att_state = load_chunks_outgoing()
+    local att_state = load_state("chunks-outgoing.json")
     local att_state_changed = false
     local did_work = false
 
@@ -3447,24 +3413,22 @@ local function sync_outbox(my_name)
                                     local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
                                     local expected_size = measure_size(filepath) or 0
                                     -- find existing zip for this file (shared across recipients)
-                                    local zip_id, zip_path, checksum, total_chunks
+                                    local zip_path, checksum, total_chunks
                                     for _, t in pairs(att_state) do
                                         if t.outbox_file == name and
                                            t.original_path == filepath and
-                                           t.zip_id and
-                                           file_exists(zip_path_for(t.zip_id)) then
-                                            zip_id       = t.zip_id
-                                            zip_path     = zip_path_for(t.zip_id)
+                                           t.compressed_path and
+                                           file_exists(t.compressed_path) then
+                                            zip_path     = t.compressed_path
                                             checksum     = t.total_checksum
                                             total_chunks = t.total_chunks
                                             break
                                         end
                                     end
-                                    if not zip_id then
-                                        zip_id = uuid()
+                                    if not zip_path then
                                         local comp_size
                                         zip_path, checksum, comp_size =
-                                            compress_attachment(filepath, zip_id)
+                                            compress_attachment(filepath)
                                         if zip_path then
                                             total_chunks = math.max(1,
                                                 math.ceil(comp_size / cfg.chunk_size))
@@ -3474,9 +3438,7 @@ local function sync_outbox(my_name)
                                         att_state[att_id] = {
                                             to = rname, outbox_file = name,
                                             original_path = filepath, filename = basename,
-                                            zip_id = zip_id,
-                                            -- compressed_path dropped (#348):
-                                            -- derive via zip_path_for(zip_id).
+                                            compressed_path = zip_path,
                                             total_chunks = total_chunks,
                                             total_checksum = checksum,
                                             expected_size = expected_size,
@@ -3627,16 +3589,14 @@ local function sync_outbox(my_name)
                         write_file(tmp_path, op.body or "")
                         local att_id = uuid()
                         local zip_path, checksum, comp_size =
-                            compress_attachment(tmp_path, att_id)
+                            compress_attachment(tmp_path)
                         if zip_path and comp_size then
                             local total_chunks = math.max(1,
                                 math.ceil(comp_size / cfg.chunk_size))
                             att_state[att_id] = {
                                 to = op.recipient, outbox_file = op.filename,
                                 original_path = tmp_path, filename = body_fn,
-                                zip_id = att_id,
-                                -- compressed_path dropped (#348):
-                                -- derive via zip_path_for(zip_id).
+                                compressed_path = zip_path,
                                 total_chunks = total_chunks,
                                 total_checksum = checksum,
                                 expected_size = body_size,
@@ -3815,7 +3775,7 @@ local function sync_outbox(my_name)
                     local transfer = att_state[op.att_id]
                     if transfer then
                         att_state[op.att_id] = nil
-                        release_zip(att_state, transfer.zip_id)
+                        release_zip(att_state, transfer.compressed_path)
                         att_state_changed = true
                     end
                     -- the release-and-cleanup is the action; reachability
@@ -3843,7 +3803,7 @@ local function sync_outbox(my_name)
                 for att_id, transfer in pairs(att_state) do
                     if transfer.outbox_file == name then
                         att_state[att_id] = nil
-                        release_zip(att_state, transfer.zip_id)
+                        release_zip(att_state, transfer.compressed_path)
                         att_state_changed = true
                         log("cancelled outgoing chunks for %s (outbox file deleted)", att_id)
                     end
@@ -3862,7 +3822,7 @@ local function sync_outbox(my_name)
         end
     end
 
-    if att_state_changed then save_chunks_outgoing(att_state) end
+    if att_state_changed then save_state("chunks-outgoing.json", att_state) end
     save_state("outbox.json", state)
     return did_work
 end
@@ -5025,7 +4985,7 @@ local function run_sync_cycle(rt)
     local w5 = send_consent_responses(rt.my_name)
     local w6 = send_next_chunks(rt.my_name)
     local w7 = send_attachment_cancellations(rt.my_name)
-    write_transfers_file(load_chunks_outgoing())
+    write_transfers_file(load_state("chunks-outgoing.json"))
     -- One summary log for contacts whose every op failed this cycle
     -- (#324), instead of a separate "failed to X" line per queued op.
     flush_unreachable_summary()
