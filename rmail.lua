@@ -1093,10 +1093,6 @@ local function unmigrate_hashed_keys(state, contacts)
     return migrated
 end
 
-local function _is_hash(s)
-    return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
-end
-
 
 -- ============================================================
 -- NAT traversal (automatic port forwarding)

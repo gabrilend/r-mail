@@ -400,6 +400,23 @@ jump around.
 ### Readability
 - [ ] Install script reads as plain, linear programming — not dense shell idioms (#345)
 
+## 12b. State files are plaintext (#348 reversed)
+
+All PII-hashing from #348 steps 1–6 has been reverted; state files
+should be fully plaintext mirrors of contacts/inbox/outbox.
+
+- [ ] `cat .state/inbox.json` shows `"from": "<name>"` with plaintext contact names, no 64-hex hashes
+- [ ] `cat .state/outbox.json` shows plaintext recipient names as the `.recipients` keys; entries contain `.message_id` but no `.token` or `.token_hash`
+- [ ] `cat .state/chunks-outgoing.json` shows plaintext `.to` (recipient name), `.original_path`, `.filename`, `.outbox_file`, AND `.compressed_path` — no `.zip_id` field; paths are greppable
+- [ ] `cat .state/consent-pending.json` shows plaintext `.from`; `cat .state/consent-responses.json` shows plaintext `.to`
+- [ ] `cat .state/nat_security_warned.json` is keyed by plaintext contact names (truthy values only)
+- [ ] `cat .state/pending-address.json` is keyed by plaintext contact names
+- [ ] Loading legacy `.state/` files written by pre-revert code still works: hashed `.to`/`.from` fields stay as hash strings in memory (no crash) and get rewritten to plaintext on the next save; hashed top-level keys in `nat_security_warned.json` / `pending-address.json` are resolved to plaintext or dropped on load via `unmigrate_hashed_keys`
+- [ ] Renaming a contact while outbox messages are in-flight produces an `unknown contact <name>` log line for the stale recipient (no auto-rename detection); documented recovery is `sed -i 's/"<old>"/"<new>"/g' .state/*.json`
+- [ ] After rename + sed fix, body edits (#306) propagate correctly to the renamed recipient on the next sync
+- [ ] No code path anywhere calls `hash_contact_name` except the `unmigrate_hashed_keys` legacy-state resolver
+- [ ] `hex_sha256` remains in use only by `canonical_contacts_hash` (protocol-level contacts digest) and `hash_contact_name` (legacy-state resolver)
+
 ## 13. Future / design phase
 
 These have no test cases yet. Listed here so they aren't forgotten.

@@ -1,13 +1,16 @@
 # Remove PII from state files
 
-## Status: reversed
+## Status: reversed (complete 2026-04-18)
 
 Steps 1–5 landed in commits between 2026-03 and 2026-04; step 6 was
 implemented in a single session on 2026-04-17 and then unwound later
-in the same session without ever being committed, as part of this
-reversal.  After reconsidering with fresh eyes, the entire effort is
-being **reversed** and the remaining work cancelled.  The short version: the threat model
-is thin, the inspectability cost is real, and "users should be able to
+in the same session without ever being committed.  After reconsidering
+with fresh eyes, the entire effort was reversed across a series of
+commits on 2026-04-18 (one commit per step plus rename-detection
+removal, plus a final cleanup).  State files are now pure plaintext
+mirrors of the source-of-truth files, inspectable with `cat` and
+fixable with `sed`.  The short version of why: the threat model is
+thin, the inspectability cost is real, and "users should be able to
 `cat` their state and understand what's happening" outweighs the
 marginal defense that name-hashing provided.
 
