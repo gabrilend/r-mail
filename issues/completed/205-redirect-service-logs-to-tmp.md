@@ -37,3 +37,24 @@ All service types (runit, systemd, openrc, nixos) now log to `/tmp/rmail.log`.
 Created `scripts/view-logs.sh` for cross-platform log viewing.
 Created hidden symlink `.logs` in project root pointing to log file.
 Updated `docs/service.md` with new logging documentation.
+
+## Follow-up — journalctl fallback for custom systemd units (2026-04-17)
+
+`view-logs.sh` assumed `/tmp/rmail.log` would always exist.  On installs
+where the rmail systemd unit is **not** the one `install.sh` generates —
+for example a NixOS `configuration.nix` that defines its own
+`systemd.services.rmail` without the `StandardOutput = "append:/tmp/…"`
+lines — the daemon logs to journald and the file never appears.  The
+original script hung forever in its "waiting for log file" loop.
+
+Fix: `view-logs.sh` now branches on three cases:
+
+1. Log file exists → `tail -F` it (unchanged fast path).
+2. No file, but systemd is running and `rmail.service` is active →
+   `exec journalctl -u rmail.service -f`.
+3. Neither → keep the original wait-for-file loop so a slow-starting
+   runit / openrc install still works end-to-end.
+
+No install.sh changes; its generated service files already use the
+`/tmp/rmail.log` redirect on every supported init system.  The new
+fallback is purely for users who bring their own service unit.

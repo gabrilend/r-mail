@@ -1141,110 +1141,6 @@ local function save_chunks_outgoing(state)
         json.encode(snapshot, {indent = true}) .. "\n")
 end
 
--- consent-pending.json: receiver-side attachment-consent tracking.  Each
--- entry carries a `.from` (the sender's contact name) that we hash on
--- disk and resolve to a name on load.  Same wrapper pattern as chunks-
--- outgoing; same behaviour when a stored hash can't be resolved.
-local _CPENDING_PATH = "consent-pending.json"
-
-local function load_consent_pending()
-    local text = read_file(STATE .. "/" .. _CPENDING_PATH)
-    local state = (text and text ~= "") and json.decode(text) or {}
-    if type(state) ~= "table" then return {} end
-    local contacts = load_contacts()
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-    for _, entry in pairs(state) do
-        local f = entry["from"]
-        if _is_hash(f) and hash_to_name[f] then
-            entry["from"] = hash_to_name[f]
-        end
-    end
-    return state
-end
-
-local function save_consent_pending(state)
-    local snapshot = {}
-    for k, v in pairs(state) do
-        local copy = {}
-        for fk, fv in pairs(v) do copy[fk] = fv end
-        if type(copy["from"]) == "string" and not _is_hash(copy["from"]) then
-            copy["from"] = hash_contact_name(copy["from"])
-        end
-        snapshot[k] = copy
-    end
-    write_file(STATE .. "/" .. _CPENDING_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
-
--- consent-responses.json: queued accept/decline replies to other contacts.
--- Array of entries, each with a `.to` (recipient contact name).
-local _CRESP_PATH = "consent-responses.json"
-
-local function load_consent_responses()
-    local text = read_file(STATE .. "/" .. _CRESP_PATH)
-    local state = (text and text ~= "") and json.decode(text) or {}
-    if type(state) ~= "table" then return {} end
-    local contacts = load_contacts()
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-    for _, entry in ipairs(state) do
-        if _is_hash(entry.to) and hash_to_name[entry.to] then
-            entry.to = hash_to_name[entry.to]
-        end
-    end
-    return state
-end
-
-local function save_consent_responses(state)
-    local snapshot = {}
-    for i, v in ipairs(state) do
-        local copy = {}
-        for fk, fv in pairs(v) do copy[fk] = fv end
-        if type(copy.to) == "string" and not _is_hash(copy.to) then
-            copy.to = hash_contact_name(copy.to)
-        end
-        snapshot[i] = copy
-    end
-    write_file(STATE .. "/" .. _CRESP_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
-
--- outbox.json carries per-recipient tokens in meta.recipients[name].token
--- pre-#348.  The token is a literal duplicate of the contact's token from
--- the contacts file and is the shared secret for that peer — storing it
--- in .state/ meant a copy of every shared secret leaked into a second
--- file.  save_outbox_state strips the .token field from every recipient
--- record on write; new writes already stopped adding it.  Legacy tokens
--- in loaded state get scrubbed on the next save.
-local _OUTBOX_PATH = "outbox.json"
-
-local function save_outbox_state(state)
-    local snapshot = {}
-    for fname, meta in pairs(state) do
-        local meta_copy = {}
-        for k, v in pairs(meta) do meta_copy[k] = v end
-        if type(meta.recipients) == "table" then
-            local rcopy = {}
-            for rname, rmeta in pairs(meta.recipients) do
-                local rc = {}
-                for rk, rv in pairs(rmeta) do
-                    if rk ~= "token" then rc[rk] = rv end
-                end
-                rcopy[rname] = rc
-            end
-            meta_copy.recipients = rcopy
-        end
-        snapshot[fname] = meta_copy
-    end
-    write_file(STATE .. "/" .. _OUTBOX_PATH,
-        json.encode(snapshot, {indent = true}) .. "\n")
-end
-
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
 -- ============================================================
@@ -1731,6 +1627,36 @@ local function release_zip(chunks, zip_id)
     end
 end
 
+-- {{{ outbox header scanning (#363)
+-- The outbox header block is a run of to:/attach: lines at the top of the
+-- file, with blank lines and // comments allowed interleaved.  Blanks and
+-- comments are preserved verbatim (the user may have inserted them for
+-- readability, or the daemon inserted a `// MISSING ATTACHMENT:` marker)
+-- but they don't terminate the header — scanning continues until the
+-- first line that is none of: to:, attach:, blank, //.
+local function _is_transparent_header_line(line)
+    return line:match("^%s*$") ~= nil or line:match("^%s*//") ~= nil
+end
+
+local function _scan_outbox_header(text)
+    local header_lines = {}
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local lower = line:lower()
+        if lower:match("^to:") or lower:match("^attach:")
+                or _is_transparent_header_line(line) then
+            header_lines[#header_lines + 1] = line
+            pos = line_end + 1
+        else
+            break
+        end
+    end
+    return header_lines, text:sub(pos)
+end
+-- }}}
+
 -- {{{ remove_recipient_from_file
 -- Remove a recipient's to: line from an outbox file.
 -- Also removes orphan attach: lines that no longer have a to: above them.
@@ -1739,21 +1665,7 @@ local function remove_recipient_from_file(filepath, recipient)
     local text = read_file(filepath)
     if not text then return 0 end
 
-    -- parse header lines
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
+    local header_lines, body = _scan_outbox_header(text)
 
     -- remove the matching to: line
     local kept = {}
@@ -1842,7 +1754,7 @@ local function handle_delete(data, sender)
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             -- cancel any pending consent or in-progress chunks from this sender for this message
-            local cpending = load_consent_pending()
+            local cpending = load_state("consent-pending.json")
             local cp_changed = false
             for att_id, entry in pairs(cpending) do
                 if entry["from"] == sender and entry.message_id == message_id then
@@ -1855,7 +1767,7 @@ local function handle_delete(data, sender)
                     log("cancelled consent for %s from %s (sender deleted)", att_id, sender)
                 end
             end
-            if cp_changed then save_consent_pending(cpending) end
+            if cp_changed then save_state("consent-pending.json", cpending) end
             return 200, {ok = true}
         end
     end
@@ -1873,7 +1785,7 @@ local function handle_delete(data, sender)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_outbox_state(outbox_state)
+                    save_state("outbox.json", outbox_state)
                     -- cancel any outgoing chunk transfers to this recipient for this message
                     local att_state = load_chunks_outgoing()
                     local att_changed = false
@@ -2325,37 +2237,169 @@ local function http_post_batch_with_fallback(requests)
 end
 
 
+-- ---- attach: glob expansion (#362) --------------------------------------
+--
+-- A user-written "attach:" line may contain shell-style glob metachars
+-- (`*`, `?`, `[...]`) in the filename component.  parse_outbox_file
+-- expands every glob line to one absolute-path "attach:" line per
+-- matching regular file, and rewrites the outbox file on disk so the
+-- rest of the pipeline (transfer tracking, remove_attach_from_file) is
+-- operating on stable literal paths.
+--
+-- Only the filename component is globbed — a glob in a directory
+-- component logs a warning and the line is left unchanged.
+
+local _glob_warned = {}
+
+local function _has_glob_chars(s)
+    return s:find("[%*%?%[]") ~= nil
+end
+
+local function _glob_to_lua_pattern(glob)
+    local out = {}
+    local i = 1
+    local n = #glob
+    while i <= n do
+        local c = glob:sub(i, i)
+        if c == "*" then
+            out[#out + 1] = "[^/]*"
+        elseif c == "?" then
+            out[#out + 1] = "[^/]"
+        elseif c == "[" then
+            local j = glob:find("]", i + 1, true)
+            if j then
+                local inner = glob:sub(i + 1, j - 1)
+                if inner:sub(1, 1) == "!" then inner = "^" .. inner:sub(2) end
+                out[#out + 1] = "[" .. inner .. "]"
+                i = j
+            else
+                out[#out + 1] = "%["
+            end
+        elseif c == "%" or c == "." or c == "(" or c == ")"
+            or c == "+" or c == "-" or c == "^" or c == "$" then
+            out[#out + 1] = "%" .. c
+        else
+            out[#out + 1] = c
+        end
+        i = i + 1
+    end
+    return "^" .. table.concat(out) .. "$"
+end
+
+local function _list_dir_files(dir)
+    -- Regular files only (no dirs, no dotfiles).  Silent — no per-session
+    -- warnings, unlike list_files which is tailored to INBOX/OUTBOX/etc.
+    local files = {}
+    local handle = io.popen('ls -1p ' .. shell_quote(dir) .. ' 2>/dev/null')
+    if handle then
+        for name in handle:lines() do
+            if name:sub(1, 1) ~= '.' and name:sub(-1) ~= '/' then
+                files[#files + 1] = name
+            end
+        end
+        handle:close()
+    end
+    return files
+end
+
+-- Expand a single attach: pattern.  Returns a list of absolute paths
+-- (sorted), or nil if expansion is not possible (non-absolute path,
+-- glob in a directory component).  A valid pattern with zero matches
+-- returns an empty list.
+local function _expand_attach_glob(pattern, outbox_file)
+    local expanded = expand_tilde(pattern)
+    if expanded:sub(1, 1) ~= "/" then
+        local key = outbox_file .. "\0rel\0" .. pattern
+        if not _glob_warned[key] then
+            _glob_warned[key] = true
+            log("attach: glob pattern must be absolute or ~-anchored: %s (%s)",
+                pattern, outbox_file)
+        end
+        return nil
+    end
+    local slash = expanded:match(".*()/")
+    if not slash then return nil end
+    local dir = expanded:sub(1, slash - 1)
+    local file_pat = expanded:sub(slash + 1)
+    if dir == "" then dir = "/" end
+    if _has_glob_chars(dir) then
+        local key = outbox_file .. "\0dir\0" .. pattern
+        if not _glob_warned[key] then
+            _glob_warned[key] = true
+            log("attach: glob in directory component not supported: %s (%s)",
+                pattern, outbox_file)
+        end
+        return nil
+    end
+    local lua_pat = _glob_to_lua_pattern(file_pat)
+    local matches = {}
+    for _, name in ipairs(_list_dir_files(dir)) do
+        if name:match(lua_pat) then
+            matches[#matches + 1] = dir .. "/" .. name
+        end
+    end
+    table.sort(matches)
+    return matches
+end
+
 local function parse_outbox_file(path)
     local text = read_file(path)
     if not text then return nil, nil end
 
-    -- collect all header lines (to: and attach:)
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
+    local header_lines, body = _scan_outbox_header(text)
+
+    -- expand glob attach: lines.  One glob line with N matches becomes
+    -- N attach: lines (absolute paths, sorted).  Zero-match lines and
+    -- directory-glob lines stay unchanged so the user can see/fix them
+    -- in the outbox file; a once-per-session log warns about each.
+    local expanded_header = {}
+    local file_changed = false
+    for _, line in ipairs(header_lines) do
+        local is_attach = line:lower():match("^attach:") ~= nil
+        local fp = is_attach and
+            line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$") or nil
+        if fp and fp ~= "" and _has_glob_chars(fp) then
+            local matches = _expand_attach_glob(fp, path)
+            if matches and #matches > 0 then
+                for _, m in ipairs(matches) do
+                    expanded_header[#expanded_header + 1] = "attach: " .. m
+                end
+                log("attach: expanded %s -> %d file(s) in %s",
+                    fp, #matches, path:match("([^/]+)$") or path)
+                file_changed = true
+            elseif matches and #matches == 0 then
+                local key = path .. "\0zero\0" .. fp
+                if not _glob_warned[key] then
+                    _glob_warned[key] = true
+                    log("attach: no files match %s (%s)",
+                        fp, path:match("([^/]+)$") or path)
+                end
+                expanded_header[#expanded_header + 1] = line
+            else
+                -- nil: unexpandable (already warned).  Keep line as-is.
+                expanded_header[#expanded_header + 1] = line
+            end
         else
-            break
+            expanded_header[#expanded_header + 1] = line
         end
+    end
+
+    if file_changed then
+        write_file(path, table.concat(expanded_header, "\n") .. "\n" .. body)
     end
 
     -- build per-recipient entries: each to: gets all attach: lines after it
     local entries = {}
-    for i, line in ipairs(header_lines) do
+    for i, line in ipairs(expanded_header) do
         if line:lower():match("^to:") then
             local name = line:match("^[Tt][Oo]:%s*(.-)%s*$")
             if name and name ~= "" then
                 local attachments = {}
-                for j = i + 1, #header_lines do
-                    if header_lines[j]:lower():match("^attach:") then
-                        local fp = header_lines[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
-                        if fp and fp ~= "" then
-                            attachments[#attachments + 1] = expand_tilde(fp)
+                for j = i + 1, #expanded_header do
+                    if expanded_header[j]:lower():match("^attach:") then
+                        local afp = expanded_header[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+                        if afp and afp ~= "" then
+                            attachments[#attachments + 1] = expand_tilde(afp)
                         end
                     end
                 end
@@ -2365,7 +2409,37 @@ local function parse_outbox_file(path)
     end
 
     if #entries == 0 then return nil, nil end
-    return entries, text:sub(pos)
+    return entries, body
+end
+
+
+-- Insert a `// MISSING ATTACHMENT:` marker below the `attach:` line for
+-- the given filepath in an outbox file (#363).  Idempotent: if the marker
+-- already exists anywhere in the file, does nothing.  Logs only when the
+-- marker is actually inserted, so repeated sync cycles on an unresolved
+-- missing file don't spam the log.
+local function mark_missing_attachment(outbox_path, filepath, outbox_name)
+    local text = read_file(outbox_path)
+    if not text then return end
+    local marker = "// MISSING ATTACHMENT: " .. filepath
+    if text:find(marker, 1, true) then return end
+
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local line = text:sub(pos, line_end - 1)
+        local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+        if fp == filepath then
+            local prefix = text:sub(1, line_end)
+            if prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end
+            local suffix = text:sub(line_end + 1)
+            local marker_line = marker .. " \xe2\x80\x94 file not found"
+            write_file(outbox_path, prefix .. marker_line .. "\n" .. suffix)
+            log("attach: file not found: %s (in %s)", filepath, outbox_name)
+            return
+        end
+        pos = line_end + 1
+    end
 end
 
 
@@ -2451,20 +2525,7 @@ end
 local function remove_attach_from_file(filepath, attach_path)
     local text = read_file(filepath)
     if not text then return end
-    local header_lines = {}
-    local pos = 1
-    while pos <= #text do
-        local line_end = text:find("\n", pos) or #text + 1
-        local line = text:sub(pos, line_end - 1)
-        local lower = line:lower()
-        if lower:match("^to:") or lower:match("^attach:") then
-            header_lines[#header_lines + 1] = line
-            pos = line_end + 1
-        else
-            break
-        end
-    end
-    local body = text:sub(pos)
+    local header_lines, body = _scan_outbox_header(text)
     local kept = {}
     for _, line in ipairs(header_lines) do
         if line:lower():match("^attach:") then
@@ -2492,7 +2553,7 @@ local function handle_attachment_request(data, sender)
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
 
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     -- Idempotent: if we already have an entry for this att_id, a retry from
     -- the sender must not clobber the user's in-progress decision.
     if pending[att_id] then
@@ -2541,7 +2602,7 @@ local function handle_attachment_request(data, sender)
         message_id  = message_id,
         status      = "pending",
     }
-    save_consent_pending(pending)
+    save_state("consent-pending.json", pending)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
     return 200, {ok = true}
 end
@@ -2568,9 +2629,9 @@ local function consent_cancelled(inbox_file)
 end
 
 local function check_consent_pending()
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
-    local responses = load_consent_responses()
+    local responses = load_state("consent-responses.json")
     if type(responses) ~= "table" then responses = {} end
     -- ensure array form (dkjson may decode [] as {})
     local changed = false
@@ -2611,14 +2672,14 @@ local function check_consent_pending()
         end
     end
     if changed then
-        save_consent_pending(pending)
-        save_consent_responses(responses)
+        save_state("consent-pending.json", pending)
+        save_state("consent-responses.json", responses)
     end
     return changed
 end
 
 local function send_consent_responses(my_name)
-    local responses = load_consent_responses()
+    local responses = load_state("consent-responses.json")
     if type(responses) ~= "table" or not responses[1] then return false end
     local contacts = load_contacts()
     local requests, valid = {}, {}
@@ -2642,7 +2703,7 @@ local function send_consent_responses(my_name)
     if #requests == 0 then return false end
     local results = http_post_batch_with_fallback(requests)
     local remaining = {}
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     for i, resp in ipairs(valid) do
         note_contact_result(resp.to, results[i].ok)
         if results[i].ok then
@@ -2673,13 +2734,13 @@ local function send_consent_responses(my_name)
             -- summary at cycle end (#324); no per-contact log here.
         end
     end
-    save_consent_pending(pending)
-    save_consent_responses(remaining)
+    save_state("consent-pending.json", pending)
+    save_state("consent-responses.json", remaining)
     return #remaining < #valid
 end
 
 local function send_attachment_cancellations(my_name)
-    local pending = load_consent_pending()
+    local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
     local contacts = load_contacts()
     local to_cancel = {}
@@ -2707,7 +2768,7 @@ local function send_attachment_cancellations(my_name)
         end
     end
     if #requests == 0 then
-        save_consent_pending(pending)
+        save_state("consent-pending.json", pending)
         return true
     end
     local results = http_post_batch_with_fallback(requests)
@@ -2719,7 +2780,7 @@ local function send_attachment_cancellations(my_name)
         end
         -- failure: detail rolls into the unreachable summary (#324)
     end
-    save_consent_pending(pending)
+    save_state("consent-pending.json", pending)
     return true
 end
 
@@ -2738,7 +2799,7 @@ local function handle_attachment_chunk(data, sender)
     -- Require matching request state. Without an attachment_request + user
     -- consent, we have no business accepting or extracting chunks, and we
     -- mustn't trust a per-chunk filename for any local path.
-    local cprog = load_consent_pending()
+    local cprog = load_state("consent-pending.json")
     local cpe = cprog[att_id]
     if not cpe then
         return 404, {error = "unknown attachment_id"}
@@ -2800,13 +2861,13 @@ local function handle_attachment_chunk(data, sender)
                 cpe.status = "cancel_pending"
                 cpe.rejection_reason = "oversize"
                 cprog[att_id] = cpe
-                save_consent_pending(cprog)
+                save_state("consent-pending.json", cprog)
                 return 200, {ok = false, cancelled = true}
             end
 
             cpe.bytes_received = projected
             cprog[att_id] = cpe
-            save_consent_pending(cprog)
+            save_state("consent-pending.json", cprog)
         end
 
         write_file_binary(chunk_path, raw)
@@ -2829,7 +2890,7 @@ local function handle_attachment_chunk(data, sender)
             os.remove(INBOX .. "/" .. cpe.inbox_file)
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
-            save_consent_pending(cprog)
+            save_state("consent-pending.json", cprog)
             log("attachment transfer cancelled by user: %s from %s", att_id, sender)
             return 200, {ok = false, cancelled = true}
         end
@@ -2920,7 +2981,7 @@ local function handle_attachment_chunk(data, sender)
             os.remove(INBOX .. "/" .. cprog[att_id].inbox_file)
         end
         cprog[att_id] = nil
-        save_consent_pending(cprog)
+        save_state("consent-pending.json", cprog)
     end
 
     os.execute('rm -rf ' .. shell_quote(pending_dir))
@@ -3221,7 +3282,7 @@ local function self_delete_from_outbox(my_name, message_id)
                     if not next(meta.recipients) then
                         outbox_state[filename] = nil
                     end
-                    save_outbox_state(outbox_state)
+                    save_state("outbox.json", outbox_state)
                     return
                 end
             end
@@ -3266,44 +3327,12 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- detect contact renames via stored token fingerprint.  Pre-#348 this
-    -- matched against rmeta.token (the raw shared secret duplicated into
-    -- state).  Post-#348 we only persist hash_token(token) as token_hash,
-    -- so the lookup table is keyed by that same hash.  Legacy entries
-    -- still carrying .token keep working during the transition because
-    -- we also populate the lookup from plaintext tokens.
-    local contact_by_token_hash = {}
-    local contact_by_token_plain = {}
-    for cname, contact in pairs(contacts) do
-        if cname ~= my_name and contact.token then
-            contact_by_token_hash[hex_sha256(contact.token)] = cname
-            contact_by_token_plain[contact.token] = cname
-        end
-    end
-    for fname, fmeta in pairs(state) do
-        if fmeta.recipients then
-            local renames = {}
-            for rname, rmeta in pairs(fmeta.recipients) do
-                if not contacts[rname] then
-                    local new_name = nil
-                    if rmeta.token_hash then
-                        new_name = contact_by_token_hash[rmeta.token_hash]
-                    elseif rmeta.token then
-                        new_name = contact_by_token_plain[rmeta.token]
-                    end
-                    if new_name and not fmeta.recipients[new_name] then
-                        renames[rname] = new_name
-                    end
-                end
-            end
-            for old_name, new_name in pairs(renames) do
-                fmeta.recipients[new_name] = fmeta.recipients[old_name]
-                fmeta.recipients[old_name] = nil
-                log("contact renamed: %s -> %s (state migrated for %s)", old_name, new_name, fname)
-                did_work = true
-            end
-        end
-    end
+    -- Contact renames are a user-serviced operation (#348 reversal).  A
+    -- recipient name in state that no longer exists in contacts is
+    -- simply logged as unknown; the user fixes it by renaming in
+    -- contacts, updating any to: lines in the outbox file, and running
+    -- `sed -i 's/"<old>"/"<new>"/g' .state/*.json`.  See the #348
+    -- issue file for the rationale.
 
     -- Phase 1: collect all pending operations
     local ops = {}
@@ -3432,7 +3461,10 @@ local function sync_outbox(my_name)
                                         in_progress = true; break
                                     end
                                 end
-                                if not in_progress then
+                                if not in_progress and not file_exists(filepath) then
+                                    mark_missing_attachment(
+                                        OUTBOX .. "/" .. name, filepath, name)
+                                elseif not in_progress then
                                     local att_id = uuid()
                                     local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
                                     local expected_size = measure_size(filepath) or 0
@@ -3775,19 +3807,8 @@ local function sync_outbox(my_name)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
-                        -- #348: store only the hex sha256 of the token,
-                        -- not the token itself.  The rename-detection
-                        -- path still works (it hashes contacts' tokens
-                        -- into the same space) and .state/ no longer
-                        -- duplicates shared secrets out of the contacts
-                        -- file.
-                        local thash = nil
-                        if op.contact and op.contact.token then
-                            thash = hex_sha256(op.contact.token)
-                        end
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
-                            token_hash = thash,
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
@@ -3864,7 +3885,7 @@ local function sync_outbox(my_name)
     end
 
     if att_state_changed then save_chunks_outgoing(att_state) end
-    save_outbox_state(state)
+    save_state("outbox.json", state)
     return did_work
 end
 
