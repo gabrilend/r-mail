@@ -26,8 +26,9 @@ meant "send these to alice."
 
 If `~/mail/outbox/<NAME>/` exists and `<NAME>` matches an entry in
 `contacts`, the daemon treats every regular file directly inside
-that directory as an outbox message addressed to `<NAME>` — no
-`to:` line required. The directory name *is* the recipient.
+that directory as an outbox message with `<NAME>` as the **first
+recipient**. No `to:` line required in the file itself — the
+directory name *is* the first `to:` line, logically.
 
 ```
 ~/mail/outbox/
@@ -37,11 +38,10 @@ that directory as an outbox message addressed to `<NAME>` — no
     hello-world         ← regular outbox file with `to:` lines as usual
 ```
 
-Messages written this way are fully equivalent to a file in
-`outbox/` whose header reads `to: alice\n\n<body>`. All existing
-pipeline features — body edits (#306), attachments, delete
-propagation, glob expansion (#362), missing-file markers (#363) —
-should work identically.
+Files in a contact folder support everything regular outbox files
+do — body edits (#306), attachments, glob expansion (#362),
+missing-file markers (#363), delete propagation. The only
+difference is where the first recipient comes from.
 
 ## Design details
 
@@ -50,191 +50,276 @@ should work identically.
 At the top of `sync_outbox`, after loading contacts, build a set of
 contact names. For each subdirectory directly inside `OUTBOX`:
 
-- If the subdirectory name matches a contact → treat as a
-  "contact folder." Enumerate its regular files and queue each as
-  a message to that contact.
-- If the subdirectory name does **not** match a contact → fall
-  through to the existing "ignoring directory" warning (once per
-  session, as today).
+- Name matches a contact → treat as a **contact folder**. Enumerate
+  its regular files and treat each as a message whose implicit
+  first recipient is the directory's contact.
+- Name does not match a contact → existing "ignoring directory"
+  warning fires (once per session, same as today).
 
-Matching is exact, case-sensitive — same as how `to:` lines
-resolve today.
+Matching is exact and case-sensitive, same as how `to:` lines
+resolve.
 
-### State keying
+### Extra `to:` lines are additional recipients, not conflicts
 
-Outbox state is currently `state[filename]` keyed by basename. For
-files inside contact folders we need a key that survives a basename
-collision between `outbox/hello` and `outbox/alice/hello`. Options:
+A file inside a contact folder can still have its own `to:` lines.
+The directory gives the first recipient; any `to:` lines inside
+the file name **additional** recipients. Every recipient — the
+folder-implicit one plus every explicit one — receives the
+message through the normal delivery pipeline.
 
-1. **Relative path** as the state key: `"alice/hello"` vs `"hello"`.
-   Clean, unambiguous, sorts nicely in the state file. Requires
-   updating the key convention across every `state[name]` lookup
-   in sync_outbox.
-2. **Hash the path** — unnecessary given the #348 reversal; keep
-   things plaintext and greppable.
+Example: `outbox/alice/birthday-plan` containing
 
-Go with option 1. The state key becomes the path-relative-to-OUTBOX
-(with `/` as the separator). Files in the outbox root keep their
-plain-basename keys; files in a contact folder get `<contact>/<name>`.
+```
+to: bob
+to: carol
 
-### Header parsing inside contact-folder files
+hey everyone, birthday's on friday at 7
+```
 
-A file inside `outbox/alice/` doesn't *need* a `to:` line. Three
-cases:
+sends to alice, bob, and carol. No warning, no `// AMBIGUOUS`
+marker — this is just how multi-recipient works when one of the
+recipients is given by location.
 
-1. **No `to:` line (the normal case):** recipient = directory name.
-   Parser treats the whole file as body (after the usual blank/
-   comment handling from #363). `attach:` lines at the top still
-   work — the header block exists, it just has no `to:` lines.
-2. **`to:` line matching the directory name:** redundant but
-   harmless; recipient is still the directory's contact. No
-   warning — user explicitly repeated themselves, that's fine.
-3. **`to:` line naming a *different* contact:** ambiguous. Two
-   options:
-   - Directory wins, `to:` ignored with a clear warning.
-   - Error: refuse to process, mark the file with a
-     `// AMBIGUOUS RECIPIENT: directory says <dir-name>, to: says
-     <to-name>` comment, same pattern as the #363 missing-
-     attachment marker.
+If the file has a `to: <same contact as the folder>` line (e.g.
+`to: alice` inside `outbox/alice/`), that's a no-op duplicate —
+silently deduplicate, no warning.
 
-   Lean toward the **error-with-marker** approach. Silent
-   precedence is a footgun; the user may have moved a file into
-   the wrong folder and still expects the `to:` line to route it.
+### Do not edit the file to add a synthetic `to:` line
 
-### Filename becomes the subject
+The implementation must not write a `to:` line into the file on
+disk. Two reasons:
 
-The filename — with the directory stripped — is the subject on
-the receiver's side. `outbox/alice/quick-note` lands in alice's
-inbox as `quick-note`, same as if the user had written
-`outbox/quick-note` with `to: alice`. Subject conversion (spaces
-→ dashes, duplicate handling per #315) is unchanged.
+1. Users expect rmail to leave their outbox files alone unless
+   there's a specific, visible reason (glob expansion from #362,
+   missing-file markers from #363 — both under named comment
+   conventions). Silently mutating a file to add a header the user
+   didn't write is surprising.
+2. A file in a contact folder might be binary — a PDF, an image,
+   a zip — that the user dropped in as a quick way to send it.
+   Prepending text bytes would corrupt it.
 
-### Attachments still work
+Instead, handle the implicit recipient *at parse time*:
+`parse_outbox_file` takes an optional `implicit_first_recipient`
+argument. If set, the returned `entries` list starts with that
+recipient (just like a regular file whose first line is
+`to: <implicit_first_recipient>`), then any `to:` lines inside the
+file append to it. The file on disk is never written back.
 
-An `attach:` line inside a contact-folder file resolves the same
-way it does in a regular outbox file: relative to the current
-working directory (user-facing), with `~` expansion. Glob
-expansion (#362) and the missing-file marker (#363) work
-identically.
+This keeps text and binary files both valid. For binary files, the
+parser finds no header lines, so the "body" is the entire file
+contents — exactly as the wire protocol would deliver it to a
+regular `to: <name>` text message whose body happens to be bytes.
+Whether binary-body support actually works end-to-end is a
+question for the wire layer; this feature doesn't regress it and
+doesn't try to advance it either.
 
-### Nested directories
+### Files in contact folders must never be dropped for "missing `to:`"
 
-Only the first level matters. `outbox/alice/` is a contact folder;
-files directly in it get routed to alice. `outbox/alice/drafts/`
-is a subdirectory *inside* a contact folder — fall through to the
-existing "directory inside this path" warning path, treated as
-ignored.
+The current parser returns `nil, nil` when it finds no `to:` lines,
+and `sync_outbox` logs "skipping: missing 'to:' header." Left
+alone, that would fire constantly for empty contact-folder files.
 
-Explicitly non-goal: per-contact outbox subfolders for organisation
-(e.g. `outbox/alice/drafts/` or `outbox/alice/2026-04/`). That adds
-complexity users can get by renaming files with prefixes if they
-want.
+Worse, a later cleanup path treats a file with no current
+recipients as "user deleted all to: lines, propagate deletion to
+everyone who was there." Applied naively to contact-folder files,
+this means any no-`to:` file in `outbox/alice/` would look like a
+file the user is "unaddressing" and its state entry would be
+cleaned up.
 
-### Directory detection side of the existing warning
+The implicit-recipient rule prevents both. When a file lives in
+`outbox/alice/`, the parser treats alice as the first recipient
+unconditionally. The file is considered "addressed" for the
+lifetime of its existence in the folder.
 
-`list_files` (`rmail.lua:294`) currently logs the "ignoring
-directory" warning for every dir found under OUTBOX. After this
-change, that warning should only fire for directories whose names
-*don't* match a contact. The contact-folder path runs separately
-(not through `list_files`) and doesn't trigger the warning.
+**Deletion propagates only when the file is physically removed
+from the folder** — moved out, deleted, or the folder itself is
+deleted. That's the same rule that applies to regular outbox
+files today (removal from disk → sync_outbox's deleted-files
+cleanup → notify_removal to each recipient). Contact-folder
+files slot into that path identically; the only thing the new
+code does is ensure they don't get dropped for "no `to:`" while
+they're still present.
 
-Legacy behaviour preserved: a user with a directory named something
-non-contact-ish (e.g. `outbox/drafts/`, `outbox/templates/`) still
-sees the one-line warning, same as today.
+### State keying: relative path
 
-### Contact rename
+Outbox state is currently `state[filename]` keyed by basename. Two
+files both named `hello` — one in `outbox/` and one in
+`outbox/alice/` — would collide. New rule: the state key is the
+path relative to `OUTBOX`, using `/` as the separator. So
+`outbox/hello` keeps the key `"hello"`, and `outbox/alice/hello`
+gets `"alice/hello"`. Sorts nicely in the state file, stays
+plaintext and greppable (no hashing per the #348 reversal), and
+every existing `state[name]` lookup just starts receiving a
+compound key instead of a basename.
+
+### Nested directories mirror structure on the receiver
+
+The folder tree inside a contact folder **is preserved on the
+receiver's side**. If the sender has
+
+```
+~/mail/outbox/alice/projects/q2-plan.md
+```
+
+then on delivery the receiver's daemon writes it as
+
+```
+~/mail/inbox/projects/q2-plan.md
+```
+
+creating the subdirectory as needed. The same applies recursively:
+`outbox/alice/projects/2026/q2-plan.md` → `inbox/projects/2026/q2-plan.md`.
+
+The "subject" that travels over the wire is the path *inside* the
+contact folder (the path from the contact folder down to the file,
+not including the contact folder itself). From the receiver's
+point of view, the subject is simply `projects/q2-plan.md`, and
+`sanitize_filename` needs to be replaced (or augmented) with
+something path-aware:
+
+- Split the incoming subject on `/`.
+- Sanitize each component with the existing filename rules.
+- Reject any component equal to `..` or empty.
+- Reject absolute subjects (leading `/`).
+- Reject components with a leading `.` (no dotfiles via wire).
+- Reassemble with `/`, create missing intermediate directories
+  when writing the file.
+
+No new wire field needed — the subject string already carries the
+filename; it just carries a path now.
+
+State on both sides keys by the full relative path (`state["projects/q2-plan.md"]`
+on the receiver; `state["alice/projects/q2-plan.md"]` on the sender).
+
+### Collision with an existing flat inbox entry
+
+A receiver who has `inbox/q2-plan.md` as a flat file and then
+receives a new `projects/q2-plan.md` must handle both without
+clobbering. The #315 duplicate-filename logic (append a short
+`-<message_id_prefix>` when different message_id, merge when same)
+already does the right thing when extended to paths — two
+different message_ids with the same *relative path* become
+`projects/q2-plan.md` and `projects/q2-plan-<short>.md`.
+
+### Rename and deletion
 
 Post-#348 reversal: contact renames are a user-serviced operation.
 If `outbox/alice/` contains in-flight messages and the user renames
-`alice` → `alice-smith` in `contacts`, two things happen:
+`alice` → `alice-smith` in `contacts`:
 
-1. The state entries keyed by `alice/<filename>` reference a
-   recipient name ("alice") that no longer exists. Same symptom as
-   a `to: alice` line pointing at a nonexistent contact: logged as
-   unknown contact, skipped.
-2. The user fixes it by `mv outbox/alice outbox/alice-smith` and
-   running `sed -i 's|"alice/|"alice-smith/|g; s/"alice"/"alice-smith"/g' .state/outbox.json`.
+- State entries keyed by `alice/<path>` reference a recipient name
+  that no longer exists → same symptom as a `to: alice` line
+  pointing at a nonexistent contact: logged as unknown contact,
+  skipped.
+- Recovery: `mv outbox/alice outbox/alice-smith` and
+  `sed -i 's|"alice/|"alice-smith/|g; s/"alice"/"alice-smith"/g' .state/outbox.json`.
 
-Documented alongside the existing rename recovery recipe in the
-user-facing docs, wherever that lands.
+Documented alongside the existing rename recovery recipe.
 
-### Android client
-
-The Android app's outbox UI currently lists files at the top level
-of the outbox directory. Contact folders should either:
-
-- Be surfaced as a grouping (expandable "alice" folder in the UI).
-- Be rolled into the flat list with the contact as a visible badge.
-- Ignored for now; daemon-side feature only; Android support
-  follows in a separate issue.
-
-Lean toward **ignored for now**. Daemon-side support lands this
-issue; Android surfacing is its own design conversation (does the
-user even *want* to manage contact folders from the phone, or is
-this a desktop workflow?).
+Deleting or moving a file out of a contact folder triggers the
+same delete-propagation as deleting a top-level outbox file.
+Deleting the contact folder itself triggers deletion for every
+file that was in it, recursively.
 
 ## Non-goals
 
-- **Recursive contact folders** (`outbox/alice/2026/` etc.). One
-  level only.
-- **Inbox-side mirror.** Per-contact inbox folders (`inbox/alice/`)
-  are a separate feature worth discussing but not in scope here.
-  This issue is about the sender-side workflow.
-- **Per-contact attachments dir.** Same — separate concern.
+- **Per-contact inbox folders** (sender-side mirror of the feature
+  — every inbound message from alice lands in `inbox/alice/`).
+  Separate feature; worth its own issue if there's demand.
+- **Per-contact attachments dir.** Same.
 - **Auto-creating the directory** when a contact is added. User
-  creates the folder when they want it; no daemon-side auto-
-  management.
+  creates the folder when they want it.
+- **Binary-body first-class support on the wire.** Not regressed
+  by this feature, not advanced either.
 
 ## Implementation sketch
 
 Rough order of changes in `sync_outbox`:
 
 1. Load contacts (already done).
-2. Enumerate `OUTBOX` direct children (not via `list_files`; need to
-   distinguish files from subdirs). Use a small helper that returns
-   `({files}, {subdirs_matching_contacts}, {subdirs_other})`.
-3. For each subdir-matching-contact, enumerate its files; treat
-   each as a "virtual outbox entry" with:
-   - state key = `<contact>/<filename>`
-   - path on disk = `OUTBOX/<contact>/<filename>`
-   - implicit `to: <contact>` prepended at parse time
-4. Run the existing sync loop over the combined set (flat files +
-   virtual entries).
-5. For `subdirs_other`, log the "ignoring directory" warning via
-   the existing once-per-session mechanism.
+2. Enumerate `OUTBOX` direct children, distinguishing files from
+   subdirs. A new helper returns `({top_level_files}, {contact_dirs})`
+   where `contact_dirs` is a map `{contact_name -> [file paths inside]}`.
+3. For each `(contact, file)` pair in `contact_dirs`, construct a
+   "virtual outbox entry" with:
+   - state key = `<contact>/<relative path from contact folder>`
+   - path on disk = `OUTBOX/<contact>/<relative path>`
+   - implicit first recipient = `<contact>`
+4. Recurse into subdirectories of contact folders to pick up
+   nested paths.
+5. Flat files (not in a contact folder) keep their current behavior.
+6. Subdirectories whose names don't match a contact still fire the
+   once-per-session "ignoring directory" warning.
 
-`parse_outbox_file` stays as-is; the implicit `to:` is injected
-*before* parsing (the caller prepends `to: <contact>\n` to the text
-it hands to the parser). That keeps the parser honest: it still
-only sees explicit header lines, and the header-robustness work
-from #363 continues to apply.
+`parse_outbox_file` gains one optional parameter,
+`implicit_first_recipient`; when set, it prepends that recipient to
+the returned entries list. All other parser behavior unchanged —
+blank/comment tolerance (#363), glob expansion (#362), everything.
+
+Receiver-side changes are confined to `handle_deliver_message`:
+
+- Accept a subject that contains `/`.
+- Run it through a path-aware sanitizer (new helper).
+- `mkdir -p` the intermediate directories under `INBOX`.
+- Key inbox state by the full sanitized relative path.
 
 ## Test plan (for q-a-tests.md once this lands)
 
-- File in `outbox/<contact>/foo` gets sent to `<contact>` with
-  subject `foo`; normal delivery flow runs.
-- File in `outbox/<non-contact-name>/foo`: not sent; once-per-
-  session "ignoring directory" warning; file untouched.
-- Top-level `outbox/foo` with a `to:` line still works unchanged.
+### Sender side
+
+- File at `outbox/alice/foo` delivers to alice with subject `foo`;
+  file stays in place after delivery; future edits propagate.
+- File at `outbox/alice/foo` with extra `to: bob` inside delivers
+  to both alice and bob; subject is still `foo`.
+- File at `outbox/alice/foo` with redundant `to: alice` inside
+  delivers to alice exactly once (no duplicate).
+- Binary file at `outbox/alice/photo.jpg` (no text header): not
+  mutated on disk; wire delivery sends whatever the body layer
+  supports for non-text bodies (may be handled as opaque bytes or
+  may be rejected by the body-size guard — out of scope here,
+  documented either way).
+- Deleting the file (`rm outbox/alice/foo`) triggers the normal
+  deleted-file cleanup; alice receives a delete notification.
+- Moving the file to a different contact folder (`mv outbox/alice/foo
+  outbox/bob/foo`) is seen as "deleted from alice, new file for
+  bob" — alice gets a delete, bob gets a new deliver.
 - `outbox/alice/foo` AND `outbox/foo` coexist with distinct state
   entries — no cross-contamination.
-- Attachments inside a contact-folder file queue correctly
-  (glob expansion, missing-file markers, etc. still work).
-- `to:` line inside a contact-folder file pointing at a *different*
-  contact gets the `// AMBIGUOUS RECIPIENT:` marker.
-- `to:` line inside a contact-folder file matching the folder
-  works silently (no warning).
-- Nested `outbox/alice/drafts/`: not recursed; treated as "ignored
-  directory inside contact folder" (or just ignored — pick one and
-  log once per session).
-- Deleting a file inside `outbox/alice/`: existing delete-
-  propagation works via the relative-path state key.
-- Renaming the contact: state orphans; `sed` recovery works the
-  same as for top-level files.
+- Nested dir `outbox/alice/projects/q2` delivers as
+  `inbox/projects/q2` on alice's side; intermediate directories
+  created.
+- Deeply nested dir `outbox/alice/projects/2026/q2/plan` works
+  recursively.
+- Contact-named dir with no contact behind it (e.g. user had
+  contact "alice," renamed to "alice-smith," forgot to move the
+  folder): logged as unknown contact, file not sent, state left
+  alone.
+- Non-contact-name dir (`outbox/drafts/`): existing once-per-
+  session warning fires as today.
+
+### Receiver side
+
+- Incoming subject containing `/` creates the intermediate
+  directories under `INBOX` and writes the file at the full
+  relative path.
+- Subject containing `..` is rejected (or the component dropped —
+  pick one and document).
+- Subject with a leading `/` is rejected.
+- Subject with a leading-dot component is rejected.
+- Duplicate relative paths disambiguate via #315's short-id
+  suffix (on the basename, not on a path component).
+- Inbox attribute updates (#306) target by message_id, not path,
+  so a rename on the sender's side doesn't orphan updates.
 
 ## Source
 
-User request 2026-04-20.
+User request 2026-04-20; design refined over two rounds of feedback
+on 2026-04-20.
+
+## Related
+
+- **#369** — Android UI for contact folders.  Blocked on this
+  landing daemon-side first.
 
 ## Status
 
