@@ -36,11 +36,13 @@ universe, so guessing it by brute force is not realistic.
 
 AES-256-GCM needs a key that's exactly 256 bits (32 bytes) long. Your token is
 a human-readable string like `apple-boat-racecar-spelled-backwards-is-racecar`.
-To turn it into a fixed-length key, rmail runs it through **SHA-256** — a one-way
-function that takes input of any length and produces exactly 32 bytes of output.
-The same input always gives the same output, but you can't work backwards from
-the output to figure out the input. There just isn't enough information in the
-256 bits (zeroes and ones) to figure out the original text.
+To turn it into a fixed-length key, rmail runs it through **SHA-256** — a
+one-way function that takes input of any length and produces exactly 32 bytes
+of output. The same input always gives the same output, but you can't work
+backwards from the output to the input: SHA-256 is specifically designed so
+that the only way to find an input that produces a given output is to guess
+inputs and hash them until one matches. With 2^256 possible outputs, that's
+not going to happen in any practical amount of time.
 
 So your token `apple-boat-racecar-spelled-backwards-is-racecar` becomes a 32-byte
 key that looks like `a7 3f 91 c4 ...`. Both sides do this independently and arrive
@@ -48,7 +50,7 @@ at the same key, which is how they can encrypt and decrypt each other's messages
 
 ### What gets sent over the wire
 
-When rmail sends a message, it wraps it in an encrypted package:
+When rmail sends a message, it wraps it in an encrypted frame:
 
 1. **A length header** (4 bytes) — tells the receiver how many bytes to expect.
 2. **A random nonce** (12 bytes) — a unique number generated fresh for each
@@ -56,30 +58,41 @@ When rmail sends a message, it wraps it in an encrypted package:
    the encrypted output looks completely different each time.
 3. **The scrambled message** — your actual message content, encrypted so it
    looks like random bytes.
-4. **Random padding** — a random amount of extra garbage data, appended after
-   the real message but before the seal. The receiver knows the real message
-   length from the internal headers and ignores the padding. This makes it
-   harder for an observer to guess what you're sending based on message size.
-5. **An authentication tag** (16 bytes) — a "seal" that proves the message
+4. **An authentication tag** (16 bytes) — a "seal" that proves the message
    hasn't been tampered with in transit. If even one bit is changed, the
    receiver detects it and rejects the message.
 
-The padding means a short message like "ok" and a longer message like "see you
-at 3pm" could look the same size on the wire. It's not perfect protection
-against traffic analysis (an observer can still see timing and rough volume),
-but it removes the easiest signal.
+The wire frame does **not** currently include random padding — an observer
+who watches an encrypted rmail exchange can read the length header and infer
+the message's approximate plaintext size to byte precision. That's a genuine
+gap for short, patterned messages ("ok", "see you at 3pm") where the length
+itself is revealing. Two follow-ups track the fix:
+
+- **#366** — add randomized padding inside the encrypted frame so message
+  sizes fall into coarse buckets instead of leaking exactly.
+- **#367** — a hook-based technique for sending the body as a fixed-chunk
+  attachment when you want stronger size normalization than #366 provides.
+
+See "Mitigating traffic analysis" below for what you can do today via hooks.
 
 ### How the receiver knows who sent it
 
 rmail doesn't send your name in cleartext. Instead, the receiving daemon tries
-to decrypt the message using each contact's key, one at a time. The "seal"
-(authentication tag) is what tells it whether decryption worked — if the seal
-checks out, the message is genuine and came from that contact. If the seal
-doesn't match, the key was wrong, and it tries the next contact. An attacker
-sending random data will fail every seal check and be silently rejected.
+to decrypt the message using each contact's key, one at a time.
 
--- okay, but how do we know which seal is the correct seal? "if the seal doesn't match" doesn't
-   match what? how do we exchange these seals, if we do so at all?
+The "seal" (authentication tag) is what tells it whether decryption worked.
+Here's how that check works: when the sender encrypts, AES-GCM produces a
+16-byte tag that's a one-way function of the key, the nonce, and the
+ciphertext. The sender attaches it to the ciphertext and sends the whole
+thing. The receiver recomputes the same function with its candidate key and
+the received (nonce, ciphertext). If the recomputed tag equals the attached
+one, the candidate key was right — the message decrypted correctly and came
+from that contact. If they don't match, the key was wrong, and the receiver
+tries the next contact. No tag exchange ever happens; both sides derive the
+tag independently from the same inputs.
+
+An attacker sending random data will fail every tag check and be silently
+rejected.
 
 This means an observer can't even tell *which* of your contacts is messaging
 you — they just see encrypted blobs going to your IP address.
@@ -92,8 +105,9 @@ Someone watching the network between two rmail daemons sees:
   talking. This is unavoidable with any internet protocol, though it can be
   mitigated by routing traffic through Tor or a multi-hop relay system (see
   [Mitigating traffic analysis](#mitigating-traffic-analysis) below).
-- **When and how much** — they can tell when messages are exchanged and roughly
-  how large they are (though random padding makes size estimates less precise).
+- **When and how much** — they can tell when messages are exchanged and
+  roughly how large each one is (the length header is in cleartext; the
+  plaintext size is ciphertext-size minus 28 bytes of framing).
 - **Random-looking bytes** — the actual content is indistinguishable from noise.
 
 They **cannot**:
@@ -143,16 +157,100 @@ They **cannot**:
 - **Rotate tokens** if you're concerned one may have been compromised. Both
   sides need to update their contacts file at the same time.
 
+- **Tokens live only in your contacts file.** rmail doesn't duplicate them
+  into any state file, cache, or log. If you want to audit that for yourself,
+  `grep` your token string across `~/mail/` — it should appear exactly once,
+  in `contacts`.
+
 ---
 
 ## Mitigating traffic analysis
 
-Even though message content is encrypted, an observer can learn things
-from *when* you communicate and *how much* data you exchange.
-Hook-based techniques — cover traffic, size padding, timing jitter,
-decoy recipients, Tor — can make this much harder without any daemon
-changes.  The full treatment, including worked examples for each
-pattern, lives in [defensive-patterns.md](defensive-patterns.md).
+Even though message content is encrypted, an observer can learn things from
+*when* you communicate and *how much* data you exchange. The following hook-
+based techniques can make traffic analysis harder. None of them require
+modifying rmail itself — they're just scripts you configure in your config file.
+
+### Decoy traffic (on_send hook)
+
+If you're worried about an observer noticing when you send real messages, you
+can set up a cron job that periodically creates small outbox files addressed
+to a cooperating contact. The contact's `on_receive` hook silently deletes
+them. From the outside, there's a steady stream of traffic at all hours, and
+real messages hide in the noise.
+
+```sh
+# crontab: send a decoy every 10 minutes
+*/10 * * * * echo "to: alice\n\nping" > ~/mail/outbox/decoy-$(date +\%s)
+```
+
+On Alice's side, an `on_receive` hook checks for and discards decoy messages:
+
+```sh
+#!/bin/sh
+# on_receive hook: $1=sender $2=subject $3=path
+if grep -q "^ping$" "$3"; then rm "$3"; fi
+```
+
+**Decoys work best when they're bidirectional.** Real conversations have
+traffic going both ways, so if only your side emits decoys the pattern
+sticks out. Both ends should run the same cron/hook pair, so from the
+outside there's a symmetric trickle of traffic in both directions.
+
+### Message padding (on_send hook)
+
+The hook below pads short bodies up to a fixed target length. **Note** that
+it passes messages longer than the target through unchanged — for long
+messages it's a no-op, and the plaintext size still leaks. For stronger
+size obfuscation see #366 (in-frame padding, under development) and #367
+(body-as-attachment padding for long messages).
+
+```sh
+#!/bin/sh
+# on_send hook: $1=recipient $2=subject $3=body, stdout replaces body
+body="$3"
+target=4096
+current=${#body}
+if [ "$current" -lt "$target" ]; then
+    padding=$(head -c $(( target - current )) /dev/urandom | base64)
+    echo "${body}"
+    echo "---padding---"
+    echo "${padding}"
+else
+    echo "${body}"
+fi
+```
+
+The receiver's `on_receive_raw` hook strips the padding:
+
+```sh
+#!/bin/sh
+# on_receive_raw hook: $1=sender $2=subject $3=body, stdout replaces body
+echo "$3" | sed '/^---padding---$/,$d'
+```
+
+### IP address hiding
+
+If you don't want your contacts (or an observer) to know your real IP address,
+you can route rmail traffic through **Tor** using `torsocks`:
+
+```sh
+# In your service file, wrap the rmail command:
+ExecStart=torsocks lua /path/to/rmail.lua /path/to/mailbox
+```
+
+This hides your IP from the contacts you communicate with (they see a Tor exit
+node instead). It adds latency but is effective. Note that your contacts'
+IP addresses are still visible to you in your contacts file.
+
+A dedicated Tor-over-rmail setup guide is worth having as its own document;
+for now the one-line `torsocks` wrap above is the quick answer if you already
+know Tor.
+
+For a more advanced approach, multiple rmail instances could form a relay chain
+where messages hop through intermediaries before reaching the final
+destination — similar to how Tor works, but using rmail's own hook system. This
+is an area for future development.
 
 ---
 
@@ -205,19 +303,29 @@ firmware vulnerability, or a nosy app), the attacker is on your local network.
 Putting rmail behind a second router means those devices simply cannot reach
 it. The second router acts as a wall: only the one rmail port gets through.
 
-Even if an attacker somehow exploits rmail itself through that port, they land
-on a machine with nothing else on it — no browser history, no SSH keys, no
-personal files. And with only one port open on the second router, it's very
-difficult for them to do anything useful with their foothold. They'd have to
-tunnel all their activity through rmail's own encrypted protocol on that single
-port, which means significantly modifying the rmail code — something an
-integrity check could catch (see below). And besides, even if they did, they would
-have nothing to gain
+**What if an attacker still gets onto the Pi?**
 
--- (except the capability to use your rmail mailbox as they please)
--- (which entails... what? what kind of damage could an attacker cause with access to
-    a trusted mailbox that can send arbitrary data and execute arbitrary code on its
-    own device?)
+If an attacker somehow exploits rmail itself through the one open port, they
+land on a machine with nothing else on it — no browser history, no SSH keys,
+no personal files. The second router limits what they can reach from there.
+
+Be honest about what they *do* get, though: control of a trusted rmail
+mailbox. That's not nothing. With access to a running rmail instance an
+attacker can:
+
+- **Impersonate you to every contact.** They have your tokens (in the
+  contacts file on the Pi) and can send messages as you. Social engineering
+  from a trusted sender lands a lot harder than from a stranger.
+- **Execute arbitrary code** via any hooks you've configured, inside the
+  sandbox of the Pi.
+- **Read every incoming message** for as long as they keep their foothold.
+- **Silently monitor** your conversations — they don't have to *do* anything
+  visible to be useful.
+
+The isolation strategy — dedicated device, second router, read-only root
+(see below) — is about making the compromise *harder to achieve* and
+*easier to detect*, not about making it harmless. Once an attacker owns a
+trusted endpoint, the encryption on the wire doesn't save you.
 
 **Why a Raspberry Pi?**
 
@@ -237,11 +345,6 @@ have nothing to gain
   are smaller and simpler than their counterparts on most Linux distributions
   (glibc and GNU coreutils), which means less code, less complexity, and
   historically fewer security bugs.
-
--- "Alpine uses a small, clean, efficient C compiler that has been audited for security.
-    All of the Unix tools are stripped down to their essentials, to be focused and clear.
-    Less code, more streamlined dataflow. The system is optimized like a well oiled machine."
-
 - **No unnecessary services.** No desktop environment, no audio system, no
   device discovery protocols broadcasting your presence on the network. Just
   the services you explicitly install.
@@ -266,20 +369,21 @@ have nothing to gain
 ### Verifying remote integrity
 
 If your rmail host is a headless Pi in a closet, how do you know it hasn't
-been tampered with? A compromised machine can lie about its own state, so
-simply asking it to checksum itself isn't reliable. Here are approaches that
-actually work, ordered from most to least robust:
+been tampered with? This is harder than it looks: **a compromised machine can
+lie about its own state**, so any check that runs on the suspect machine
+itself can be subverted by an attacker who's already there. `ssh pi
+'sha256sum rmail.lua'` catches a lazy attacker who didn't bother to replace
+`sha256sum`; it doesn't catch anyone competent. Protocol-level probes ("send
+a known input, check the response") catch accidental breakage, not
+deliberate tampering — a serious attacker preserves the protocol exactly.
 
--- and yet later on one of the suggestions we have is to ask the system to report it's own checksum
+Two approaches that actually work:
 
-**Read-only root filesystem (strongest)**
-
-Alpine Linux supports running with a read-only root partition. The rmail
-binary, libraries, and config live on the read-only partition. Only the mail
-directory (inbox, outbox, attachments, contacts file) is on a separate 
-writable partition.
-
-If an attacker exploits rmail, they can read and write messages, but they
+**Read-only root filesystem (prevention, strongest).** Alpine Linux supports
+running with a read-only root partition. The rmail binary, libraries, and
+config live on the read-only partition. Only the mail directory (inbox,
+outbox, attachments, contacts file) is on a separate writable partition. If
+an attacker exploits rmail, they can read and write messages, but they
 *cannot modify the rmail code itself or install additional software* — the
 filesystem won't allow it. A reboot restores the original state completely.
 This is the same approach used by Android and ChromeOS to prevent persistent
@@ -288,72 +392,44 @@ compromise of the operating system.
 To set this up on Alpine, look into `lbu` (Alpine Local Backup) and the
 diskless/data modes described in the Alpine wiki.
 
-**External monitoring (practical)**
+**External verification via a second rmail mailbox (detection).** The only
+trustworthy verifier is a separate device you control. If you keep a
+"monitor" rmail mailbox on your laptop or phone, you can have the Pi *send
+it a periodic heartbeat* — a known-format message that only the real rmail
+code would produce. Missing heartbeats, or heartbeats in the wrong format,
+reach your laptop over rmail's own encrypted channel, where an attacker on
+the Pi can't suppress them without cutting off the Pi from the network
+(which is a visible symptom in itself).
 
-A second device you trust (your phone, your laptop) can periodically check
-the Pi's integrity from the outside:
+This flips the trust question: instead of asking the Pi "are you honest?"
+(which it might lie about), you're *watching whether the Pi is still
+talking to you normally.* If it isn't, something's wrong.
 
-- **SSH checksum script:** Connect to the Pi over SSH, compute checksums of
-  the rmail binary and libraries, compare against your local copy of the repo.
-  Run this on a cron job and have it send an alert to a different rmail mailbox
-  (or any notification channel) if checksums don't match.
-
--- could we have the verification program running on the read-only partition?
-   Is it read-only just to users, but someone with sudo access could modify it?
-   If the verification program could return the "valid/invalid" result to a
-   separate mailbox running on your regular computer... which is more likely to
-   be compromised, isn't it? okay nevermind. Though we could set it up to do
-   other notification channels too. Hmmm. Not sure what to do here.
-
-- **Protocol-level probe:** Send a known message through rmail's encrypted
-  protocol and verify the response matches what the real code would produce.
-  If the code has been modified, behavior would differ. This can be tested
-  from outside without trusting the remote machine.
-
--- if rmail is modified, then the behavior wouldn't necessarily differ. In fact, a successful
-   modification would entail returning the exact correct behavior.
-
-```sh
-#!/bin/sh
-# Example: run on your laptop via cron, alerts via a second rmail mailbox
-EXPECTED="abc123def456..."  # known checksums
-ACTUAL=$(ssh pi@rmail-host 'sha256sum /path/to/rmail/rmail.lua /path/to/rmail/libs/*.so')
-if [ "$ACTUAL" != "$EXPECTED" ]; then
-    echo "to: myphone\n\nINTEGRITY ALERT: rmail checksums changed on $(date)" \
-        > ~/mail-monitor/outbox/integrity-alert
-fi
-```
-
-**Simple spot checks (baseline)**
-
-If you don't want to automate anything, just SSH into the Pi occasionally and
-eyeball `sha256sum` output against your local repo. Not as rigorous, but
-catches crude modifications.
-
--- this won't work. we shouldn't recommend this. nobody will use this approach, and those that do
-   are not going to do it correctly.
+A simple first version: a cron job on the Pi that writes a daily
+timestamped outbox file to a "monitor" contact. If your monitor device goes
+48 hours without a message, alert. This catches an attacker who's stopped
+rmail from running; it doesn't catch an attacker who leaves rmail running
+while siphoning data, but neither does anything else short of hardware
+tamper-evidence.
 
 ### Simpler alternatives
 
-Not everyone needs a dedicated device. Here are other options, roughly ordered
-from most to least secure:
+Not everyone needs a dedicated device. Here are other options, roughly
+ordered from most to least secure:
 
-1. **Dedicated VM or container** on an existing server. Not as isolated as
-   separate hardware, but still limits blast radius.
+1. **Dedicated VM or container on an existing server.** A VM is like a
+   second computer running inside your real one; a container is a lighter
+   version of the same idea. Both give rmail its own isolated space —
+   if something gets into the sandbox, it's stuck in there and can't
+   easily reach the rest of your machine. Tools: LXC or Docker
+   (containers), VirtualBox or QEMU (VMs), or systemd-nspawn on modern
+   Linux. Easier than buying a Raspberry Pi, not as isolated as a
+   separate physical device.
 
--- can you explain this in more plain language?
-
-2. **A separate user account** on your existing machine, with restrictive file
-   permissions (`chmod 700 ~/mail`). Protects against casual snooping but not
-   root compromise or a malicious program running as your user.
-
--- is this something we should recommend? I don't think so, because people would need
-   sudo access just to write messages / read them.
-
-3. **Just run it on your desktop/laptop.** This is fine for most people. The
-   main risk is that a browser exploit, malicious download, or compromised
-   program could access your mail files or hook scripts. Use full-disk
-   encryption so a stolen device doesn't leak your messages.
+2. **Just run it on your desktop/laptop.** This is fine for most people.
+   The main risk is that a browser exploit, malicious download, or
+   compromised program could access your mail files or hook scripts. Use
+   full-disk encryption so a stolen device doesn't leak your messages.
 
 ### What about renting a server?
 
@@ -391,9 +467,9 @@ bastard took my wallet" heh what a rascal. I didn't know squirrels could do that
 
 | Layer | Protection | Limitation |
 |-------|-----------|------------|
-| Wire encryption | AES-256-GCM, random nonces, random padding | Same key until token is rotated |
+| Wire encryption | AES-256-GCM, random nonces | Length header in cleartext leaks approximate plaintext size (see #366) |
 | Authentication | Trial decryption with shared token | Only proves "knows the token" |
 | Metadata | No unencrypted headers | IP addresses and timing visible |
 | At rest | None (plaintext on disk) | Use full-disk encryption on the host |
 | Host isolation | Up to you | Dedicated device + separate network is ideal |
-| Integrity | Read-only root + external monitoring | Requires additional setup |
+| Integrity | Read-only root + external heartbeat monitoring | Internal self-checks can be subverted |
