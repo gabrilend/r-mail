@@ -1,8 +1,8 @@
-# #363 — Tolerate blank lines in the outbox header, and log missing attach: files
+# #363 — Tolerate blank lines in the outbox header, log missing attach: files, and strip quotes from attach: paths
 
 ## Problem
 
-Two related ways an outbox message can silently do the wrong thing:
+Three related ways an outbox message can silently do the wrong thing:
 
 ### (a) Blank line inside the header block swallows `attach:` into the body
 
@@ -44,6 +44,36 @@ anything went wrong. The sender has no indication either.
 Both of these produce the same end-user symptom — "I attached a file
 but the recipient didn't see it" — with no diagnostic trail. The
 sender has to notice by staring at their own outbox file.
+
+### (c) Quoted path in an `attach:` line is taken literally
+
+The extractor at `rmail.lua:2400` captures everything after `attach:`
+up to end-of-line:
+
+```lua
+local afp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+```
+
+It does not strip surrounding quotes.  So an `attach:` line written
+as:
+
+```
+attach: "/home/ritz/music/the-barbarian/CD 1/09-Theology.mp3"
+```
+
+yields the literal string `"/home/ritz/music/.../Theology.mp3"` —
+`"` characters included as part of the path.  `zip` then looks for a
+file whose name starts with `"` and fails, `compress_attachment`
+returns nil, and the pipeline drops into the same silent-failure
+mode as (b).
+
+The matching parser in `load_contacts` (around line 600) *does*
+strip surrounding quotes, so users reasonably expect the outbox
+parser to do the same.  The inconsistency is the bug.
+
+Quoting isn't semantically required — the parser already reads to
+end-of-line, so spaces in paths work unquoted — but users do quote
+out of shell-habit, and it should just work.
 
 ## Proposed fix
 
@@ -95,6 +125,41 @@ if the attach below it now exists. Alternative: leave marker removal
 up to the user. Start with "leave it to the user" — they see it,
 they delete it. If this becomes annoying we can auto-clean later.
 
+### (c) Strip a single layer of surrounding quotes from attach: paths
+
+In the same places the path is extracted:
+
+- `rmail.lua:2360` (glob expansion check)
+- `rmail.lua:2400` (per-recipient attachment list)
+- `rmail.lua:2531` (in `remove_attach_from_file`)
+
+After the existing `line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")`
+capture, unwrap one layer of surrounding double or single quotes:
+
+```lua
+local unquoted = afp:match('^"(.*)"$') or afp:match("^'(.*)'$")
+if unquoted then afp = unquoted end
+```
+
+Mirrors the quote handling in `load_contacts`.  Extract this into a
+small helper (e.g. `_extract_attach_path(line)`) so the three call
+sites share one implementation.
+
+**No write-back normalisation.**  The parser strips quotes on read;
+it does not edit the user's outbox file just to remove them.  This
+matches the "don't reformat blanks" non-goal below — the daemon
+leaves the file as the user wrote it.  If the user later edits the
+line (e.g. via glob expansion in #362, or a #363 marker being added),
+the rewriter's own output is naturally unquoted because it emits
+`"attach: " .. abs_path` with no quotes.  Over time a file touched
+by the daemon will drift to unquoted paths; untouched lines stay as
+the user wrote them.
+
+**Globs.**  The glob matcher at `rmail.lua:2362` operates on the
+extracted path string.  Stripping quotes before matching means
+`attach: "/home/ritz/photos/*.jpg"` globs correctly — the `*` is
+passed as a literal character in the unquoted path to the matcher.
+
 ### Non-goal: don't reformat the user's file just to normalize blanks
 
 Part (a) is purely a *parser* change. We don't want the daemon to
@@ -118,6 +183,13 @@ Diagnosed from a real message on 2026-04-17: received
 `~/mail/inbox/atch-test` contained the raw `attach:` line as its
 first body line, because the sender had a blank line between `to:`
 and `attach:`. Sender's daemon logged no error.
+
+Part (c) added 2026-04-18 after another real-message case on sorelu:
+`~/mail/outbox/music-for-you` had `attach: "<path>"` with the path
+in double quotes; every sync cycle logged `failed to compress <path>`
+with a confusing `/tmp/rmail-<uuid>.zip: No such file or directory`
+from the post-zip `wc -c` probe.  Root cause was the literal quotes
+staying in the path.
 
 ## Status
 
