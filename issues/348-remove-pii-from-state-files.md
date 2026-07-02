@@ -14,6 +14,20 @@ thin, the inspectability cost is real, and "users should be able to
 `cat` their state and understand what's happening" outweighs the
 marginal defense that name-hashing provided.
 
+**2026-07-02 — an in-flight reversal was found half-finished and
+completed.**  Merging a parallel line of this work surfaced that a
+partial reversal pass had only landed some steps in code while steps 1
+and 3 were still hashing on a live daemon, with their already-hashed
+values lingering in `.state/` (a transfer's `to` and one
+`consent-pending` `from` both read `dd5d7055…` =
+`sha256("rmail:contact:sorelu")`).  That left the receive side with a
+hash-keyed *and* a name-keyed consent entry for the same incoming file
+— a duplicate the daemon could no longer reconcile, which is how a
+real attachment got stuck.  The full reversal (all steps, including
+step 2) plus the `unmigrate_hashed_keys` migration resolves this:
+stale hashed keys are read back and rewritten to plaintext on load, so
+no duplicate can survive.
+
 The sections below are ordered from "decision + what to do about it"
 down to "original plan, preserved for historical reference."
 
