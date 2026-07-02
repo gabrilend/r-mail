@@ -1,15 +1,34 @@
 # Remove PII from state files
 
-## Status: reversed
+## Status: reversal completed (step 2 intentionally kept)
 
 Steps 1–5 landed in commits between 2026-03 and 2026-04; step 6 was
 implemented in a single session on 2026-04-17 and then unwound later
 in the same session without ever being committed, as part of this
-reversal.  After reconsidering with fresh eyes, the entire effort is
-being **reversed** and the remaining work cancelled.  The short version: the threat model
-is thin, the inspectability cost is real, and "users should be able to
-`cat` their state and understand what's happening" outweighs the
-marginal defense that name-hashing provided.
+reversal.  After reconsidering with fresh eyes, the effort was
+**reversed** and the remaining work cancelled.  The short version: the
+threat model is thin, the inspectability cost is real, and "users
+should be able to `cat` their state and understand what's happening"
+outweighs the marginal defense that name-hashing provided.
+
+**2026-07-02 — reversal was found half-finished and completed.**  The
+first reversal pass only landed steps 4 and 5 in code; steps 1 and 3
+were still hashing on the live daemon, and their already-hashed values
+lingered in `.state/` (a transfer's `to` and one `consent-pending`
+`from` both read `dd5d7055…` = `sha256("rmail:contact:sorelu")`).  That
+left the receive side with a hash-keyed *and* a name-keyed consent
+entry for the same incoming file — a duplicate the daemon could no
+longer reconcile, which is how a real attachment got stuck.  Steps 1
+and 3 are now reverted and the stale values migrated back to plaintext.
+
+**Step 2 is deliberately NOT reverted.**  Unlike the others, step 2
+replaced a stored temp path (`compressed_path`) with a derived one
+(`zip_path_for(zip_id)`).  That is *less* PII and *less* code than the
+pre-#348 version, and it is self-consistent (the `zip_id` UUID is used
+identically on read and write, so nothing is broken).  Reverting it
+would re-add a filesystem path to state and rewrite ~10 call sites for
+no benefit.  The original "revert all six steps" was written before any
+step was implemented; on inspection, step 2 is the one worth keeping.
 
 The sections below are ordered from "decision + what to do about it"
 down to "original plan, preserved for historical reference."
@@ -95,7 +114,11 @@ plaintext state because it's a few lines of `sed`.
 
 ## Decision
 
-- **Revert steps 1, 2, 3, 4, 5, 6.**
+- **Revert steps 1, 3, 4, 5, 6.**  (Steps 4 and 5 landed in the first
+  pass; steps 1 and 3 in the 2026-07-02 pass.)
+- **Keep step 2.**  Deriving the zip path from `zip_id` is cleaner and
+  lower-PII than the pre-#348 stored `compressed_path`; see the status
+  note above.
 - **Delete the rename-detection block** in `sync_outbox`
   (`contact_by_token_hash`, `contact_by_token_plain`, the renames
   loop, the associated state-mutation code).
@@ -174,8 +197,13 @@ code with the pre-step-6 call sites.
 
 ### Shared-helper cleanup
 
-- `hash_contact_name`, `migrate_hashed_state`, `_is_hash` become
-  unused — delete.
+- `migrate_hashed_state` (forward: name→hash) is replaced by
+  `reverse_migrate_state` (hash→name), which resolves any legacy hashed
+  key back to the contact it hashes to and drops orphans.
+- `hash_contact_name` and `_is_hash` stay: the reverse migrator and the
+  `chunks-outgoing` legacy `.to` resolver both still need them.  They
+  become no-ops on fully-plaintext state and can be deleted once no
+  legacy `.state/` files remain in the wild.
 - `hex_sha256` stays: it's still used by `canonical_contacts_hash`
   (protocol-level contacts-file digest, not state-file PII).
 

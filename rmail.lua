@@ -1041,21 +1041,21 @@ local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
 end
 
--- ---- PII helpers (#348) -------------------------------------------------
+-- ---- State-key helpers (#348 reversed) ----------------------------------
 --
 -- Several state files key their entries by contact name (nat warnings,
--- pending address notifications).  Persisting the name in plaintext is
--- a PII leak: anyone with read access to .state/ learns who the user
--- talks to.  Hashing the name keeps the lookup working (same input
--- → same key) while hiding the identity.
+-- pending address notifications, in-flight transfers).  #348 briefly
+-- hashed those keys to keep the contact list out of a plaintext .state/;
+-- that effort was reversed (see issues/348-remove-pii-from-state-files.md)
+-- because the threat model was thin and plaintext, cat-able state is a
+-- deliberate design goal.  State keys are contact names again.
 --
--- The hash isn't cryptographically secret by itself — an attacker with
--- the contacts file can just rehash every contact to reverse the map.
--- The threat model is "attacker has .state/ but not contacts" (backups
--- split across machines, forensic snapshots, etc.); for that case,
--- hashing is enough.  A stronger defence would store a per-install
--- random salt in STATE, but that adds moving parts for a modest gain;
--- deferred.
+-- These helpers survive only to *undo* the hashing.  reverse_migrate_state
+-- resolves any legacy 64-hex key left in an old file back to the contact
+-- name that hashes to it; hash_contact_name is kept solely so the reverse
+-- migrator (and the chunks-outgoing .to resolver) can recompute a
+-- contact's old hash for comparison.  Once no legacy files remain in the
+-- wild they have no other caller.
 
 local function hex_sha256(data)
     local bytes = crypto.sha256(data)
@@ -1068,21 +1068,29 @@ local function hash_contact_name(name)
     return hex_sha256("rmail:contact:" .. name)
 end
 
--- In-place migration of a state table whose keys were plaintext contact
--- names pre-#348.  New keys are 64-character hex (sha256 digest); anything
--- else is assumed legacy and rehashed.  Safe to call on already-hashed
--- state — it's a no-op in that case.
-local function migrate_hashed_state(state)
+-- Undo #348 key-hashing: given a state table possibly keyed by the old
+-- sha256("rmail:contact:"||name) digests, return an equivalent table keyed
+-- by plaintext contact name.  A 64-hex key is resolved against the current
+-- contacts; if it matches no contact (orphan from a deleted contact) it is
+-- dropped.  Plaintext keys pass through untouched, so this is a no-op on
+-- already-migrated files.
+local function reverse_migrate_state(state, contacts)
     if type(state) ~= "table" then return {} end
-    local migrated = {}
+    local hash_to_name = {}
+    for name in pairs(contacts) do
+        hash_to_name[hash_contact_name(name)] = name
+    end
+    local out = {}
     for k, v in pairs(state) do
         if type(k) == "string" and #k == 64 and k:match("^%x+$") then
-            migrated[k] = v
-        elseif type(k) == "string" then
-            migrated[hash_contact_name(k)] = v
+            local name = hash_to_name[k]
+            if name then out[name] = v end   -- resolved legacy hash → name
+            -- unresolved hash: contact deleted since it was written; drop it
+        else
+            out[k] = v                        -- already a plaintext name
         end
     end
-    return migrated
+    return out
 end
 
 local function _is_hash(s)
@@ -1090,20 +1098,18 @@ local function _is_hash(s)
 end
 
 -- chunks-outgoing.json stores a `.to` field per transfer naming the
--- recipient contact.  Persist it as a hash, but keep the name in memory
--- so existing consumers (contacts[transfer.to], logs, note_contact_result)
--- don't have to change.  These wrappers do the translation at the disk
--- boundary: load resolves hash→name using the current contacts file;
--- save deep-copies and hashes the .to field of the copy.
+-- recipient contact.  It's persisted as the plaintext contact name
+-- (#348's hashing of this field was reversed).  These wrappers survive
+-- only to undo that hashing: load resolves any legacy hashed .to back to
+-- the contact name via the current contacts file, and save strips the
+-- derived compressed_path (that field stays a zip_id — #348 step 2 is
+-- kept).  Once no legacy hashed entries remain, load's resolve is a no-op.
 --
--- A transfer whose .to hash can't be resolved (contact renamed/deleted
+-- A legacy .to hash that can't be resolved (contact renamed/deleted
 -- since save) keeps the hash as its .to value; downstream code already
 -- handles "unknown contact" by skipping/logging that transfer.
 -- The wrapper body uses raw read_file / write_file rather than
--- load_state / save_state so a global replace_all of
--- `load_chunks_outgoing()` → `load_chunks_outgoing()`
--- (and matching save) doesn't accidentally rewrite the implementation
--- into calling itself.
+-- load_state / save_state so it doesn't accidentally recurse.
 local _CHUNKS_PATH = "chunks-outgoing.json"
 local function load_chunks_outgoing()
     local text = read_file(STATE .. "/" .. _CHUNKS_PATH)
@@ -1131,9 +1137,6 @@ local function save_chunks_outgoing(state)
             -- zip_path_for(zip_id)); legacy entries loaded from disk may
             -- still have the field.  Don't propagate it back out.
             if fk ~= "compressed_path" then copy[fk] = fv end
-        end
-        if type(copy.to) == "string" and not _is_hash(copy.to) then
-            copy.to = hash_contact_name(copy.to)
         end
         snapshot[k] = copy
     end
@@ -1292,9 +1295,9 @@ function nat.create_mapping(port)
 end
 
 function nat.security_check(my_name)
-    -- Warned contacts are tracked by hashed name (#348) so the .state
-    -- file doesn't leak the contact list in plaintext.
-    local warned = migrate_hashed_state(load_state("nat_security_warned.json"))
+    -- Warned contacts are tracked by plaintext contact name (#348
+    -- reversed).  reverse_migrate_state upgrades any legacy hashed keys.
+    local warned = reverse_migrate_state(load_state("nat_security_warned.json"), load_contacts())
 
     local vulnerabilities = {}
 
@@ -1319,7 +1322,7 @@ function nat.security_check(my_name)
             local contacts = load_contacts()
             local recipients = {}
             for name, c in pairs(contacts) do
-                if name ~= my_name and not c.own and warned[hash_contact_name(name)] then
+                if name ~= my_name and not c.own and warned[name] then
                     recipients[#recipients + 1] = name
                 end
             end
@@ -1356,7 +1359,7 @@ function nat.security_check(my_name)
     local contacts = load_contacts()
     local recipients = {}
     for name, c in pairs(contacts) do
-        if name ~= my_name and not c.own and not warned[hash_contact_name(name)] then
+        if name ~= my_name and not c.own and not warned[name] then
             recipients[#recipients + 1] = name
         end
     end
@@ -1377,12 +1380,11 @@ function nat.security_check(my_name)
             "This is an automated message from rmail's security check."
         write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
         log("security warning sent to %d new contact(s)", #recipients)
-        -- Record presence only (#348).  Pre-#348 stored a timestamp value
-        -- here, but it was never read back — the lookup was `warned[name]`
-        -- (truthy check) everywhere.  Using `true` instead of a timestamp
-        -- drops one more piece of when-did-they-talk metadata from .state.
+        -- Record presence only.  The value is never read back — the lookup
+        -- is `warned[name]` (a truthy check) everywhere — so a bare `true`
+        -- avoids storing any when-did-they-talk timestamp metadata.
         for _, name in ipairs(recipients) do
-            warned[hash_contact_name(name)] = true
+            warned[name] = true
         end
         save_state("nat_security_warned.json", warned)
     end
@@ -4149,13 +4151,13 @@ local function detect_ip_change(my_name, port)
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
     write_file(STATE .. "/public_ip", new_ip)
 
-    -- write pending notifications for all contacts.  Keyed by hashed
-    -- name (#348) so .state/ doesn't carry the contact list verbatim.
+    -- write pending notifications for all contacts, keyed by plaintext
+    -- contact name (#348 reversed).
     local contacts = load_contacts()
-    local pending = migrate_hashed_state(load_state("pending-address.json"))
+    local pending = reverse_migrate_state(load_state("pending-address.json"), contacts)
     for name, contact in pairs(contacts) do
         if name ~= my_name and contact.ip then
-            pending[hash_contact_name(name)] = {ip = new_ip, port = port}
+            pending[name] = {ip = new_ip, port = port}
         end
     end
     save_state("pending-address.json", pending)
@@ -4200,12 +4202,12 @@ local function detect_ipv6_change(my_name, port)
     write_file(STATE .. "/public_ipv6", new_ip)
 
     -- Queue notifications for contacts that have an ipv6 field.  Same
-    -- hashed-name keying as the IPv4 path (#348).
+    -- plaintext-name keying as the IPv4 path (#348 reversed).
     local contacts = load_contacts()
-    local pending = migrate_hashed_state(load_state("pending-address.json"))
+    local pending = reverse_migrate_state(load_state("pending-address.json"), contacts)
     for name, contact in pairs(contacts) do
         if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip)) then
-            local k = hash_contact_name(name)
+            local k = name
             pending[k] = pending[k] or {}
             pending[k].ipv6 = new_ip
             pending[k].port = port
@@ -4215,28 +4217,22 @@ local function detect_ipv6_change(my_name, port)
 end
 
 local function sync_address_notifications(my_name)
-    local pending = migrate_hashed_state(load_state("pending-address.json"))
+    local contacts = load_contacts()
+    -- pending-address.json is keyed by plaintext contact name (#348
+    -- reversed); reverse_migrate_state upgrades any legacy hashed keys.
+    local pending = reverse_migrate_state(load_state("pending-address.json"), contacts)
     if not next(pending) then return false end
 
-    local contacts = load_contacts()
-    -- The file keys are hashed contact names (#348); build a lookup
-    -- on the fly.  A few contacts' worth of sha256 is cheap.
-    local hash_to_name = {}
-    for name in pairs(contacts) do
-        hash_to_name[hash_contact_name(name)] = name
-    end
-
     local ops = {}
-    for hash, info in pairs(pending) do
-        local name = hash_to_name[hash]
-        if name and contacts[name] and contacts[name].ip then
+    for name, info in pairs(pending) do
+        if contacts[name] and contacts[name].ip then
             ops[#ops + 1] = {
-                name = name, hash = hash, contact = contacts[name],
+                name = name, contact = contacts[name],
                 ip = info.ip, port = info.port,
             }
         else
             -- contact removed, drop the pending notification
-            pending[hash] = nil
+            pending[name] = nil
         end
     end
 
@@ -4262,7 +4258,7 @@ local function sync_address_notifications(my_name)
     for i, op in ipairs(ops) do
         note_contact_result(op.name, results[i].ok)
         if results[i].ok then
-            pending[op.hash] = nil  -- file is keyed by hash (#348)
+            pending[op.name] = nil
             log("notified %s of address change", op.name)
             did_work = true
         end
