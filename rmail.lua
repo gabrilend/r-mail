@@ -2574,6 +2574,16 @@ local function consent_cancelled(inbox_file)
     return false
 end
 
+-- Remove a consent/progress form from the inbox along with its tmpfs
+-- backing file.  The form starts as a plain file and, once the transfer
+-- begins, becomes a symlink into /tmp/rmail-progress/consent-<att_id>
+-- (#328).  os.remove on the symlink leaves that tmpfs target orphaned,
+-- so clear both.
+local function remove_consent_form(inbox_file, att_id)
+    if inbox_file then os.remove(INBOX .. "/" .. inbox_file) end
+    if att_id then os.remove(progress_tmpfs_path("consent-" .. att_id)) end
+end
+
 local function check_consent_pending()
     local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
@@ -2610,7 +2620,7 @@ local function check_consent_pending()
             if consent_cancelled(entry.inbox_file) then
                 os.execute('rm -rf ' .. shell_quote(
                     paths.pending .. "/.pending/" .. att_id))
-                os.remove(INBOX .. "/" .. entry.inbox_file)
+                remove_consent_form(entry.inbox_file, att_id)
                 entry.status = "cancel_pending"
                 changed = true
                 log("attachment transfer cancelled by user: %s from %s", att_id, entry["from"])
@@ -2670,7 +2680,7 @@ local function send_consent_responses(my_name)
                 else
                     -- User declined — clear the consent file off their
                     -- inbox so they don't have to think about it again.
-                    os.remove(INBOX .. "/" .. entry.inbox_file)
+                    remove_consent_form(entry.inbox_file, resp.attachment_id)
                     pending[resp.attachment_id] = nil
                 end
             end
@@ -2803,7 +2813,7 @@ local function handle_attachment_chunk(data, sender)
                     sender, filename, fmt_bytes(cpe.expected_size),
                     fmt_bytes(projected), fmt_bytes(limit))
                 os.execute('rm -rf ' .. shell_quote(pending_dir))
-                os.remove(INBOX .. "/" .. cpe.inbox_file)
+                remove_consent_form(cpe.inbox_file, att_id)
                 cpe.status = "cancel_pending"
                 cpe.rejection_reason = "oversize"
                 cprog[att_id] = cpe
@@ -2833,7 +2843,7 @@ local function handle_attachment_chunk(data, sender)
         if consent_cancelled(cpe.inbox_file) then
             os.execute('rm -rf ' .. shell_quote(
                 paths.pending .. "/.pending/" .. att_id))
-            os.remove(INBOX .. "/" .. cpe.inbox_file)
+            remove_consent_form(cpe.inbox_file, att_id)
             cpe.status = "cancel_pending"
             cprog[att_id] = cpe
             save_state("consent-pending.json", cprog)
@@ -2924,7 +2934,7 @@ local function handle_attachment_chunk(data, sender)
             -- Transfer finished successfully; the attachment lives in
             -- paths.attachments. The inbox consent/progress file has done
             -- its job — remove it so completed transfers don't pile up.
-            os.remove(INBOX .. "/" .. cprog[att_id].inbox_file)
+            remove_consent_form(cprog[att_id].inbox_file, att_id)
         end
         cprog[att_id] = nil
         save_state("consent-pending.json", cprog)
@@ -3092,10 +3102,39 @@ local function send_next_chunks(my_name)
         end
         local zip_path = transfer.compressed_path
         if not file_exists(zip_path) then
-            log("chunk transfer: zip missing for %s, cancelling", att_id)
-            chunks[att_id] = nil
-            release_zip(chunks, transfer.compressed_path)
-            changed = true; goto continue
+            -- The compressed zip lives in /tmp and can be wiped (e.g. a
+            -- reboot) while a transfer waits for consent.  Rebuild it from
+            -- the original source rather than dropping the transfer: the
+            -- fresh checksum rides with the chunks (it isn't pinned at
+            -- consent) and the receiver's repair path reconciles any stale
+            -- partial chunks, so no re-consent is needed.
+            local src = transfer.original_path
+            local new_zip, new_checksum, new_size
+            if src and file_exists(src) then
+                new_zip, new_checksum, new_size = compress_attachment(src)
+            end
+            if new_zip and new_size then
+                transfer.compressed_path = new_zip
+                transfer.total_checksum  = new_checksum
+                transfer.total_chunks    = math.max(1, math.ceil(new_size / cfg.chunk_size))
+                -- fresh zip differs byte-wise from any earlier one, so
+                -- resend every chunk (mirrors the consent-grant init)
+                local m = {}
+                for i = 0, transfer.total_chunks - 1 do m[#m + 1] = i end
+                transfer.missing = m
+                zip_path = new_zip
+                changed = true
+                log("chunk transfer: zip for %s was missing, recompressed from %s", att_id, src)
+            else
+                if src and file_exists(src) then
+                    log("chunk transfer: zip missing and recompress failed for %s, cancelling", att_id)
+                else
+                    log("chunk transfer: zip missing and original gone for %s, cancelling", att_id)
+                end
+                chunks[att_id] = nil
+                release_zip(chunks, transfer.compressed_path)
+                changed = true; goto continue
+            end
         end
         local f = io.open(zip_path, "rb")
         if not f then goto continue end
