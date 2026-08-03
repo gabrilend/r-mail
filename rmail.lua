@@ -4318,7 +4318,16 @@ local function serialize_contacts_canonical()
     for _, name in ipairs(names) do
         local c = contacts[name]
         local fields = {}
-        for field in pairs(c) do fields[#fields+1] = field end
+        -- Only persistent scalar fields belong in the canonical form. Skip
+        -- runtime-computed tables (endpoints, ips — #347) and _-prefixed
+        -- helpers: tostring() on a table yields a non-deterministic
+        -- "table: 0x..." that corrupts the contacts file on round-trip and
+        -- makes the hash unstable across daemon reloads.
+        for field in pairs(c) do
+            if type(c[field]) ~= "table" and field:sub(1, 1) ~= "_" then
+                fields[#fields+1] = field
+            end
+        end
         table.sort(fields)
         for _, field in ipairs(fields) do
             local v = tostring(c[field])
@@ -4482,7 +4491,16 @@ end
 -- POST /api/contacts — accept contacts file from phone, replacing server's version.
 local function handle_api_post_contacts(body)
     if not body or body == "" then return 400, {error = "empty body"} end
-    write_file(CONTACTS, body)
+    -- Defensive: strip runtime-computed table fields (endpoints/ips) that an
+    -- older/buggy client might echo back serialized as "table: 0x...". They're
+    -- rebuilt on load from ip/port lines, so persisting them corrupts the file
+    -- and destabilizes the contacts hash. See serialize_contacts_canonical.
+    local kept = {}
+    for line in (body .. "\n"):gmatch("([^\n]*)\n") do
+        local field = line:match("^[%w_%-]+%.([%w_%-]+)%s*=")
+        if field ~= "endpoints" and field ~= "ips" then kept[#kept + 1] = line end
+    end
+    write_file(CONTACTS, table.concat(kept, "\n"))
     align_contacts()
     log("contacts updated from phone")
     return 200, {ok = true}
