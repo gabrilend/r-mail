@@ -78,18 +78,20 @@ class RmailClient(
      * Send one request and return (statusCode, body).
      * Reuses the persistent connection. Reconnects once on failure.
      */
-    private fun request(
+    private fun requestFull(
         method: String,
         path: String,
         body: ByteArray = ByteArray(0),
-        contentType: String? = null
-    ): Pair<Int, ByteArray> {
+        contentType: String? = null,
+        extraHeaders: Map<String, String>? = null
+    ): Triple<Int, Map<String, String>, ByteArray> {
         val sb = StringBuilder()
         sb.append("$method $path HTTP/1.0\r\n")
         if (body.isNotEmpty()) {
             if (contentType != null) sb.append("Content-Type: $contentType\r\n")
             sb.append("Content-Length: ${body.size}\r\n")
         }
+        extraHeaders?.forEach { (k, v) -> sb.append("$k: $v\r\n") }
         sb.append("\r\n")
         val header = sb.toString().toByteArray(Charsets.UTF_8)
         val reqBytes = header + body
@@ -115,15 +117,33 @@ class RmailClient(
                 val statusCode = statusLine.split(" ").getOrNull(1)?.toIntOrNull()
                     ?: throw IOException("Malformed status line: $statusLine")
 
+                // Parse response headers (keys lowercased) so callers can read e.g. X-Mtime
+                val headers = HashMap<String, String>()
+                responseText.substring(0, headerEnd).split("\r\n").drop(1).forEach { line ->
+                    val idx = line.indexOf(':')
+                    if (idx > 0) headers[line.substring(0, idx).trim().lowercase()] =
+                        line.substring(idx + 1).trim()
+                }
+
                 val bodyStart = headerEnd + 4
                 val responseBody = plaintext.copyOfRange(bodyStart, plaintext.size)
-                return Pair(statusCode, responseBody)
+                return Triple(statusCode, headers, responseBody)
             } catch (e: IOException) {
                 close()  // force reconnect on next attempt
                 if (attempt == 2) throw e
             }
         }
         throw IOException("request failed after 2 attempts")  // unreachable but satisfies compiler
+    }
+
+    private fun request(
+        method: String,
+        path: String,
+        body: ByteArray = ByteArray(0),
+        contentType: String? = null
+    ): Pair<Int, ByteArray> {
+        val (status, _, respBody) = requestFull(method, path, body, contentType)
+        return Pair(status, respBody)
     }
 
     internal fun get(path: String): Pair<Int, ByteArray> = request("GET", path)
@@ -213,17 +233,30 @@ class RmailClient(
     /**
      * GET /api/file/inbox/<filename> or /api/file/outbox/<filename>
      */
-    fun downloadFile(type: String, filename: String): ByteArray {
-        val (status, body) = get("/api/file/$type/$filename")
+    fun downloadFile(type: String, filename: String): ByteArray =
+        downloadFileWithMtime(type, filename).first
+
+    /**
+     * Like downloadFile but also returns the server's file mtime in epoch
+     * milliseconds (from the X-Mtime response header), or null if the server
+     * is an older build that doesn't send it. Lets the phone stamp its local
+     * copy so authoring order is preserved.
+     */
+    fun downloadFileWithMtime(type: String, filename: String): Pair<ByteArray, Long?> {
+        val (status, headers, body) = requestFull("GET", "/api/file/$type/$filename")
         if (status != 200) throw IOException("Download $type/$filename failed: HTTP $status")
-        return body
+        val mtimeMs = headers["x-mtime"]?.toLongOrNull()?.let { it * 1000 }
+        return Pair(body, mtimeMs)
     }
 
     /**
-     * POST /api/file/outbox/<filename>
+     * POST /api/file/outbox/<filename>. mtimeSecs (epoch seconds) is sent as
+     * X-Mtime so the server preserves the file's original authoring time.
      */
-    fun uploadOutboxFile(filename: String, content: ByteArray): Boolean {
-        val (status, _) = post("/api/file/outbox/$filename", content)
+    fun uploadOutboxFile(filename: String, content: ByteArray, mtimeSecs: Long? = null): Boolean {
+        val headers = mtimeSecs?.let { mapOf("X-Mtime" to it.toString()) }
+        val (status, _, _) = requestFull(
+            "POST", "/api/file/outbox/$filename", content, "application/octet-stream", headers)
         return status == 200
     }
 

@@ -31,8 +31,10 @@ class MailStore(context: Context, mailboxId: String) {
 
     fun readInbox(filename: String): String = File(inbox, filename).readText()
 
-    fun writeInbox(filename: String, content: ByteArray) {
-        File(inbox, filename).writeBytes(content)
+    fun writeInbox(filename: String, content: ByteArray, mtimeMs: Long? = null) {
+        val f = File(inbox, filename)
+        f.writeBytes(content)
+        if (mtimeMs != null && mtimeMs > 0) f.setLastModified(mtimeMs)
     }
 
     fun deleteInbox(filename: String) {
@@ -45,8 +47,10 @@ class MailStore(context: Context, mailboxId: String) {
 
     fun readOutbox(filename: String): String = File(outbox, filename).readText()
 
-    fun writeOutbox(filename: String, content: String) {
-        File(outbox, filename).writeText(content)
+    fun writeOutbox(filename: String, content: String, mtimeMs: Long? = null) {
+        val f = File(outbox, filename)
+        f.writeText(content)
+        if (mtimeMs != null && mtimeMs > 0) f.setLastModified(mtimeMs)
     }
 
     fun deleteOutbox(filename: String) {

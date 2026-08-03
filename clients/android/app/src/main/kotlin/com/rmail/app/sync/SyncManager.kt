@@ -86,26 +86,28 @@ class SyncManager(
                 }
             }
 
-            // Download new inbox files
+            // Download new inbox files (preserve the server's authoring mtime)
             resp.fetchInbox.forEach { (id, entry) ->
-                val data = client.downloadFile("inbox", entry.filename)
-                store.writeInbox(entry.filename, data)
+                val (data, mtimeMs) = client.downloadFileWithMtime("inbox", entry.filename)
+                store.writeInbox(entry.filename, data, mtimeMs)
                 newState.inbox[id] = entry
                 newCount++
             }
 
             // Download new outbox files (created on desktop)
             resp.fetchOutbox.forEach { filename ->
-                val data = client.downloadFile("outbox", filename)
-                store.writeOutbox(filename, data.toString(Charsets.UTF_8))
+                val (data, mtimeMs) = client.downloadFileWithMtime("outbox", filename)
+                store.writeOutbox(filename, data.toString(Charsets.UTF_8), mtimeMs)
                 newState.outbox.add(filename)
             }
 
-            // Upload new outbox files created on the phone
+            // Upload new outbox files created on the phone (send the local
+            // authoring time so the server and recipients preserve ordering)
             val newOutboxSet = newOutbox.toSet()
             newOutbox.forEach { filename ->
                 val content = store.readOutbox(filename).toByteArray(Charsets.UTF_8)
-                client.uploadOutboxFile(filename, content)
+                val mtimeSecs = File(store.outbox, filename).lastModified().let { if (it > 0) it / 1000 else null }
+                client.uploadOutboxFile(filename, content, mtimeSecs)
                 newState.outbox.add(filename)
             }
 

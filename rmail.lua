@@ -331,6 +331,26 @@ local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
+-- ---- File mtime helpers (preserve authoring time across transfer) --------
+-- rmail messages carry no timestamp of their own; a file's mtime is the only
+-- record of when it was written.  file_mtime reads it; set_file_mtime re-applies
+-- a sender's mtime on the receiving end so authoring order survives delivery.
+-- No luafilesystem dependency — shell out to stat/touch (same style as `wc -c`).
+local function file_mtime(path)
+    local h = io.popen("stat -c %Y " .. shell_quote(path) .. " 2>/dev/null")
+    if not h then return nil end
+    local out = h:read("*a"); h:close()
+    return tonumber((out or ""):match("%d+"))
+end
+
+local function set_file_mtime(path, epoch)
+    epoch = tonumber(epoch)
+    if not epoch then return end
+    -- clamp to a sane range (2001-09-09 .. 2100-01-01) to reject garbage/overflow
+    if epoch < 1000000000 or epoch > 4102444800 then return end
+    os.execute("touch -m -d @" .. string.format("%d", epoch) .. " " .. shell_quote(path))
+end
+
 -- ---- Progress-file helpers (#328) ---------------------------------------
 --
 -- Some files get rewritten per-chunk during attachment transfer — the
@@ -1495,6 +1515,8 @@ local function handle_deliver_message(data, sender)
 
     body = body:gsub("^[\n\r]+", "")
     write_file(target, body)
+    -- preserve the sender's authoring time when provided (older senders omit it)
+    if data.mtime then set_file_mtime(target, data.mtime) end
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
     if hooks.on_receive then
@@ -1542,6 +1564,7 @@ local function handle_deliver_update(data, sender)
 
             new_body = new_body:gsub("^[\n\r]+", "")
             write_file(target, new_body)
+            if data.mtime then set_file_mtime(target, data.mtime) end
             log("updated: %s from %s -> %s", message_id, sender, filename)
             return 200, {ok = true}
         end
@@ -2454,9 +2477,26 @@ local function compress_attachment(filepath)
     local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
     local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
     if is_dir_h then is_dir_h:close() end
-    local flag = is_dir and "-rj" or "-j"
-    local ret = os.execute(tools.zip .. ' ' .. flag .. ' ' .. shell_quote(zip_path) ..
-                           ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
+    local ret
+    if is_dir then
+        -- Preserve the directory's internal structure: zip -r from the
+        -- parent so the archive holds <dirname>/... with subdirectories
+        -- intact.  The old -rj junked paths, which flattened the tree AND
+        -- hard-failed (zip aborts) on same-named files in different
+        -- subdirs — silently dropping the whole attachment.
+        local dir = filepath:gsub("/+$", "")
+        local parent = dir:match("^(.*)/[^/]+$") or "."
+        if parent == "" then parent = "/" end
+        local base = dir:match("([^/]+)$") or dir
+        ret = os.execute('cd ' .. shell_quote(parent) .. ' && ' .. tools.zip ..
+                         ' -r ' .. shell_quote(zip_path) .. ' ' .. shell_quote(base) ..
+                         ' >/dev/null 2>&1')
+    else
+        -- Single file: -j junks the path so the recipient gets just the
+        -- filename, not the sender's directory layout.
+        ret = os.execute(tools.zip .. ' -j ' .. shell_quote(zip_path) ..
+                         ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
+    end
     -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
     if not ret then return nil, nil, nil end
     local checksum = sha256_file(zip_path)
@@ -3392,6 +3432,7 @@ local function sync_outbox(my_name)
                             end
                             inbox_body = inbox_body:gsub("^[\n\r]+", "")
                             write_file(target, inbox_body)
+                            set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
                             inbox_state[inbox_name] = {
                                 ["from"] = my_name,
                                 message_id = msg_id,
@@ -3413,6 +3454,7 @@ local function sync_outbox(my_name)
                                 type = "deliver", filename = name,
                                 recipient = rname, message_id = uuid(),
                                 subject = name, body = body,
+                                mtime = file_mtime(OUTBOX .. "/" .. name),
                                 contact = contacts[rname],
                             }
                         else
@@ -3528,6 +3570,7 @@ local function sync_outbox(my_name)
                                         end
                                         update_body = update_body:gsub("^[\n\r]+", "")
                                         write_file(target, update_body)
+                                        set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
                                         log("self-updated: %s -> %s", name, iname)
                                         did_work = true
                                         break
@@ -3538,6 +3581,7 @@ local function sync_outbox(my_name)
                                     type = "update", filename = name,
                                     recipient = rname, message_id = rmeta.message_id,
                                     subject = name, body = body,
+                                    mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
                                 }
                             end
@@ -3721,6 +3765,7 @@ local function sync_outbox(my_name)
                     end
                     data = {type = "message",
                             subject = op.subject, message_id = op.message_id, body = send_body,
+                            mtime = op.mtime,
                             auto_body = op.auto_body or nil}
                 end
             elseif op.type == "update" then
@@ -3731,7 +3776,8 @@ local function sync_outbox(my_name)
                     if transformed and transformed ~= "" then send_body = transformed end
                 end
                 data = {type = "update",
-                        message_id = op.message_id, subject = op.subject, body = send_body}
+                        message_id = op.message_id, subject = op.subject, body = send_body,
+                        mtime = op.mtime}
             elseif op.type == "attachment_request" then
                 path = "/deliver"
                 data = {type = "attachment_request",
@@ -4414,13 +4460,16 @@ local function handle_api_get_file(dir, filename)
     filename = sanitize_filename(filename)
     local content = read_file(dir .. "/" .. filename)
     if not content then return 404, nil, nil end
-    return 200, "text/plain; charset=utf-8", content
+    -- 4th return: file mtime so the phone can stamp its local copy (X-Mtime header)
+    return 200, "text/plain; charset=utf-8", content, file_mtime(dir .. "/" .. filename)
 end
 
 -- POST /api/file/outbox/<f> — create or replace an outbox file from the phone.
-local function handle_api_post_outbox_file(filename, body)
+-- mtime (epoch seconds, from the phone's X-Mtime header) preserves authoring time.
+local function handle_api_post_outbox_file(filename, body, mtime)
     filename = sanitize_filename(filename)
     write_file(OUTBOX .. "/" .. filename, body)
+    if mtime then set_file_mtime(OUTBOX .. "/" .. filename, mtime) end
     log("phone created outbox: %s", filename)
     return 200, {ok = true}
 end
@@ -4953,15 +5002,15 @@ local function handle_request(rt, client)
                 local s, r = handle_api_sync(data, contact_name, rt.my_name); send_response(resp, s, r)
             elseif method == "GET" and path:match("^/api/file/inbox/(.+)$") then
                 fn = path:match("^/api/file/inbox/(.+)$")
-                local s, ct, c = handle_api_get_file(INBOX, fn)
-                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+                local s, ct, c, mt = handle_api_get_file(INBOX, fn)
+                if ct then send_raw_response(resp, s, ct, c, mt and {["X-Mtime"] = tostring(mt)} or nil) else send_response(resp, s, {error = "not found"}) end
             elseif method == "GET" and path:match("^/api/file/outbox/(.+)$") then
                 fn = path:match("^/api/file/outbox/(.+)$")
-                local s, ct, c = handle_api_get_file(OUTBOX, fn)
-                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+                local s, ct, c, mt = handle_api_get_file(OUTBOX, fn)
+                if ct then send_raw_response(resp, s, ct, c, mt and {["X-Mtime"] = tostring(mt)} or nil) else send_response(resp, s, {error = "not found"}) end
             elseif method == "POST" and path:match("^/api/file/outbox/(.+)$") then
                 fn = path:match("^/api/file/outbox/(.+)$")
-                local s, r = handle_api_post_outbox_file(fn, body or ""); send_response(resp, s, r)
+                local s, r = handle_api_post_outbox_file(fn, body or "", headers["x-mtime"]); send_response(resp, s, r)
             elseif method == "GET" and path == "/api/attachments" then
                 local s, r = handle_api_list_attachments(); send_response(resp, s, r)
             elseif method == "GET" and path:match("^/api/attachments/(.+)/info$") then
