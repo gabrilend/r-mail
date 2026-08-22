@@ -464,6 +464,105 @@ download() {
     fi
 }
 
+# save_notice NAME SOURCE_DIR [EXTRA_RELATIVE_PATH ...]
+#
+# Copies a dependency's copyright/licence files out of the source tree we
+# just compiled, into deps/licenses/NAME/, so the notices stay next to the
+# binaries built from them.
+#
+# Why this exists: this script compiles eight third-party projects from
+# source into deps/ and libs/ — the Lua interpreter, OpenSSL, LuaSocket,
+# the two port-forwarding helpers, and Info-ZIP's zip and unzip.  Every one
+# of those carries a licence clause requiring that a *binary* redistribution
+# reproduce the upstream copyright notice.  The git repository itself never
+# ships those binaries (deps/ and libs/* are ignored), so the obligation
+# looks dormant — but scripts/make-mailbox-drive.sh rsyncs a fully built
+# tree, deps/ and all, onto a USB drive meant to be handed to another
+# person.  That is a binary redistribution, and without this step it would
+# leave without the notices.
+#
+# Harvested at build time rather than kept as a checked-in NOTICES file on
+# purpose: a hand-written copy goes stale the moment a pinned version moves,
+# and a stale licence notice is worse than none because it looks authoritative.
+# Whatever upstream actually shipped in the tarball we actually built is what
+# gets stored.
+#
+# The search covers the usual upstream spellings two directories deep, since
+# some projects keep their terms in a subdirectory rather than at the root.
+# Projects that hide their licence somewhere unguessable get their paths
+# passed in explicitly — Lua is the one that needs this, as it states its
+# terms in the manual and in the public header instead of a standalone file.
+save_notice() {
+    notice_name="$1"
+    notice_src="$2"
+    shift 2
+
+    # Refuse to build a destination path out of an empty name, which would
+    # otherwise aim the clearing step below at deps/licenses/ as a whole.
+    if [ -z "$notice_name" ] || [ -z "$notice_src" ]; then
+        err "save_notice called without a name and a source directory"
+        return 1
+    fi
+
+    notice_dest="$DEPS/licenses/$notice_name"
+
+    if [ ! -d "$notice_src" ]; then
+        warn "cannot keep licence for $notice_name: no source tree at $notice_src"
+        warn "a binary would ship without its copyright notice — see LICENSE"
+        return 1
+    fi
+
+    # Start from empty every time.  --force rebuilds against whatever version
+    # is pinned today, and a notice left over from the version pinned last
+    # month would both misdescribe the shipped binary and, worse, be counted
+    # as a success below — hiding the case where the new source tree has no
+    # notice at all.  Stale attribution is the failure this whole routine
+    # exists to prevent, so it must not be able to survive a rebuild.
+    rm -rf "$notice_dest"
+    mkdir -p "$notice_dest"
+
+    # Collect first, copy second, so the list is inspectable if this misbehaves
+    # and so the loop body doesn't run in a subshell where counts would vanish.
+    notice_list="$BUILD/.notice-paths"
+    find "$notice_src" -maxdepth 2 -type f \
+        \( -iname 'LICENSE'   -o -iname 'LICENSE.*'   \
+        -o -iname 'LICENCE'   -o -iname 'LICENCE.*'   \
+        -o -iname 'COPYING'   -o -iname 'COPYING.*'   \
+        -o -iname 'COPYRIGHT' -o -iname 'COPYRIGHT.*' \
+        -o -iname 'NOTICE'    -o -iname 'NOTICE.*'    \) > "$notice_list"
+
+    while IFS= read -r notice_file; do
+        cp "$notice_file" "$notice_dest/"
+    done < "$notice_list"
+
+    for notice_extra in "$@"; do
+        if [ -f "$notice_src/$notice_extra" ]; then
+            cp "$notice_src/$notice_extra" "$notice_dest/"
+        fi
+    done
+
+    rm -f "$notice_list"
+
+    notice_count=$(find "$notice_dest" -type f | wc -l)
+
+    # Zero found is a real problem, not a cosmetic one: it means we are about
+    # to ship a binary bare.  Say so loudly with the path to look in, rather
+    # than failing silently or aborting somebody's install over a text file.
+    if [ "$notice_count" -eq 0 ]; then
+        # Leave nothing behind: an empty deps/licenses/<name>/ directory reads
+        # as "checked, nothing required" to anyone auditing the tree later.
+        rmdir "$notice_dest"
+        warn "no licence file found in the $notice_name source tree"
+        warn "  looked in: $notice_src"
+        warn "  a binary built from it would ship without its copyright notice"
+        warn "  fix: find the notice in that tree and name it in the"
+        warn "       save_notice call for $notice_name in this script"
+        return 1
+    fi
+
+    ok "kept $notice_count licence file(s) for $notice_name (deps/licenses/$notice_name/)"
+}
+
 # ============================================================
 # PHASE 1 — Configuration (interactive prompts; run before compilation)
 # ============================================================
@@ -799,6 +898,9 @@ compile_lua() {
             ;;
     esac
     make -s install INSTALL_TOP="$DEPS/lua" 2>/dev/null
+    # Lua ships no standalone LICENSE file — its terms live in the manual
+    # and repeated at the foot of the public header, so both are named.
+    save_notice lua "$BUILD/lua-$LUA_VERSION" doc/readme.html src/lua.h
     cd "$ROOT"
     LUA_INC="-I$DEPS/lua/include"
     LUA_LIB="-L$DEPS/lua/lib"
@@ -917,6 +1019,7 @@ compile_openssl() {
     info "Compiling..."
     make -s -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1
     make -s install_sw >/dev/null 2>&1
+    save_notice openssl "$BUILD/openssl-$OPENSSL_VERSION"
     cd "$ROOT"
     OPENSSL_INC="-I$DEPS/openssl/include"
     OPENSSL_LIB="-L$DEPS/openssl/lib -L$DEPS/openssl/lib64"
@@ -955,6 +1058,10 @@ else
         info "Downloading dkjson..."
         mkdir -p "$LIBS"
         download "http://dkolf.de/dkjson-lua/dkjson-$DKJSON_VERSION.lua" "$LIBS/dkjson.lua"
+        # No save_notice call here on purpose: dkjson is a single source file
+        # that carries its own copyright and permission notice in a comment
+        # block at the top, and we ship that file verbatim.  The notice
+        # already travels with the thing it covers.
         ok "done (libs/dkjson.lua)"
     fi
 fi
@@ -1004,6 +1111,8 @@ install_luasocket() {
     cp ftp.lua "$LIBS/socket/ftp.lua"
     cp smtp.lua "$LIBS/socket/smtp.lua"
     cp headers.lua "$LIBS/socket/headers.lua"
+
+    save_notice luasocket "$BUILD/luasocket-$LUASOCKET_VERSION"
 
     cd "$ROOT"
     ok "done (libs/socket/core.so, libs/mime/core.so)"
@@ -1142,6 +1251,7 @@ else
         make -s build/upnpc-static CC="$CC"
         cp build/upnpc-static "$BIN/upnpc"
         chmod +x "$BIN/upnpc"
+        save_notice miniupnpc "$BUILD/miniupnp-$MINIUPNPC_TAG/miniupnpc"
         cd "$ROOT"
         ok "done (deps/bin/upnpc)"
         HAVE_UPNPC=true
@@ -1169,6 +1279,7 @@ else
         make -s natpmpc-static CC="$CC" CFLAGS="-Wno-parentheses"
         cp natpmpc-static "$BIN/natpmpc"
         chmod +x "$BIN/natpmpc"
+        save_notice libnatpmp "$BUILD/libnatpmp-$LIBNATPMP_COMMIT"
         cd "$ROOT"
         ok "done (deps/bin/natpmpc)"
         HAVE_NATPMPC=true
@@ -1201,6 +1312,7 @@ _compile_zip() {
     cd "${ZIP_SRC}"
     make -f unix/Makefile generic >/dev/null 2>&1 || { err "zip compile failed"; return 1; }
     cp zip "$BIN/zip"
+    save_notice zip "$BUILD/${ZIP_SRC}"
     ok "compiled: deps/bin/zip"
     cd "$ROOT"
 }
@@ -1218,6 +1330,7 @@ _compile_unzip() {
     cd "${UNZIP_SRC}"
     make -f unix/Makefile generic >/dev/null 2>&1 || { err "unzip compile failed"; return 1; }
     cp unzip "$BIN/unzip"
+    save_notice unzip "$BUILD/${UNZIP_SRC}"
     ok "compiled: deps/bin/unzip"
     cd "$ROOT"
 }
