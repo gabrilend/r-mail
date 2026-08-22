@@ -546,8 +546,19 @@ save_notice() {
     notice_count=$(find "$notice_dest" -type f | wc -l)
 
     # Zero found is a real problem, not a cosmetic one: it means we are about
-    # to ship a binary bare.  Say so loudly with the path to look in, rather
-    # than failing silently or aborting somebody's install over a text file.
+    # to ship a binary bare.  Say so loudly, with the path to go look in.
+    #
+    # Deliberately a warning and not a fatal error, and it should stay that
+    # way.  The empty-handed case can only arise because an upstream project
+    # stopped shipping its own notice — a condition on their side of the
+    # fence that we cannot repair from here.  Aborting would punish whoever
+    # is installing rmail for somebody else's packaging decision, while
+    # changing nothing about the missing file.  Enforcing the presence of
+    # something upstream removed means building machinery to guarantee a
+    # condition we do not control, which fails the first time an upstream
+    # rearranges its tree and leaves the installer refusing to run.  Due
+    # diligence is telling the truth about what we found; it is not making
+    # the truth different.  (ritz, on adopting the licence — 2026-08-22)
     if [ "$notice_count" -eq 0 ]; then
         # Leave nothing behind: an empty deps/licenses/<name>/ directory reads
         # as "checked, nothing required" to anyone auditing the tree later.
