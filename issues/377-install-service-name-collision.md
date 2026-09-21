@@ -52,12 +52,45 @@ installer's path-to-slug transform in a second place.  Steps 11 and 12
 below are unstarted.  Step 14 is unstarted: a recipient matching both
 the configured identity and a real contact still self-delivers silently.
 
-**Verified on this machine.**  The two mailboxes at `/home/ritz/mail`
-and `/home/ritz/notes/rmail` share the identity `kuvalu`, and the single
-installed service at `/etc/sv/rmail/run` serves the second one — so the
-first mailbox has no service at all, which is this bug's signature.  The
-new scan detects and reports both of these.  Neither has been changed;
-see the open questions.
+**Verified on this machine, and the workaround found there is worth
+recording.**  `/etc/sv` holds five relevant service directories:
+
+| created | name | serves | enabled |
+|---|---|---|---|
+| Aug 25 10:27 | `rmail` | `notes/rmail` | no |
+| Aug 26 10:55 | `rmail-home-ritz-mail` | `~/mail` | no |
+| Aug 26 10:55 | `rmail-home-ritz-notes-rmail` | `notes/rmail` | no |
+| Aug 26 11:10 | `kuvalu-mail` | `~/mail` | **yes, running** |
+| Aug 26 11:10 | `kuvalu-notes` | `notes/rmail` | **yes, running** |
+
+The first is what the installer produced: one service, named `rmail`,
+serving whichever mailbox was installed last.  The next two were then
+built by hand on the following morning, using exactly the slug naming
+this issue proposes — including the per-service log paths.  Half an hour
+after that they were superseded by a second hand-built pair under
+shorter names, and those are the two actually supervised and running.
+
+So both mailboxes are served, and neither is served by anything the
+installer made.  The operator had already worked around this by hand
+before the issue was written, which is why the symptom never showed up
+as a mailbox going quiet.
+
+Two things follow.  The derived name is the right default, since it is
+what somebody reached for unprompted when solving this themselves.  And
+the prompt that allows a shorter one is not a nicety — the same person
+replaced those derived names with `kuvalu-mail` and `kuvalu-notes`
+within the hour, which is the whole argument for `--service-name`.
+
+Re-running the fixed installer for either mailbox now finds its
+slug-named directory already present and pointing at the same config,
+so it reports an update rather than refusing.  The three unenabled
+directories are leftovers and are left alone: removing a service
+directory is the operator's call, which is the same principle as the
+migration note below.
+
+The two mailboxes also share the identity `kuvalu`.  The new scan
+detects and reports that.  Nothing has been changed; see the open
+questions.
 
 ### Steps done
 
