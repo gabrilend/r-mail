@@ -6,7 +6,6 @@ import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -616,10 +615,8 @@ fun InboxScreen(
             }
 
             when (currentPanel) {
-                Panel.INBOX -> MessageList(inboxFiles, "No messages", vm.swipeToDelete,
-                    { vm.deleteInboxMessage(it) }, { onOpen(it) })
-                Panel.OUTBOX -> MessageList(outboxFiles, "Outbox is empty", true,
-                    { vm.deleteOutboxFile(it) }, { onOpenOutbox(it) })
+                Panel.INBOX -> MessageList(inboxFiles, "No messages") { onOpen(it) }
+                Panel.OUTBOX -> MessageList(outboxFiles, "Outbox is empty") { onOpenOutbox(it) }
                 Panel.FILES -> {
                     // Box overlay: action bars float on top of the list
                     Box(Modifier.fillMaxSize()) {
@@ -1226,7 +1223,6 @@ private fun SettingsPanel(
     var host by remember(activeConfig) { mutableStateOf(activeConfig?.host ?: "") }
     var port by remember(activeConfig) { mutableStateOf(activeConfig?.port?.toString() ?: "8025") }
     var token by remember(activeConfig) { mutableStateOf(activeConfig?.token ?: "") }
-    var swipeToDelete by remember(activeConfig) { mutableStateOf(activeConfig?.swipeToDelete ?: true) }
     var bgSyncInterval by remember(activeConfig) { mutableStateOf(activeConfig?.bgSyncIntervalMinutes?.toString() ?: "15") }
     var notifDetail by remember(activeConfig) { mutableStateOf(activeConfig?.notificationDetail ?: "full") }
     var bgColor by remember { mutableStateOf(Color(vm.globalSettings.bgColor.toLong() and 0xFFFFFFFFL)) }
@@ -1246,7 +1242,7 @@ private fun SettingsPanel(
         if (activeConfig != null) {
             vm.updateMailbox(activeConfig.copy(
                 host = host.trim(), port = port.toIntOrNull() ?: 8025,
-                token = token.trim(), swipeToDelete = swipeToDelete,
+                token = token.trim(),
                 bgSyncIntervalMinutes = bgSyncInterval.toIntOrNull() ?: 15,
                 notificationDetail = notifDetail
             ))
@@ -1262,7 +1258,6 @@ private fun SettingsPanel(
         host = activeConfig?.host ?: ""
         port = activeConfig?.port?.toString() ?: "8025"
         token = activeConfig?.token ?: ""
-        swipeToDelete = activeConfig?.swipeToDelete ?: true
         bgSyncInterval = activeConfig?.bgSyncIntervalMinutes?.toString() ?: "15"
         notifDetail = activeConfig?.notificationDetail ?: "full"
         bgColor = Color(vm.globalSettings.bgColor.toLong() and 0xFFFFFFFFL)
@@ -1292,10 +1287,6 @@ private fun SettingsPanel(
 
             Spacer(Modifier.height(4.dp))
             Text("Behavior", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Swipe to delete", modifier = Modifier.weight(1f))
-                Switch(checked = swipeToDelete, onCheckedChange = { swipeToDelete = it; markModified() })
-            }
             OutlinedTextField(value = bgSyncInterval,
                 onValueChange = { bgSyncInterval = it.filter { c -> c.isDigit() }; markModified() },
                 label = { Text("Background sync (min 15 minutes)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -1798,8 +1789,7 @@ private class ContactsDiffTransformation(
 
 @Composable
 private fun MessageList(
-    files: List<String>, emptyText: String, swipeToDelete: Boolean,
-    onDelete: (String) -> Unit, onClick: (String) -> Unit
+    files: List<String>, emptyText: String, onClick: (String) -> Unit
 ) {
     if (files.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1808,11 +1798,7 @@ private fun MessageList(
     } else {
         LazyColumn {
             items(files, key = { it }) { filename ->
-                if (swipeToDelete) {
-                    SwipeToDismissMessageItem(filename, { onDelete(filename) }, { onClick(filename) })
-                } else {
-                    MessageListItem(filename, { onClick(filename) })
-                }
+                MessageListItem(filename, { onClick(filename) })
                 HorizontalDivider(thickness = 0.5.dp)
             }
         }
@@ -1990,24 +1976,6 @@ private fun MessageListItem(filename: String, onClick: () -> Unit) {
         .padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(filename, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SwipeToDismissMessageItem(filename: String, onDelete: () -> Unit, onClick: () -> Unit) {
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { if (it == SwipeToDismissBoxValue.EndToStart) { onDelete(); true } else false }
-    )
-    SwipeToDismissBox(state = dismissState, backgroundContent = {
-        val color by animateColorAsState(
-            if (dismissState.targetValue == SwipeToDismissBoxValue.EndToStart)
-                MaterialTheme.colorScheme.error else Color.Transparent, label = "swipe_bg")
-        Box(Modifier.fillMaxSize().background(color), contentAlignment = Alignment.CenterEnd) {
-            Icon(Icons.Default.Delete, "Delete", Modifier.padding(end = 16.dp), tint = MaterialTheme.colorScheme.onError)
-        }
-    }) {
-        Surface(color = MaterialTheme.colorScheme.background) { MessageListItem(filename, onClick) }
     }
 }
 

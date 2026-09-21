@@ -780,7 +780,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Helper for screens that need to know if the active mailbox is configured */
     val isActiveConfigured: Boolean get() = activeConfig?.isConfigured == true
-
-    /** Per-mailbox swipe-to-delete setting */
-    val swipeToDelete: Boolean get() = activeConfig?.swipeToDelete ?: true
 }

@@ -50,6 +50,38 @@ default.  If we want to *also* flip existing users to off, that needs a
 one-time migration, which is probably overkill — note but don't do it
 unless asked.
 
+## Resolution — feature removed entirely (superseded)
+
+Rather than flipping the default, swipe-to-delete was **removed from
+the app altogether** (2026-08-25).  The reporter kept deleting messages
+by accident, and a gesture that destructive isn't worth keeping behind
+a toggle nobody discovers until after the first accident.
+
+Removed:
+
+- `data/MailboxRegistry.kt` — `swipeToDelete` field, its `getBoolean` /
+  `optBoolean` reads, and its `put` in `toJson`.  The legacy-migration
+  `prefs.edit().remove("swipe_to_delete")` cleanup stays, so the stale
+  pref key is still swept off old installs.
+- `ui/MainViewModel.kt` — the `swipeToDelete` accessor.
+- `ui/screens/InboxScreen.kt` — the `SwipeToDismissMessageItem`
+  composable, the `swipeToDelete`/`onDelete` params on `MessageList`,
+  the settings-panel `Switch`, and the now-unused `animateColorAsState`
+  import.
+- `ui/screens/SettingsScreen.kt` — the `Switch` and its state.
+
+Note the outbox list had swipe-to-delete hardcoded **on** (`MessageList(
+outboxFiles, "Outbox is empty", true, …)`) with no toggle at all — that
+path is gone too.
+
+Deleting still works: `ReadScreen.kt:65` has an explicit delete button
+that calls `deleteOutboxFile` / `deleteInboxMessage`, so the only change
+is that a delete now takes opening the message first.
+
+Existing `mailboxes.json` files keep their now-ignored `swipe_to_delete`
+key; `parseConfig` just doesn't read it, and the key drops out on the
+next save.  No migration needed.
+
 ## Status
 
-Open.
+Closed — resolved by removal, not by the default flip described above.

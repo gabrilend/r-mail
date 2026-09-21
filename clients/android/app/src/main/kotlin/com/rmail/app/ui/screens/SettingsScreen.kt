@@ -29,7 +29,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     var host by remember(activeConfig) { mutableStateOf(activeConfig?.host ?: "") }
     var port by remember(activeConfig) { mutableStateOf(activeConfig?.port?.toString() ?: "8025") }
     var token by remember(activeConfig) { mutableStateOf(activeConfig?.token ?: "") }
-    var swipeToDelete by remember(activeConfig) { mutableStateOf(activeConfig?.swipeToDelete ?: true) }
     var bgSyncInterval by remember(activeConfig) { mutableStateOf(activeConfig?.bgSyncIntervalMinutes?.toString() ?: "15") }
     var notifDetail by remember(activeConfig) { mutableStateOf(activeConfig?.notificationDetail ?: "full") }
 
@@ -49,7 +48,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                 host = host.trim(),
                                 port = port.toIntOrNull() ?: 8025,
                                 token = token.trim(),
-                                swipeToDelete = swipeToDelete,
                                 bgSyncIntervalMinutes = bgSyncInterval.toIntOrNull() ?: 15,
                                 notificationDetail = notifDetail
                             ))
@@ -103,14 +101,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
 
                 SettingsSection("Behavior") {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Swipe to delete", modifier = Modifier.weight(1f))
-                        Switch(checked = swipeToDelete, onCheckedChange = { swipeToDelete = it })
-                    }
-
                     OutlinedTextField(
                         value = bgSyncInterval,
                         onValueChange = { bgSyncInterval = it.filter { c -> c.isDigit() } },

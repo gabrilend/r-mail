@@ -12,7 +12,6 @@ data class MailboxConfig(
     val host: String = "",
     val port: Int = 8025,
     val token: String = "",
-    val swipeToDelete: Boolean = true,
     val bgSyncIntervalMinutes: Int = 15,
     val notificationDetail: String = "full",
     val mailboxPath: String = ""  // server-side mailbox directory, learned from sync
@@ -86,7 +85,6 @@ class MailboxRegistry(private val context: Context) {
             host = host,
             port = port,
             token = token,
-            swipeToDelete = prefs.getBoolean("swipe_to_delete", true),
             bgSyncIntervalMinutes = prefs.getInt("bg_sync_interval", 15),
             notificationDetail = prefs.getString("notification_detail", "full") ?: "full"
         )
@@ -113,7 +111,6 @@ class MailboxRegistry(private val context: Context) {
         host = obj.optString("host", ""),
         port = obj.optInt("port", 8025),
         token = obj.optString("token", ""),
-        swipeToDelete = obj.optBoolean("swipe_to_delete", true),
         bgSyncIntervalMinutes = obj.optInt("bg_sync_interval", 15),
         notificationDetail = obj.optString("notification_detail", "full"),
         mailboxPath = obj.optString("mailbox_path", "")
@@ -125,7 +122,6 @@ class MailboxRegistry(private val context: Context) {
         put("host", c.host)
         put("port", c.port)
         put("token", c.token)
-        put("swipe_to_delete", c.swipeToDelete)
         put("bg_sync_interval", c.bgSyncIntervalMinutes)
         put("notification_detail", c.notificationDetail)
         put("mailbox_path", c.mailboxPath)
