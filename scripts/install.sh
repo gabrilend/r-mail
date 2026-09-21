@@ -166,7 +166,7 @@ _parse_bool() {
 
 # Option keys the installer recognises.  Value keys need a string, yn keys
 # take a boolean.  Used by show_help and the CLI parser.
-OPT_VALUE_KEYS="mail_dir name port"
+OPT_VALUE_KEYS="mail_dir name port service_name"
 OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service"
 
 show_help() {
@@ -188,6 +188,12 @@ Required values (supplying --flag skips the matching prompt):
   --name=STR              Local identity (used only on this machine)
   --port=NUM              TCP port the daemon listens on
 
+Optional values (a default is derived if not supplied):
+  --service-name=STR      Name of the init service for this mailbox.
+                          Defaults to rmail- plus the mailbox path slug, so
+                          each mailbox on a machine gets its own service
+                          instead of replacing the last one's.
+
 Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
   --compile-lua           Compile a project-local Lua
   --compile-openssl       Compile a project-local OpenSSL
@@ -202,6 +208,11 @@ Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
 Fully unattended example:
   scripts/install.sh --silent --yes \
       --mail-dir=/srv/rmail/alice --name=alice --port=54321
+
+A second mailbox on the same machine is the same command with different
+values.  It installs alongside the first rather than replacing it; the
+service name, the generated unit file and the log path are all derived
+from the mailbox path unless --service-name says otherwise.
 
 Values are only read from CLI flags.  Environment variables are
 intentionally ignored — a stale RMAIL_* export from an earlier session
@@ -410,6 +421,33 @@ ask_value() {
     else
         echo "$_val"
     fi
+}
+
+ask_value_or_default() {
+    # ask_value_or_default KEY "prompt" "default"
+    # As ask_value, except --silent takes the default instead of failing.
+    #
+    # The difference is about whether the installer can know the right answer
+    # on its own.  It cannot invent a mailbox directory or an identity, so
+    # ask_value refuses to guess and stops.  It *can* derive a service name,
+    # because the name is a function of the mailbox path it was already given
+    # — so refusing to proceed without being told one would be demanding a
+    # value it is perfectly capable of working out.
+    #
+    # This distinction is also what keeps existing unattended installs
+    # working.  Adding a required flag would have broken every scripted
+    # install.sh invocation already out there, on a value those scripts had
+    # no way to know they would need.
+    _k="$1"
+    if _has_opt "$_k"; then
+        _get_opt "$_k"
+        return
+    fi
+    if $SILENT; then
+        echo "$3"
+        return
+    fi
+    ask_value "$@"
 }
 
 read_config_value() {
@@ -632,6 +670,100 @@ MAIL_DIR="$RMAIL_MAIL"
 CONFIG_SLUG=$(echo "$RMAIL_MAIL" | sed 's|^/||; s|/|-|g')
 CONFIG_FILE="$CONFIG_DIR/config-$CONFIG_SLUG"
 
+# ============================================================
+# EXISTING-INSTALL SCAN — what is already on this machine
+# ============================================================
+# Runs before a single file is written, because everything downstream of
+# here — the service name, the port, the identity — has to be checked
+# against what is already installed, and the installer cannot warn about
+# something it never read.  (Re #377.)
+#
+# Two things are looked for.  Sibling config files, which are the record
+# of other mailboxes set up on this machine; and installed service files,
+# which are the record of which of those are actually being served.  The
+# service locations of all five init systems are checked regardless of
+# which one is running here, because a machine that changed init systems
+# can still have the old unit lying around.
+
+SIBLING_CONFIGS=""
+PRE_SLUG_SERVICE=""
+
+scan_existing_installs() {
+    _scan_f=""
+    for _scan_f in "$CONFIG_DIR"/config-*; do
+        [ -f "$_scan_f" ] || continue
+        [ "$_scan_f" = "$CONFIG_FILE" ] && continue
+        SIBLING_CONFIGS="$SIBLING_CONFIGS$_scan_f
+"
+    done
+
+    # A service named exactly "rmail" is the layout from before this was
+    # fixed.  It is reported rather than renamed: moving a supervised
+    # service directory stops the daemon, and that belongs to the operator
+    # rather than to an installer they ran for a different reason.
+    for _scan_f in /etc/sv/rmail/run \
+                   "$HOME/.config/systemd/user/rmail.service" \
+                   /etc/systemd/system/rmail.service \
+                   /etc/init.d/rmail \
+                   /etc/nixos/rmail.nix; do
+        if [ -e "$_scan_f" ]; then
+            PRE_SLUG_SERVICE="$_scan_f"
+            break
+        fi
+    done
+}
+
+# service_exists NAME — succeeds when any init system already has a unit
+# by that name.  Used both to report and, later, to refuse.
+service_exists() {
+    for _se_f in "/etc/sv/$1/run" \
+                 "$HOME/.config/systemd/user/$1.service" \
+                 "/etc/systemd/system/$1.service" \
+                 "/etc/init.d/$1" \
+                 "/etc/nixos/$1.nix"; do
+        [ -e "$_se_f" ] && { printf '%s' "$_se_f"; return 0; }
+    done
+    return 1
+}
+
+# sibling_claims KEY VALUE — prints the config file of another mailbox
+# whose KEY is VALUE, or nothing.  This is how the port and identity
+# uniqueness checks are answered: by reading the other mailboxes rather
+# than by keeping a registry that could fall out of step with them.
+sibling_claims() {
+    _sc_key="$1"; _sc_want="$2"
+    printf '%s' "$SIBLING_CONFIGS" | while IFS= read -r _sc_f; do
+        [ -n "$_sc_f" ] || continue
+        if [ "$(read_config_value "$_sc_f" "$_sc_key")" = "$_sc_want" ]; then
+            printf '%s' "$_sc_f"
+            break
+        fi
+    done
+}
+
+scan_existing_installs
+
+if [ -n "$SIBLING_CONFIGS" ]; then
+    echo ""
+    info "Other rmail mailboxes already set up on this machine:"
+    printf '%s' "$SIBLING_CONFIGS" | while IFS= read -r _rep_f; do
+        [ -n "$_rep_f" ] || continue
+        echo "    $(read_config_value "$_rep_f" "mail")  (identity: $(read_config_value "$_rep_f" "name"), port: $(read_config_value "$_rep_f" "port"))"
+    done
+    info "This install adds to those rather than replacing them."
+fi
+
+if [ -n "$PRE_SLUG_SERVICE" ]; then
+    echo ""
+    warn "Found a service installed at $PRE_SLUG_SERVICE"
+    warn "  That is the old layout, from before each mailbox got its own"
+    warn "  service name. It still works and this install will not touch it."
+    warn "  It serves whichever mailbox its config argument names — read the"
+    warn "  file to see which. To move it onto the new naming, stop it and"
+    warn "  re-run this installer for that mailbox; renaming a running"
+    warn "  service is a decision worth making deliberately."
+fi
+
 # If migrating from old config, use it as the source for defaults
 if [ -n "$EXISTING_CONFIG" ] && [ "$EXISTING_CONFIG" != "$CONFIG_FILE" ]; then
     # Pre-fill from existing config
@@ -648,22 +780,84 @@ DEFAULT_PORT=$(gen_random_port)
 [ -n "${_existing_port:-}" ] && DEFAULT_PORT="$_existing_port"
 
 # prompt for name
+#
+# Uniqueness across mailboxes is enforced here as an error rather than a
+# warning, and the reason is worth knowing: the daemon decides whether a
+# message is for itself by comparing the recipient against its own
+# identity, and that comparison runs before any contacts lookup.  Two
+# mailboxes sharing an identity means mail addressed from one to the
+# other gets written into the sender's own inbox, logged as delivered,
+# and marked satisfied.  No error, no retry, nothing arrives.
 while true; do
     RMAIL_NAME=$(ask_value name "Your own name (used locally, not transmitted)" "$DEFAULT_NAME") || exit 1
-    if echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
-        break
+    if ! echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+        warn "Name must contain only letters, numbers, hyphens, and underscores."
+        continue
     fi
-    warn "Name must contain only letters, numbers, hyphens, and underscores."
+    _name_taken_by=$(sibling_claims name "$RMAIL_NAME")
+    if [ -n "$_name_taken_by" ]; then
+        warn "The identity '$RMAIL_NAME' already belongs to the mailbox at"
+        warn "  $(read_config_value "$_name_taken_by" "mail")"
+        warn "Two mailboxes with one identity cannot send mail to each other —"
+        warn "  it is delivered to the sender instead, silently. Pick another."
+        if $SILENT; then
+            err "--silent: cannot re-prompt for a unique identity"
+            exit 1
+        fi
+        continue
+    fi
+    break
 done
 
 # prompt for port
+#
+# Checked against every other mailbox for the ordinary reason: two daemons
+# handed the same port means the second one fails to bind at startup, long
+# after the install that caused it has scrolled away.
 while true; do
     RMAIL_PORT=$(ask_value port "Port to listen on" "$DEFAULT_PORT") || exit 1
-    if echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' && [ "$RMAIL_PORT" -ge 1 ] && [ "$RMAIL_PORT" -le 65535 ]; then
+    if ! echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' || [ "$RMAIL_PORT" -lt 1 ] || [ "$RMAIL_PORT" -gt 65535 ]; then
+        warn "Port must be a number between 1 and 65535."
+        continue
+    fi
+    _port_taken_by=$(sibling_claims port "$RMAIL_PORT")
+    if [ -n "$_port_taken_by" ]; then
+        warn "Port $RMAIL_PORT is already used by the mailbox at"
+        warn "  $(read_config_value "$_port_taken_by" "mail")"
+        if $SILENT; then
+            err "--silent: port $RMAIL_PORT collides with an existing mailbox"
+            exit 1
+        fi
+        DEFAULT_PORT=$(gen_random_port)
+        warn "Try $DEFAULT_PORT instead."
+        continue
+    fi
+    break
+done
+
+# ---- Service name ----------------------------------------------------------
+# Derived from the same mailbox slug that names the config file, so that
+# uniqueness is inherited from the filesystem rather than from the operator
+# remembering to pick a different name.  A mailbox at /home/ritz/mail gets a
+# service called rmail-home-ritz-mail.
+#
+# This is the whole fix for #377.  Before it, every install generated a
+# service called "rmail", and installing a second mailbox silently replaced
+# the first one's service instead of adding to it.
+DEFAULT_SERVICE="rmail-$CONFIG_SLUG"
+while true; do
+    RMAIL_SERVICE=$(ask_value_or_default service_name "Service name for this mailbox" "$DEFAULT_SERVICE") || exit 1
+    if echo "$RMAIL_SERVICE" | grep -qE '^[a-zA-Z0-9_-]+$'; then
         break
     fi
-    warn "Port must be a number between 1 and 65535."
+    warn "Service name must contain only letters, numbers, hyphens, and underscores."
+    if $SILENT; then exit 1; fi
 done
+
+# Where this service's log goes.  Per-service for the same reason the service
+# itself is: two daemons appending to one file interleave, with nothing in the
+# file saying which of them wrote any given line.
+RMAIL_SERVICE_LOG="/tmp/$RMAIL_SERVICE.log"
 
 # Write or update config file
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -738,8 +932,32 @@ fi
 
 # Create mailbox directories and config symlink
 mkdir -p "$MAIL_DIR/inbox" "$MAIL_DIR/outbox" "$MAIL_DIR/attachments" "$MAIL_DIR/.state"
+# Inside the mailbox, always. This one is per-mailbox by construction and
+# is the fixed relative path the daemon and the helper scripts look for.
 ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
-ln -sf "$CONFIG_FILE" "$ROOT/config"
+
+# In the project root, only if nothing is there yet.
+#
+# There is one project root and there can be many mailboxes, so this link
+# cannot point at all of them. It used to be repointed on every install,
+# which meant the last mailbox installed silently became the one every
+# helper script and every piece of tooling reading that path would talk
+# to — including for someone who had set the first one up months earlier
+# and had no reason to think anything had moved.
+#
+# So the first install claims it and later ones say what they found.
+# (Re #377.)
+if [ -e "$ROOT/config" ] || [ -L "$ROOT/config" ]; then
+    _root_config_target=$(readlink -f "$ROOT/config" 2>/dev/null || echo "")
+    if [ "$_root_config_target" != "$(readlink -f "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")" ]; then
+        info "Left $ROOT/config pointing at the mailbox it already named:"
+        info "  $(read_config_value "$_root_config_target" "mail" 2>/dev/null || echo "$_root_config_target")"
+        info "  Helper scripts run from the project root use that one. This"
+        info "  mailbox is reached by naming its config: $CONFIG_FILE"
+    fi
+else
+    ln -sf "$CONFIG_FILE" "$ROOT/config"
+fi
 
 echo ""
 echo "  your rmail port: $RMAIL_PORT"
@@ -1492,11 +1710,34 @@ if [ "$INIT_SYSTEM" = "unknown" ]; then
     info "Could not detect init system — skipping service setup"
     info "See README.md for service file examples"
 elif ask_yn setup_service "Set up rmail to run as a service?"; then
+    # Refuse to write over a service that belongs to a different mailbox.
+    #
+    # This check lives here rather than in the earlier scan because this is
+    # the last moment the script still controls what happens: the installer
+    # never escalates privileges, so for four of the five init systems the
+    # actual installation is a command the operator runs afterwards. Once
+    # those instructions are printed, the script is out of the loop.
+    #
+    # There is deliberately no fallback to an automatically chosen
+    # alternative name. Quietly picking a different one would reintroduce
+    # exactly the class of surprise this whole change is about. (Re #377.)
+    if _clash=$(service_exists "$RMAIL_SERVICE"); then
+        if ! grep -q "$CONFIG_FILE" "$_clash" 2>/dev/null; then
+            err "A service named '$RMAIL_SERVICE' is already installed at:"
+            err "    $_clash"
+            err "  and it does not serve this mailbox."
+            err "  Choose another name with --service-name=NAME, or remove that"
+            err "  service first. Nothing has been written."
+            exit 1
+        fi
+        info "Updating the existing '$RMAIL_SERVICE' service, which already serves this mailbox."
+    fi
+
     case "$INIT_SYSTEM" in
         nixos)
             NIX_PORT=$(grep '^port' "$CONFIG_FILE" | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]')
 
-            NIX_FILE="$ROOT/rmail.nix"
+            NIX_FILE="$ROOT/$RMAIL_SERVICE.nix"
 
             # nix store paths change on every update, so if the user chose the
             # system lua (LUA_BIN is under /nix/store/), use the stable
@@ -1506,15 +1747,17 @@ elif ask_yn setup_service "Set up rmail to run as a service?"; then
             if echo "$LUA_BIN" | grep -q '^/nix/store/'; then
                 cat > "$NIX_FILE" <<NIX
 { config, pkgs, ... }:
-# rmail NixOS service - logs to RAM-backed /tmp
+# rmail NixOS service for the mailbox at $RMAIL_MAIL
+# Logs to RAM-backed /tmp. One service per mailbox; the name carries the
+# mailbox path so a second mailbox adds a service rather than replacing this.
 
 let
   rmailPort = $NIX_PORT;
 in {
   networking.firewall.allowedTCPPorts = [ rmailPort ];
 
-  systemd.services.rmail = {
-    description = "rmail messaging daemon";
+  systemd.services."$RMAIL_SERVICE" = {
+    description = "rmail messaging daemon ($RMAIL_MAIL)";
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
 
@@ -1525,8 +1768,8 @@ in {
       ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $CONFIG_FILE";
       Restart = "on-failure";
       RestartSec = 5;
-      StandardOutput = "append:/tmp/rmail.log";
-      StandardError = "append:/tmp/rmail.log";
+      StandardOutput = "append:$RMAIL_SERVICE_LOG";
+      StandardError = "append:$RMAIL_SERVICE_LOG";
     };
   };
 }
@@ -1534,15 +1777,17 @@ NIX
             else
                 cat > "$NIX_FILE" <<NIX
 { config, ... }:
-# rmail NixOS service - logs to RAM-backed /tmp
+# rmail NixOS service for the mailbox at $RMAIL_MAIL
+# Logs to RAM-backed /tmp. One service per mailbox; the name carries the
+# mailbox path so a second mailbox adds a service rather than replacing this.
 
 let
   rmailPort = $NIX_PORT;
 in {
   networking.firewall.allowedTCPPorts = [ rmailPort ];
 
-  systemd.services.rmail = {
-    description = "rmail messaging daemon";
+  systemd.services."$RMAIL_SERVICE" = {
+    description = "rmail messaging daemon ($RMAIL_MAIL)";
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
 
@@ -1553,8 +1798,8 @@ in {
       ExecStart = "$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE";
       Restart = "on-failure";
       RestartSec = 5;
-      StandardOutput = "append:/tmp/rmail.log";
-      StandardError = "append:/tmp/rmail.log";
+      StandardOutput = "append:$RMAIL_SERVICE_LOG";
+      StandardError = "append:$RMAIL_SERVICE_LOG";
     };
   };
 }
@@ -1563,22 +1808,22 @@ NIX
             ok "generated $NIX_FILE"
             echo ""
             echo "  Run these commands to install:"
-            echo "    sudo cp $NIX_FILE /etc/nixos/rmail.nix"
+            echo "    sudo cp $NIX_FILE /etc/nixos/$RMAIL_SERVICE.nix"
             echo "    # add this line to /etc/nixos/configuration.nix:"
-            echo "    #   imports = [ ./rmail.nix ];"
+            echo "    #   imports = [ ./$RMAIL_SERVICE.nix ];"
             echo "    sudo nixos-rebuild switch"
-            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "  Logs: tail -f $RMAIL_SERVICE_LOG"
             echo "  Or use: ./scripts/view-logs.sh"
             ;;
         systemd)
             if ask_yn user_service "Set up as a user service? (no root required, starts on login)"; then
                 SERVICE_DIR="$HOME/.config/systemd/user"
-                SERVICE_FILE="$SERVICE_DIR/rmail.service"
+                SERVICE_FILE="$SERVICE_DIR/$RMAIL_SERVICE.service"
                 mkdir -p "$SERVICE_DIR"
                 # systemd user service logs to /tmp (RAM-backed)
                 cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
-Description=rmail messaging daemon
+Description=rmail messaging daemon ($RMAIL_MAIL)
 After=network.target
 
 [Service]
@@ -1586,27 +1831,28 @@ Type=simple
 ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/tmp/rmail.log
-StandardError=append:/tmp/rmail.log
+StandardOutput=append:$RMAIL_SERVICE_LOG
+StandardError=append:$RMAIL_SERVICE_LOG
 
 [Install]
 WantedBy=default.target
 SERVICE
                 ok "created $SERVICE_FILE"
                 systemctl --user daemon-reload
-                systemctl --user enable rmail
-                systemctl --user start rmail
-                ok "service enabled and started"
+                systemctl --user enable "$RMAIL_SERVICE"
+                systemctl --user start "$RMAIL_SERVICE"
+                ok "service '$RMAIL_SERVICE' enabled and started"
                 echo ""
-                info "Logs: tail -f /tmp/rmail.log"
+                info "Logs: tail -f $RMAIL_SERVICE_LOG"
                 info "Or use: ./scripts/view-logs.sh"
+                info "Status: systemctl --user status $RMAIL_SERVICE"
                 info "To keep running after logout: loginctl enable-linger"
             else
-                SERVICE_FILE="$ROOT/rmail.service"
+                SERVICE_FILE="$ROOT/$RMAIL_SERVICE.service"
                 # systemd system service logs to /tmp (RAM-backed)
                 cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
-Description=rmail messaging daemon
+Description=rmail messaging daemon ($RMAIL_MAIL)
 After=network.target
 
 [Service]
@@ -1615,8 +1861,8 @@ User=$(whoami)
 ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/tmp/rmail.log
-StandardError=append:/tmp/rmail.log
+StandardOutput=append:$RMAIL_SERVICE_LOG
+StandardError=append:$RMAIL_SERVICE_LOG
 
 [Install]
 WantedBy=multi-user.target
@@ -1624,58 +1870,60 @@ SERVICE
                 ok "generated $SERVICE_FILE"
                 echo ""
                 echo "  Run these commands to install the system service:"
-                echo "    sudo mv $SERVICE_FILE /etc/systemd/system/rmail.service"
+                echo "    sudo cp $SERVICE_FILE /etc/systemd/system/$RMAIL_SERVICE.service"
                 echo "    sudo systemctl daemon-reload"
-                echo "    sudo systemctl enable --now rmail"
-                echo "  Logs: tail -f /tmp/rmail.log"
+                echo "    sudo systemctl enable --now $RMAIL_SERVICE"
+                echo "  Logs: tail -f $RMAIL_SERVICE_LOG"
                 echo "  Or use: ./scripts/view-logs.sh"
             fi
             ;;
         runit)
-            SERVICE_FILE="$ROOT/rmail-run"
+            SERVICE_FILE="$ROOT/$RMAIL_SERVICE-run"
             # runit service logs to /tmp (RAM-backed) to avoid disk wear
             # and prevent output from appearing on pre-login TTY
             cat > "$SERVICE_FILE" <<SERVICE
 #!/bin/sh
-# rmail runit service - redirects logs to RAM-backed /tmp
-# Logs don't persist across reboots and don't cause disk wear.
+# rmail runit service for the mailbox at $RMAIL_MAIL
+# Logs go to RAM-backed /tmp: no disk wear, gone on reboot.
 export HOME=$HOME
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $CONFIG_FILE >>/tmp/rmail.log 2>&1
+exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $CONFIG_FILE >>$RMAIL_SERVICE_LOG 2>&1
 SERVICE
             chmod +x "$SERVICE_FILE"
             ok "generated $SERVICE_FILE"
             echo ""
             echo "  Run these commands to install the service:"
-            echo "    sudo mkdir -p /etc/sv/rmail"
-            echo "    sudo mv $SERVICE_FILE /etc/sv/rmail/run"
-            echo "    sudo ln -s /etc/sv/rmail /var/service/"
-            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "    sudo mkdir -p /etc/sv/$RMAIL_SERVICE"
+            echo "    sudo cp $SERVICE_FILE /etc/sv/$RMAIL_SERVICE/run"
+            echo "    sudo chmod +x /etc/sv/$RMAIL_SERVICE/run"
+            echo "    sudo ln -s /etc/sv/$RMAIL_SERVICE /var/service/"
+            echo "  Logs: tail -f $RMAIL_SERVICE_LOG"
             echo "  Or use: ./scripts/view-logs.sh"
             ;;
         openrc)
-            SERVICE_FILE="$ROOT/rmail-init"
+            SERVICE_FILE="$ROOT/$RMAIL_SERVICE-init"
             # openrc service logs to /tmp (RAM-backed) to avoid disk wear
             cat > "$SERVICE_FILE" <<SERVICE
 #!/sbin/openrc-run
-# rmail openrc service - logs to RAM-backed /tmp
+# rmail openrc service for the mailbox at $RMAIL_MAIL
+# Logs to RAM-backed /tmp.
 
-description="rmail messaging daemon"
+description="rmail messaging daemon ($RMAIL_MAIL)"
 command="$LUA_BIN"
 command_args="$ROOT/rmail.lua $CONFIG_FILE"
 command_user="$(whoami)"
 command_background=true
-pidfile="/run/rmail.pid"
-output_log="/tmp/rmail.log"
-error_log="/tmp/rmail.log"
+pidfile="/run/$RMAIL_SERVICE.pid"
+output_log="$RMAIL_SERVICE_LOG"
+error_log="$RMAIL_SERVICE_LOG"
 SERVICE
             ok "generated $SERVICE_FILE"
             echo ""
             echo "  Run these commands to install the service:"
-            echo "    sudo mv $SERVICE_FILE /etc/init.d/rmail"
-            echo "    sudo chmod +x /etc/init.d/rmail"
-            echo "    sudo rc-update add rmail default"
-            echo "    sudo rc-service rmail start"
-            echo "  Logs: tail -f /tmp/rmail.log"
+            echo "    sudo cp $SERVICE_FILE /etc/init.d/$RMAIL_SERVICE"
+            echo "    sudo chmod +x /etc/init.d/$RMAIL_SERVICE"
+            echo "    sudo rc-update add $RMAIL_SERVICE default"
+            echo "    sudo rc-service $RMAIL_SERVICE start"
+            echo "  Logs: tail -f $RMAIL_SERVICE_LOG"
             echo "  Or use: ./scripts/view-logs.sh"
             ;;
     esac

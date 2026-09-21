@@ -12,8 +12,14 @@ The manual formats are below. Replace `/path/to/lua` with either
 
 ## Logging
 
-All service configurations log to `/tmp/rmail.log`. Since `/tmp` is typically
-RAM-backed (tmpfs), logs don't persist across reboots and don't cause disk wear.
+Each service logs to its own file in `/tmp`, named after the service:
+a mailbox at `/home/ritz/mail` is served by `rmail-home-ritz-mail` and logs to
+`/tmp/rmail-home-ritz-mail.log`. One file per service rather than one shared
+file, because two daemons appending to the same file interleave their lines
+with nothing recording which of them wrote any given one.
+
+Since `/tmp` is typically RAM-backed (tmpfs), logs don't persist across reboots
+and don't cause disk wear.
 
 To view logs in real-time:
 
@@ -198,68 +204,65 @@ journalctl -u rmail -f
 
 ## Running multiple instances
 
-Each rmail daemon manages one mailbox. You can run several daemons on the same
-machine for different purposes — for example, one mailbox for personal messages,
-one for automated notifications from scripts, and one for file synchronization
-between devices. Since all configuration lives in the config file, running
-multiple daemons is just a matter of pointing each one at a different config:
+Each rmail daemon manages one mailbox. You can run several on the same machine
+for different purposes — one mailbox for personal messages, one for automated
+notifications from scripts, one for file synchronisation between devices.
+
+**Run `install.sh` again, and answer with the second mailbox.** That is the
+whole procedure. The installer derives everything that has to differ from the
+mailbox path you give it:
+
+| What | Derived as | Example for `/home/ritz/notes/rmail` |
+|---|---|---|
+| config file | `config-` plus the path slug | `~/.config/rmail/config-home-ritz-notes-rmail` |
+| service name | `rmail-` plus the path slug | `rmail-home-ritz-notes-rmail` |
+| log file | the service name | `/tmp/rmail-home-ritz-notes-rmail.log` |
+| generated unit | the service name | `rmail-home-ritz-notes-rmail.service` |
+
+Pass `--service-name=NAME` if you want something shorter than the derived name.
+
+Before writing anything, the installer reports the mailboxes already set up on
+the machine, and refuses to proceed if the service name it is about to use
+already belongs to a different mailbox.
+
+### What each instance needs, and what the installer does about it
+
+1. **Its own config file** — derived from the mailbox path, so this is
+   automatic.
+
+2. **Its own port** — two daemons cannot share one. The installer checks the
+   port you choose against every other mailbox on the machine and asks again
+   on a collision.
+
+3. **Its own identity name** — enforced as an error, not a warning. This one
+   matters more than it looks. The daemon decides whether a message is for
+   itself by comparing the recipient against its own identity, *before* any
+   contacts lookup. Two mailboxes sharing an identity means mail addressed
+   from one to the other is written into the sender's own inbox, logged as
+   delivered, and marked satisfied. Nothing arrives, and nothing reports an
+   error.
+
+4. **Its own mail directory** — `inbox/`, `outbox/`, `contacts` and `.state/`
+   are all relative to the `mail` setting in its config.
+
+### Starting a daemon by hand
+
+The daemon takes one positional argument: the path to a config file.
 
 ```sh
-lua rmail.lua --config ~/.config/rmail/config-personal
-lua rmail.lua --config ~/.config/rmail/config-notifications
-lua rmail.lua --config ~/.config/rmail/config-sync
+lua rmail.lua ~/.config/rmail/config-home-ritz-mail
+lua rmail.lua ~/.config/rmail/config-home-ritz-notes-rmail
 ```
 
-Each instance needs:
+There is no `--config` flag. Earlier versions of this document showed one, and
+every command in this section failed as a result.
 
-1. **Its own config file** pointing to a different `mail` directory and `port`:
+### Which mailbox the helper scripts talk to
 
-   ```
-   # ~/.config/rmail/config-notifications
-   name = alice-notifications
-   port = 8026
-   mail = ~/mail-notifications
-   ```
-
-2. **Its own port** — each daemon listens on one port. They cannot share a port.
-
-3. **Its own mail directory** — `inbox/`, `outbox/`, `contacts`, and `.state/`
-   are all relative to the `mail` setting in the config.
-
-To run each instance as a service, create one service file per config. The
-setup is the same as for a single instance — just duplicate the service file
-and change the `--config` path:
-
-**systemd:**
-
-```sh
-# Duplicate and edit: change --config path in ExecStart
-cp ~/.config/systemd/user/rmail.service ~/.config/systemd/user/rmail-notifications.service
-systemctl --user daemon-reload
-systemctl --user enable --now rmail-notifications
-```
-
-**runit:**
-
-```sh
-# Create a new service directory with its own run script
-sudo mkdir -p /etc/sv/rmail-notifications
-# Copy and edit the run script, changing the --config path
-sudo cp /etc/sv/rmail/run /etc/sv/rmail-notifications/run
-sudo ln -s /etc/sv/rmail-notifications /var/service/
-```
-
-**OpenRC:**
-
-```sh
-# Copy and edit the init script, changing command_args
-sudo cp /etc/init.d/rmail /etc/init.d/rmail-notifications
-sudo rc-update add rmail-notifications default
-```
-
-**NixOS:** Add another `systemd.services` block in your nix config, or
-generate a second `rmail.nix` by running `install.sh` again with the second
-config.
+The `config` symlink in the project root points at whichever mailbox was
+installed first, and later installs leave it alone rather than repointing it.
+Helper scripts run from the project root use that one. To reach another
+mailbox, name its config file.
 
 If both instances are behind the same router, each needs its own port forwarding
 rule to direct traffic to each specific instance — see the Ports section in

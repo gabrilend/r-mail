@@ -7,11 +7,16 @@ libs/*
 config
 
 # Generated service/nix files (machine-specific, created by install.sh)
-rmail.nix
-rmail.service
-rmail-run
-rmail-log-run
-rmail-init
+#
+# Globs rather than exact names, because the generated files are now named
+# after the service, and the service is named after the mailbox — so a
+# mailbox at ~/notes/rmail produces rmail-home-ritz-notes-rmail.service
+# rather than rmail.service. Listing exact names left every second mailbox's
+# generated files showing up as untracked noise. (Re #377.)
+rmail*.nix
+rmail*.service
+rmail*-run
+rmail*-init
 
 # Build temp files
 .build-tmp/
