@@ -1,4 +1,8 @@
-# #376 — Public capability-URL web server ("send to a browser")
+# #380 — Public capability-URL web server ("send to a browser")
+
+> Renumbered from #376 on 2026-09-21: #376 was taken by
+> `376-daemon-source-offer-and-build-identity.md`, filed on another
+> machine and pushed first.
 
 ## Goal
 

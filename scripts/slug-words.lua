@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- slug-words.lua — hand-alternating word tooling for #376 URL slugs.
+-- slug-words.lua — hand-alternating word tooling for #380 URL slugs.
 --
 -- Hand split (standard touch-typing):
 --   Left:  q w e r t  a s d f g  z x c v b
