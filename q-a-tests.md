@@ -240,6 +240,35 @@ jump around.
 ### Simultaneous IP change (#313)
 - [ ] (Design phase — no tests yet)
 
+### Per-contact sync timers (#377)
+- [ ] On daemon start, every contact is contacted once (startup ping)
+- [ ] Each contact has an independent timer — one unreachable contact does
+      not slow polling for a reachable one, and one chatty contact does not
+      speed it up for everyone
+- [ ] An unreachable contact backs off progressively instead of retrying at
+      a fixed rate forever; verify over a multi-hour run that it settles at
+      the 2h ceiling
+- [ ] Backoff resets to the floor after a successful exchange with that contact
+- [ ] An inbound request from a contact resets **only that contact's** timer;
+      other contacts' timers are unchanged
+- [ ] A reply to an inbound message goes out promptly rather than waiting for
+      the backoff delay to expire
+- [ ] Deleting an unreachable contact stops its retries entirely
+
+### Daily public IP recheck (#379)
+- [ ] Public IP is re-checked once per day with no daemon restart
+- [ ] Check fires at a random time — it is not the same clock time two days
+      running, and not a fixed offset from boot
+- [ ] Restarting the daemon does not reproduce the same "random" time
+      (`math.random` is effectively unseeded — see issue)
+- [ ] The routine daily probe queries only one provider
+- [ ] A detected change is confirmed against a *different* provider before
+      any contact is notified
+- [ ] IP change mid-run → `.state/public_ip` updated and address-change
+      notifications queued for all contacts, without a restart
+- [ ] A failed probe (network down, resolver unreachable) is not mistaken for
+      an IP change
+
 ## 7. Android — connection and sync
 
 ### Sync behavior
@@ -356,6 +385,24 @@ jump around.
 ### DNS hostnames (#311, Android side)
 - [ ] Setup screen accepts hostnames in IP field
 - [ ] Contacts editor accepts hostnames
+
+### Export mailbox (#378)
+- [ ] "Export mailbox" appears in mailbox settings near "Delete mailbox",
+      and is **outside** the red Danger zone (export is not destructive)
+- [ ] The mailbox picker's three-dot dialog shows "Export" on the left,
+      opposite "Close"
+- [ ] Export screen lists inbox and outbox messages with individual checkboxes
+- [ ] Select all / none works both per folder and globally
+- [ ] Only the selected messages are written — unselected ones are not
+- [ ] Destination is chosen via the system picker, with no storage
+      permission prompt
+- [ ] Exported files are visible in a file browser and can be opened by
+      another app
+- [ ] Exported message mtimes match the original authoring time (#374),
+      not the time of export
+- [ ] Export acts on the chosen mailbox only, never all mailboxes at once
+- [ ] Mail still lives in private `filesDir` after an export — export copies,
+      it does not relocate the store
 
 ## 12. Install script
 
