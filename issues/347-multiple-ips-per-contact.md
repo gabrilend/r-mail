@@ -161,3 +161,59 @@ Phase 4 (per-IP ports, implemented):
 - **Removed `parse_endpoint`:** the old embedded-port syntax
   (`ip = host:port`, `ip = [IPv6]:port`) is replaced by explicit
   indexed port fields — simpler parser, clearer config.
+
+## Defect found in the field (2026-07-12) — INCORRECT, must fix
+
+The implementation corrupted a live `contacts` file and **lost data**.
+Observed on the sorelu mailbox:
+
+```
+android.endpoints = "table: 0x7f81d4765728"
+android.ips       = "table: 0x7f81d41f5b28"
+kuvalu.endpoints  = "table: 0x7f81d41f5e88"
+kuvalu.ips        = "table: 0x7f81d4765518"
+kuvalu.ip         = "192.168.0.200"      # was ip[1]
+# kuvalu.ip[2] = 184.3.201.206  ← SILENTLY DROPPED
+```
+
+`endpoints` and `ips` are **runtime-derived** tables (built at load,
+`rmail.lua:678-703`, reset fresh every load).  They must never be
+written to disk.  A contacts writer serialized the whole in-memory
+contact with `tostring()`, so:
+
+1. the derived tables became literal `"table: 0x…"` strings on disk, and
+2. worse, the same write **flattened the indexed endpoints** — it wrote
+   `ip = <first>` and dropped the `ip[N]`/`port[N]` lines entirely, so a
+   two-IP contact (`kuvalu`: LAN `192.168.0.200` + WAN `184.3.201.206`)
+   lost its WAN address.  This defeats the entire feature for that
+   contact.
+
+**Which writer.**  In the current (post-merge) tree all five
+`contacts` writers are safe — `align_contacts`, `promote_contact_address`,
+`promote_contact_index` operate on text lines and preserve them verbatim,
+and the sole `write_contact_fields` caller passes only `ip`/`port`
+(`rmail.lua:1776-1778`).  The `0x…` pointers are **frozen** (unchanged
+across runs), which means the offending full-contact serializer ran
+**once**, historically — almost certainly a pre-merge / other-branch
+version.  So the live code no longer *reproduces* it, but nothing
+*prevents* it either, and the damage persists on disk.
+
+**Required fix (no config switch — this must just work):**
+
+1. **Guard at the source.**  No `contacts` writer may serialize a
+   derived/computed field.  Cleanest: keep `endpoints`/`ips` (and any
+   computed state) out of the persisted contact table entirely — namespace
+   runtime-derived data separately from on-disk fields — so a future
+   "write the whole contact" path *cannot* leak them.
+2. **Never flatten indexed endpoints.**  A write that updates one field
+   (e.g. an address update) must preserve existing `ip[N]`/`port[N]`
+   lines, never collapse them to a single `ip`.
+3. **Self-healing cleanup.**  On load, strip any `name.endpoints` /
+   `name.ips` line whose value matches `^"?table: 0x` so residual
+   corruption from older versions repairs itself instead of lingering.
+
+**Field remediation done 2026-07-12:** the six `table:` lines were
+removed from the live file by hand and a stray trailing `"` on
+`aurelia.token` stripped (backup: `~/mail/contacts.bak-20260712`).
+`kuvalu`'s dropped WAN IP `184.3.201.206` was **not** auto-restored —
+needs manual re-entry if still wanted.
