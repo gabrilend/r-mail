@@ -288,7 +288,7 @@ class SyncManager(
             }
         }
 
-        for (outboxFile in store.listOutbox()) {
+        outbox@ for (outboxFile in store.listOutbox()) {
             val refs = store.localAttachRefs(outboxFile)
             if (refs.isEmpty()) { UploadProgress.clear(outboxFile); continue }
             for (ref in refs) {
@@ -303,14 +303,18 @@ class SyncManager(
                         val text = store.readOutbox(f)
                         if (ref in text) store.writeOutbox(f, text.replace(ref, serverPath))
                     }
+                // An attachment that can't be read holds its own message
+                // only.  These used to return, which stopped every upload
+                // after it -- one old message with a dead attachment kept
+                // anything added to Files "waiting to upload" forever.
                 } catch (e: SecurityException) {
                     UploadProgress.set(outboxFile,
                         "can't read $name any more — remove it and attach it again", error = true)
-                    return
+                    continue@outbox
                 } catch (e: java.io.FileNotFoundException) {
                     UploadProgress.set(outboxFile,
                         "$name is gone from this phone — remove it and attach it again", error = true)
-                    return
+                    continue@outbox
                 } catch (e: Exception) {
                     uploadFailed(client, outboxFile, name, e)
                     return  // the connection is probably down; stop for this cycle
