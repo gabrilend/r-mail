@@ -162,6 +162,15 @@ local cfg = {
     log_file          = _log_file(config.log_file, paths.state),
 }
 
+-- #394: the word that means "this mailbox" on a `to:` line, chosen by the
+-- owner in the config (`self_address = me`).  `name` used to do this job
+-- as well as being the mailbox's label; now it is only the label, so two
+-- mailboxes can call each other anything without one mistaking a contact
+-- for itself.  nil means sending to yourself is switched off.  Validated
+-- and set in init_runtime; declared up here because the sync functions
+-- below read it.
+local SELF_ADDRESS = nil
+
 -- Hook scripts.  The config parser doesn't strip quotes, so a user who
 -- disabled a hook with `on_receive = ""` would end up with a two-char
 -- string that's still truthy; normalise empty-looking values to nil so
@@ -4338,12 +4347,14 @@ end
 local function self_delete_from_inbox(my_name, message_id)
     local inbox_state = load_state("inbox.json")
     for filename, meta in pairs(inbox_state) do
-        if meta.message_id == message_id and meta["from"] == my_name then
+        -- #394: self-deliveries carry a `self` mark rather than being
+        -- recognised by name, so renaming the mailbox cannot orphan them.
+        if meta.message_id == message_id and meta.self then
             if file_exists(INBOX .. "/" .. filename) then
                 os.remove(INBOX .. "/" .. filename)
                 log("self-delete from inbox: %s", filename)
             end
-            if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
+            if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
             -- #355: attachments left in place — user owns them.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
@@ -4358,7 +4369,7 @@ local function self_delete_from_outbox(my_name, message_id)
         if meta.recipients then
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.message_id == message_id and rmeta.self then
-                    if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
+                    if hooks.on_delete then run_hook(hooks.on_delete, recipient) end
                     meta.recipients[recipient] = nil
                     remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     if not next(meta.recipients) then
@@ -4494,10 +4505,10 @@ local function sync_outbox(my_name)
                     local rname = entry.name
                     if not state[name].recipients[rname] then
                         -- new recipient: deliver message body only
-                        if rname == my_name and contacts[rname] then
-                            -- The name means two things at once: it is
-                            -- this daemon's own identity, and it is a
-                            -- contact with an address of its own.  The
+                        if rname == SELF_ADDRESS and contacts[rname] then
+                            -- The word means two things at once: it is
+                            -- this mailbox's self-address (#394), and it
+                            -- is a contact with an address of its own.  The
                             -- identity test below would win, because it
                             -- runs first — the message would land in our
                             -- own inbox and the contact would lose
@@ -4511,45 +4522,50 @@ local function sync_outbox(my_name)
                                 rname, name)
                             mark_recipient_problem(OUTBOX .. "/" .. name,
                                 rname, "AMBIGUOUS RECIPIENT",
-                                "both your own identity name and a contact " ..
+                                "both your self_address and a contact " ..
                                 "\xe2\x80\x94 rename one of them")
                             outbox_files_with_unresolved_recipients[name] = true
-                        elseif rname == my_name then
-                            -- self-delivery: write directly to own inbox
+                        elseif rname == SELF_ADDRESS then
+                            -- self-delivery: write directly to own inbox.
+                            -- The self-address word stands in for the
+                            -- sender everywhere a contact name would go
+                            -- (hook arguments, the inbox record), and the
+                            -- `self` mark is what later code tests (#394).
                             local inbox_state = load_state("inbox.json")
                             local msg_id = uuid()
                             local inbox_name = sanitize_filename(name)
                             local target = INBOX .. "/" .. inbox_name
                             if file_exists(target) then
                                 local existing = inbox_state[inbox_name]
-                                if existing and existing["from"] ~= my_name then
-                                    inbox_name = sanitize_filename(name .. "-from-" .. my_name)
+                                if existing and not existing.self then
+                                    inbox_name = sanitize_filename(name .. "-from-" .. SELF_ADDRESS)
                                     target = INBOX .. "/" .. inbox_name
                                 end
                             end
                             local inbox_body = body or ""
                             if hooks.on_send then
-                                local transformed = run_hook(hooks.on_send, my_name, name, inbox_body)
+                                local transformed = run_hook(hooks.on_send, SELF_ADDRESS, name, inbox_body)
                                 if transformed and transformed ~= "" then inbox_body = transformed end
                             end
                             if hooks.on_receive_raw then
-                                local transformed = run_hook(hooks.on_receive_raw, my_name, name, inbox_body)
+                                local transformed = run_hook(hooks.on_receive_raw, SELF_ADDRESS, name, inbox_body)
                                 if transformed and transformed ~= "" then inbox_body = transformed end
                             end
                             inbox_body = inbox_body:gsub("^[\n\r]+", "")
                             write_file(target, inbox_body)
                             set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
                             inbox_state[inbox_name] = {
-                                ["from"] = my_name,
+                                ["from"] = SELF_ADDRESS,
                                 message_id = msg_id,
+                                self = true,
                             }
                             save_state("inbox.json", inbox_state)
                             if hooks.on_receive then
                                 os.execute(hooks.on_receive .. " " ..
-                                    shell_quote(my_name) .. " " .. shell_quote(name) .. " " ..
+                                    shell_quote(SELF_ADDRESS) .. " " .. shell_quote(name) .. " " ..
                                     shell_quote(target) .. " &")
                             end
-                            state[name].recipients[my_name] = {
+                            state[name].recipients[rname] = {
                                 message_id = msg_id,
                                 self = true,
                             }
@@ -4587,6 +4603,19 @@ local function sync_outbox(my_name)
                                     contact = contacts[rname],
                                 }
                             end
+                        elseif rname == my_name then
+                            -- #394: the mailbox's `name` is a label now,
+                            -- not an address.  Say what to write instead
+                            -- rather than deliver on a guess.
+                            local reason = SELF_ADDRESS
+                                and ("that is this mailbox's label \xe2\x80\x94 to send to " ..
+                                     "yourself write to: " .. SELF_ADDRESS)
+                                or  ("that is this mailbox's label \xe2\x80\x94 to send to " ..
+                                     "yourself, set self_address in the config")
+                            log("'%s' in %s is this mailbox's label, not an address", rname, name)
+                            mark_recipient_problem(OUTBOX .. "/" .. name,
+                                rname, "NOT AN ADDRESS", reason)
+                            outbox_files_with_unresolved_recipients[name] = true
                         else
                             log("unknown contact '%s' in %s", rname, name)
                             -- Mark unknown contact in the outbox file so user can see and fix it
@@ -4697,11 +4726,11 @@ local function sync_outbox(my_name)
                                 -- self-delivery update: apply directly to own inbox
                                 local inbox_state = load_state("inbox.json")
                                 for iname, imeta in pairs(inbox_state) do
-                                    if imeta.message_id == rmeta.message_id and imeta["from"] == my_name then
+                                    if imeta.message_id == rmeta.message_id and imeta.self then
                                         local target = INBOX .. "/" .. iname
                                         local update_body = body or ""
                                         if hooks.on_update then
-                                            local transformed = run_hook(hooks.on_update, my_name, target, update_body)
+                                            local transformed = run_hook(hooks.on_update, rname, target, update_body)
                                             if transformed and transformed ~= "" then update_body = transformed end
                                         end
                                         update_body = update_body:gsub("^[\n\r]+", "")
@@ -5102,7 +5131,7 @@ local function sync_inbox(my_name)
                 did_work = true
             end
             local sender = meta["from"] or ""
-            if sender == my_name then
+            if meta.self then  -- #394: marked, not recognised by name
                 -- self-sent message deleted from inbox: remove from outbox
                 self_delete_from_outbox(my_name, meta.message_id)
                 state[name] = nil
@@ -6098,9 +6127,15 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
             local plaintext = decrypt_packet(key, data)
             if plaintext then
                 local disc_name, disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)%s+(%S+)")
+                -- #393: the token that decrypted this packet is what says
+                -- who sent it, so the address is filed under OUR name for
+                -- that contact -- the name every lookup uses.  The name
+                -- inside the packet is the sender's own label for itself,
+                -- chosen on their machine; it only goes into the log.
                 if disc_name and disc_lan_ip then
-                    lan_peers[disc_name] = disc_lan_ip
-                    log("LAN discovery: %s is at %s (received request)", disc_name, disc_lan_ip)
+                    lan_peers[name] = disc_lan_ip
+                    log("LAN discovery: %s (calls itself %s) is at %s (received request)",
+                        name, disc_name, disc_lan_ip)
                     local my_lan_ip = nat.get_local_ip()
                     if not my_lan_ip then return end
                     local resp_payload = "RMAIL-HERE " .. my_name .. " " .. my_lan_ip
@@ -6114,8 +6149,9 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
                 end
                 local here_name, here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)%s+(%S+)")
                 if here_name and here_lan_ip then
-                    lan_peers[here_name] = here_lan_ip
-                    log("LAN discovery: %s is at %s (received response)", here_name, here_lan_ip)
+                    lan_peers[name] = here_lan_ip  -- #393: see the request branch
+                    log("LAN discovery: %s (calls itself %s) is at %s (received response)",
+                        name, here_name, here_lan_ip)
                     return
                 end
             end
@@ -6552,12 +6588,93 @@ function addrchk.run(rt)
     end
 end
 
+-- #394: before this issue a message sent to yourself was addressed
+-- `to: <name>` and recognised afterwards by its inbox record saying
+-- `from = <name>`.  Records made that way are converted once, at startup,
+-- to the self-address form: the inbox record gains the `self` mark, the
+-- outbox record is filed under the self-address word, and the outbox
+-- file's `to:` line is rewritten to match.  All three must move together:
+-- an outbox record whose `to:` line no longer matches reads as "recipient
+-- removed" on the next sync, which would delete the delivered copy.
+-- A mailbox that holds such records but has no self_address cannot be
+-- converted, so it stops and says what to add.
+local function convert_old_self_records(old_name)
+    -- If the old name is also a contact, records from that name are the
+    -- contact's mail, not self-deliveries; the old code refused that
+    -- combination on `to:` lines, so there is nothing to convert.
+    if load_contacts()[old_name] then return end
+    local inbox_state  = load_state("inbox.json")
+    local outbox_state = load_state("outbox.json")
+    local inbox_found, outbox_found = {}, {}
+    for filename, meta in pairs(inbox_state) do
+        if meta["from"] == old_name and not meta.self then
+            inbox_found[#inbox_found + 1] = filename
+        end
+    end
+    for filename, meta in pairs(outbox_state) do
+        local rmeta = meta.recipients and meta.recipients[old_name]
+        if rmeta and rmeta.self and old_name ~= SELF_ADDRESS then
+            outbox_found[#outbox_found + 1] = filename
+        end
+    end
+    if #inbox_found == 0 and #outbox_found == 0 then return end
+    if not SELF_ADDRESS then
+        io.stderr:write("error: this mailbox holds " .. (#inbox_found + #outbox_found) ..
+            " message(s) sent to itself under its name '" .. old_name .. "',\n" ..
+            "  and a name is only a label now.  Add a word for sending to\n" ..
+            "  yourself to " .. CONFIG_PATH .. ", for example:\n" ..
+            "      self_address = me\n")
+        os.exit(1)
+    end
+    for _, filename in ipairs(inbox_found) do
+        inbox_state[filename].self = true
+        inbox_state[filename]["from"] = SELF_ADDRESS
+    end
+    for _, filename in ipairs(outbox_found) do
+        local recipients = outbox_state[filename].recipients
+        recipients[SELF_ADDRESS] = recipients[old_name]
+        recipients[old_name] = nil
+        local path = OUTBOX .. "/" .. filename
+        local text = read_file(path)
+        if text then
+            local header_lines, body = _scan_outbox_header(text)
+            for i, line in ipairs(header_lines) do
+                if line:lower():match("^to:")
+                   and line:match("^[Tt][Oo]:%s*(.-)%s*$") == old_name then
+                    header_lines[i] = "to: " .. SELF_ADDRESS
+                end
+            end
+            write_file(path, table.concat(header_lines, "\n") .. "\n" .. body)
+        end
+    end
+    save_state("inbox.json", inbox_state)
+    save_state("outbox.json", outbox_state)
+    log("converted %d inbox and %d outbox record(s) from '%s' to self_address '%s' (#394)",
+        #inbox_found, #outbox_found, old_name, SELF_ADDRESS)
+end
+
 local function init_runtime()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
                paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n"); os.exit(1)
     end
+
+    -- #394: the word for sending to yourself.  Optional -- leaving it out
+    -- switches self-sending off -- but when present it must be one plain
+    -- word, the same shape as a contact name, because it is matched
+    -- against `to:` lines exactly as a contact name is.
+    local self_address = config.self_address
+    if self_address == "" or self_address == '""' or self_address == "''" then
+        self_address = nil
+    end
+    if self_address and not self_address:match("^[%w_%-]+$") then
+        io.stderr:write("error: 'self_address' in " .. CONFIG_PATH ..
+            " must be one word (letters, digits, - or _): " .. self_address .. "\n")
+        os.exit(1)
+    end
+    SELF_ADDRESS = self_address
+    convert_old_self_records(config.name)
 
     -- The port used to fall back to 8025 when the config did not name
     -- one.  Nothing generates 8025 — the installer picks a random port
@@ -6920,6 +7037,7 @@ local function main()
         -- to the floor.  nil means no contacts are known yet, in which case
         -- there is nothing to poll and a minute is a fine idle wait.
         local time_to_sync = ctimer.time_to_due(now_s) or 60
+        if not rt.synced_once then time_to_sync = 0 end  -- see the first-pass sync below
         local sleep_for    = time_to_sync
         if rt.next_addr_check then
             sleep_for = math.min(sleep_for, math.max(0, rt.next_addr_check - now_s))
@@ -7031,7 +7149,14 @@ local function main()
         end
 
         local any_due = (ctimer.time_to_due(now) or math.huge) <= 0
-        if outbox_changed or contacts_changed or any_due then
+        -- The first pass always syncs.  Per-contact timers (#377) only make
+        -- a cycle due when there is a contact to be due, and an outbox file
+        -- written while the daemon was down raises no inotify event -- so a
+        -- mailbox with no contacts (a self-only mailbox running the periodic
+        -- pattern, #394) never looked at its outbox until something touched
+        -- it.
+        if outbox_changed or contacts_changed or any_due or not rt.synced_once then
+            rt.synced_once = true
             for raw_sock, info in pairs(clients) do
                 if now - info.last_activity > 30 then
                     pcall(function() raw_sock:close() end)
@@ -7055,7 +7180,20 @@ local function main()
 
             -- Drain any inotify events caused by the sync cycle itself
             inotify.read(rt.outbox_inotify_fd)
-            inotify.read(rt.contacts_inotify_fd)
+            -- The sync cycle (and requests served during it) can rewrite the
+            -- contacts file: an announced address, a LAN-discovered
+            -- local-ip, a port change.  Those writers append plain
+            -- `name.field = value` lines and rely on align_contacts to tidy
+            -- them, but draining the event here meant the tidy never came --
+            -- a discovered `local-ip` line stayed ragged until the next hand
+            -- edit.  So a contacts event swallowed here is honoured on the
+            -- spot: align (a no-op write when already tidy), then drain the
+            -- event our own align produced.
+            local contacts_events = inotify.read(rt.contacts_inotify_fd)
+            if contacts_events and #contacts_events > 0 then
+                align_contacts()
+                inotify.read(rt.contacts_inotify_fd)
+            end
         end
     end
 end

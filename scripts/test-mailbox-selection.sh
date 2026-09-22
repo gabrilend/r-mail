@@ -244,15 +244,16 @@ fi
 
 # --------------------------------------------------------------------------
 # Ambiguous recipients.  The daemon decides self-delivery by comparing a
-# `to:` name against its own identity, and that test runs before any
-# contacts lookup.  When both readings exist, the contact used to lose in
-# silence — the message went into our own inbox and the tracking entry was
-# stamped as a self-message, so a later rename would not undo it.
+# `to:` name against its self-address word (#394; it used to be the
+# mailbox's own name), and that test runs before any contacts lookup.
+# When both readings exist, the contact used to lose in silence — the
+# message went into our own inbox and the tracking entry was stamped as a
+# self-message, so a later rename would not undo it.
 
 echo ""
 echo "recipient ambiguity"
 
-make_mailbox "$WORK/ambig" kuvalu 59355
+make_mailbox "$WORK/ambig" ambigbox 59355 "self_address = kuvalu"
 {
     printf 'kuvalu.ip    = "192.0.2.7"\n'
     printf 'kuvalu.port  = 59999\n'
@@ -291,10 +292,10 @@ else
 fi
 
 # The guard above must not have cost us plain self-delivery, which is a
-# real feature: addressing yourself when no contact shares the name is a
+# real feature: addressing yourself when no contact shares the word is a
 # note to self and still lands in your own inbox.
-make_mailbox "$WORK/selfonly" solo 59356
-printf 'to: solo\n\na note to myself\n' > "$WORK/selfonly/outbox/memo.txt"
+make_mailbox "$WORK/selfonly" solo 59356 "self_address = me"
+printf 'to: me\n\na note to myself\n' > "$WORK/selfonly/outbox/memo.txt"
 
 OUT="$WORK/selfonly.log"
 run_daemon "$WORK/selfonly/config" "$OUT" "self-delivered:"
@@ -310,6 +311,109 @@ if [ -n "$(ls -A "$WORK/selfonly/inbox")" ]; then
     ok "the note to self reached the inbox"
 else
     note_fail "the note to self did not reach the inbox"
+fi
+
+if grep -q '"self": *true' "$WORK/selfonly/.state/inbox.json"; then
+    ok "and its inbox record carries the self mark, not just a name"
+else
+    note_fail "the self-delivered inbox record has no self mark"
+    info "$(cat "$WORK/selfonly/.state/inbox.json")"
+fi
+
+# --------------------------------------------------------------------------
+# The mailbox's name is only a label (#394).  Writing it on a `to:` line
+# must not deliver anywhere; the file is marked with the word to use.
+
+echo ""
+echo "the mailbox name is a label, not an address"
+
+make_mailbox "$WORK/label" labelbox 59359 "self_address = me"
+printf 'to: labelbox\n\naddressed to the label\n' > "$WORK/label/outbox/labelled.txt"
+
+OUT="$WORK/label.log"
+run_daemon "$WORK/label/config" "$OUT" "this mailbox's label"
+
+if grep -q "NOT AN ADDRESS: labelbox" "$WORK/label/outbox/labelled.txt" \
+   && grep -q "write to: me" "$WORK/label/outbox/labelled.txt"; then
+    ok "to: <name> is marked, and the marker names the self-address word"
+else
+    note_fail "to: <name> was not marked with the word to use"
+    info "$(cat "$WORK/label/outbox/labelled.txt" 2>&1)"
+fi
+
+if [ -z "$(ls -A "$WORK/label/inbox")" ]; then
+    ok "and nothing was delivered on a guess"
+else
+    note_fail "to: <name> was self-delivered"
+fi
+
+make_mailbox "$WORK/noself" noselfbox 59360
+printf 'to: noselfbox\n\nno self address configured\n' > "$WORK/noself/outbox/n.txt"
+OUT="$WORK/noself.log"
+run_daemon "$WORK/noself/config" "$OUT" "this mailbox's label"
+if grep -q "set self_address in the config" "$WORK/noself/outbox/n.txt"; then
+    ok "with no self_address set, the marker says to set one"
+else
+    note_fail "the no-self_address marker is missing"
+    info "$(cat "$WORK/noself/outbox/n.txt" 2>&1)"
+fi
+
+make_mailbox "$WORK/badself" badselfbox 59361 "self_address = two words"
+OUT="$WORK/badself.log"
+"$LAUNCHER" "$WORK/badself/config" > "$OUT" 2>&1
+if [ $? -ne 0 ] && grep -q "'self_address'.*must be one word" "$OUT"; then
+    ok "a self_address that is not one word stops the daemon"
+else
+    note_fail "a malformed self_address was accepted"
+    info "$(head -3 "$OUT")"
+fi
+
+# --------------------------------------------------------------------------
+# Mailboxes that self-delivered before #394 hold records that name the old
+# self-address (the mailbox name).  They are converted once at startup; with
+# no self_address to convert them to, the daemon stops and says what to add.
+
+echo ""
+echo "old self-delivery records"
+
+make_old_self_records() {
+    _dir="$1"; _name="$2"
+    printf 'to: %s\n\nwritten before 394\n' "$_name" > "$_dir/outbox/old.txt"
+    printf 'written before 394\n' > "$_dir/inbox/old.txt"
+    printf '{"old.txt":{"from":"%s","message_id":"m-old"}}\n' "$_name" \
+        > "$_dir/.state/inbox.json"
+    printf '{"old.txt":{"recipients":{"%s":{"message_id":"m-old","self":true}}}}\n' "$_name" \
+        > "$_dir/.state/outbox.json"
+}
+
+make_mailbox "$WORK/oldnoself" oldbox 59362
+make_old_self_records "$WORK/oldnoself" oldbox
+OUT="$WORK/oldnoself.log"
+"$LAUNCHER" "$WORK/oldnoself/config" > "$OUT" 2>&1
+if [ $? -ne 0 ] && grep -q "self_address = me" "$OUT"; then
+    ok "old records with no self_address stop the daemon with the line to add"
+else
+    note_fail "old records without self_address did not stop the daemon"
+    info "$(head -4 "$OUT")"
+fi
+
+make_mailbox "$WORK/oldconv" oldconvbox 59363 "self_address = me"
+make_old_self_records "$WORK/oldconv" oldconvbox
+OUT="$WORK/oldconv.log"
+run_daemon "$WORK/oldconv/config" "$OUT" "idle, interval"
+if grep -q "converted 1 inbox and 1 outbox" "$OUT" \
+   && grep -q '"self": *true' "$WORK/oldconv/.state/inbox.json" \
+   && grep -q "^to: me$" "$WORK/oldconv/outbox/old.txt"; then
+    ok "old records are converted: inbox marked, outbox to: line rewritten"
+else
+    note_fail "old records were not converted"
+    info "$(grep -i convert "$OUT")"
+    info "$(cat "$WORK/oldconv/outbox/old.txt" 2>&1)"
+fi
+if [ -f "$WORK/oldconv/inbox/old.txt" ]; then
+    ok "and the delivered copy survives the next sync"
+else
+    note_fail "the converted message was deleted from the inbox"
 fi
 
 # --------------------------------------------------------------------------

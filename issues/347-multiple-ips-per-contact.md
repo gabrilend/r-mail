@@ -93,7 +93,12 @@ Landed in this pass:
 - **Auto-grouping in `align_contacts`.** Scattered `name.*` lines are
   consolidated at the contact's first position (verified against the
   example in this issue). The existing `=` alignment still runs
-  afterwards on the now-contiguous blocks.
+  afterwards on the now-contiguous blocks. It runs at startup, on any
+  contacts-file change, and after every sync cycle that changed the file:
+  the daemon's own writers (announced addresses, LAN-discovered
+  `local-ip`, port changes) append unaligned lines, and the end-of-cycle
+  event drain used to swallow the change event that would have tidied
+  them.
 - **`handle_update_address` guard:** if the contact has more than one
   IP configured, an inbound single-address update no longer clobbers
   the list. Port updates still apply.
