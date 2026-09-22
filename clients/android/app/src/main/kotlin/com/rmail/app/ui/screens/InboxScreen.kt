@@ -1342,7 +1342,6 @@ private fun SettingsPanel(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         if (activeConfig != null) {
-            Text("Connection", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
             AddressListEditor(
                 title = "Server addresses",
                 addresses = hosts,
