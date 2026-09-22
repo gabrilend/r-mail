@@ -124,3 +124,9 @@ moved to #361.
 ## Status
 
 Open.
+
+**2026-09-22 (#388):** `run.sh` at the drive root is replaced by two
+launchers inside the mailbox, `sync-with-contacts.sh` (one visit) and
+`auto-sync.sh` (live until unplugged).  A drive never announces its
+address unless one of them is run.  The design notes above still say
+`run.sh`; the checks they describe moved into the launchers unchanged.

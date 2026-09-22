@@ -616,7 +616,10 @@ fun InboxScreen(
 
             when (currentPanel) {
                 Panel.INBOX -> MessageList(inboxFiles, "No messages") { onOpen(it) }
-                Panel.OUTBOX -> MessageList(outboxFiles, "Outbox is empty") { onOpenOutbox(it) }
+                Panel.OUTBOX -> {
+                    val uploads by vm.uploadProgress.collectAsState()
+                    MessageList(outboxFiles, "Outbox is empty", uploads) { onOpenOutbox(it) }
+                }
                 Panel.FILES -> {
                     // Box overlay: action bars float on top of the list
                     Box(Modifier.fillMaxSize()) {
@@ -684,16 +687,19 @@ fun InboxScreen(
                                     for (fn in selectedFiles.toList()) {
                                         val info = attachments.find { it.filename == fn }
                                         val cached = vm.store?.cachedAttachmentFile(fn)
-                                        if (info?.onDevice == true && cached != null && cached.exists()) {
-                                            // On device (possibly also on server) — put in attachment field
+                                        if (info?.onServer == true && mailboxPath.isNotBlank()) {
+                                            // On the server (maybe also here) — refer to the
+                                            // server's copy; uploading ours again would only
+                                            // duplicate it.
+                                            serverOnlyLines.add("attach: $mailboxPath/attachments/$fn")
+                                        } else if (info?.onDevice == true && cached != null && cached.exists()) {
+                                            // Only on this device — goes in the attachment
+                                            // field and is uploaded like any other.
                                             draftAttachments.add(AttachmentEntry(
                                                 uri = android.net.Uri.fromFile(cached),
                                                 displayName = fn,
                                                 mimeType = info.category
                                             ))
-                                        } else if (info?.onServer == true && mailboxPath.isNotBlank()) {
-                                            // Server-only — attach: line with full server path
-                                            serverOnlyLines.add("attach: $mailboxPath/attachments/$fn")
                                         }
                                     }
                                     draftBody = serverOnlyLines.joinToString("\n")
@@ -1220,7 +1226,9 @@ private fun SettingsPanel(
     onDeleteMailbox: () -> Unit
 ) {
     val activeConfig = vm.activeMailboxId.collectAsState().value?.let { vm.registry.get(it) }
-    var host by remember(activeConfig) { mutableStateOf(activeConfig?.host ?: "") }
+    var hosts by remember(activeConfig) { mutableStateOf(activeConfig?.hosts ?: emptyList()) }
+    var localHosts by remember(activeConfig) { mutableStateOf(activeConfig?.localHosts ?: emptyList()) }
+    var showAddressErrors by remember(activeConfig) { mutableStateOf(false) }
     var port by remember(activeConfig) { mutableStateOf(activeConfig?.port?.toString() ?: "8025") }
     var token by remember(activeConfig) { mutableStateOf(activeConfig?.token ?: "") }
     var bgSyncInterval by remember(activeConfig) { mutableStateOf(activeConfig?.bgSyncIntervalMinutes?.toString() ?: "15") }
@@ -1238,10 +1246,21 @@ private fun SettingsPanel(
     // needs to call save. Let's use a side-channel.
 
     // Save function exposed to parent
-    val saveSettings = {
+    val saveSettings = save@{
         if (activeConfig != null) {
+            val cleanHosts = cleanAddressList(hosts)
+            val cleanLocal = cleanAddressList(localHosts)
+            // Refuse rather than drop: a silently discarded address is one
+            // the user thinks is configured and is not.
+            if (cleanHosts.any { publicAddressError(it) != null } ||
+                cleanLocal.any { localAddressError(it) != null } ||
+                (cleanHosts.isEmpty() && cleanLocal.isEmpty())) {
+                showAddressErrors = true
+                return@save
+            }
             vm.updateMailbox(activeConfig.copy(
-                host = host.trim(), port = port.toIntOrNull() ?: 8025,
+                hosts = cleanHosts, localHosts = cleanLocal,
+                port = port.toIntOrNull() ?: 8025,
                 token = token.trim(),
                 bgSyncIntervalMinutes = bgSyncInterval.toIntOrNull() ?: 15,
                 notificationDetail = notifDetail
@@ -1255,7 +1274,9 @@ private fun SettingsPanel(
     }
 
     val clearSettings = {
-        host = activeConfig?.host ?: ""
+        hosts = activeConfig?.hosts ?: emptyList()
+        localHosts = activeConfig?.localHosts ?: emptyList()
+        showAddressErrors = false
         port = activeConfig?.port?.toString() ?: "8025"
         token = activeConfig?.token ?: ""
         bgSyncInterval = activeConfig?.bgSyncIntervalMinutes?.toString() ?: "15"
@@ -1277,8 +1298,32 @@ private fun SettingsPanel(
     ) {
         if (activeConfig != null) {
             Text("Connection", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            OutlinedTextField(value = host, onValueChange = { host = it; markModified() },
-                label = { Text("Server address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            AddressListEditor(
+                title = "Server addresses",
+                addresses = hosts,
+                onChange = { hosts = it; markModified() },
+                placeholder = "203.0.113.5 or host.example.com",
+                showErrors = showAddressErrors,
+                validate = ::publicAddressError,
+            )
+            AddressListEditor(
+                title = "Local addresses (same network only)",
+                addresses = localHosts,
+                onChange = { localHosts = it; markModified() },
+                placeholder = "192.168.1.10",
+                showErrors = showAddressErrors,
+                validate = ::localAddressError,
+            )
+            AddAddressButton { addr ->
+                if (com.rmail.app.data.isPrivateIpv4(addr)) {
+                    if (addr !in localHosts) localHosts = localHosts + addr
+                } else if (addr !in hosts) hosts = hosts + addr
+                markModified()
+            }
+            if (showAddressErrors && cleanAddressList(hosts).isEmpty() && cleanAddressList(localHosts).isEmpty()) {
+                Text("At least one address is required", color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(value = port, onValueChange = { port = it.filter { c -> c.isDigit() }; markModified() },
                 label = { Text("Port") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = token, onValueChange = { token = it.replace("\"", ""); markModified() },
@@ -1789,7 +1834,9 @@ private class ContactsDiffTransformation(
 
 @Composable
 private fun MessageList(
-    files: List<String>, emptyText: String, onClick: (String) -> Unit
+    files: List<String>, emptyText: String,
+    status: Map<String, com.rmail.app.sync.UploadProgress.Status> = emptyMap(),
+    onClick: (String) -> Unit
 ) {
     if (files.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1798,7 +1845,7 @@ private fun MessageList(
     } else {
         LazyColumn {
             items(files, key = { it }) { filename ->
-                MessageListItem(filename, { onClick(filename) })
+                MessageListItem(filename, status[filename], { onClick(filename) })
                 HorizontalDivider(thickness = 0.5.dp)
             }
         }
@@ -1971,10 +2018,21 @@ private fun formatSize(bytes: Long): String = when {
 }
 
 @Composable
-private fun MessageListItem(filename: String, onClick: () -> Unit) {
+private fun MessageListItem(
+    filename: String, status: com.rmail.app.sync.UploadProgress.Status?, onClick: () -> Unit
+) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick)
         .padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(filename, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(filename, style = MaterialTheme.typography.bodyMedium)
+            // Attachment upload progress, or why it is stuck.  The message
+            // is not sent until its attachments are on the server.
+            if (status != null) {
+                Text(status.text, style = MaterialTheme.typography.bodySmall,
+                    color = if (status.error) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            }
+        }
         Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
     }
 }

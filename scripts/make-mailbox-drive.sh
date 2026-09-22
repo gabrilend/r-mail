@@ -3,15 +3,17 @@
 #
 # Implements issue #339.  The resulting drive is itself a runnable rmail
 # node: plug it into any Linux host whose router forwards the configured
-# port, run ./run.sh from the drive, and the mailbox is live.  Unplug and
+# port and run one of the mailbox's launchers -- sync-with-contacts.sh for
+# a single visit, auto-sync.sh to stay live until unplugged.  Unplug and
 # move the drive to another host and do the same — same mailbox, same
-# contacts, same history.
+# contacts, same history.  Nothing announces itself until you run one.
 #
 # Drive layout:
 #
-#   /run.sh            # starts rmail with this drive's mailbox/config
 #   /README.md         # plug-and-run instructions + router-port reminder
 #   /mailbox-0/
+#       sync-with-contacts.sh   # one visit: announce, sync, linger, stop
+#       auto-sync.sh            # normal sync cycle until unplugged
 #       config         # real file (not a symlink — mount point differs per host)
 #       inbox/
 #       outbox/
@@ -49,7 +51,7 @@
 #
 # What a drive still asks of a host is a CPU it was built for.  That is
 # not fixable by bundling: an x86-64 binary does not run on ARM.  So
-# run.sh checks on launch and stops with an explanation, where it used to
+# the launchers check on launch and stops with an explanation, where it used to
 # quietly spend a few minutes recompiling on somebody else's machine.
 #
 # install.sh used to travel, solely to do that recompiling, and it also
@@ -110,7 +112,7 @@ before using this generator.  Both are copied onto the drive, which
 then runs without asking the host for an interpreter or a library.
 
 A drive is tied to the CPU architecture it was built on.  Plugged into
-a machine of a different kind, run.sh says so and stops.
+a machine of a different kind, the launchers say so and stop.
 HELP
 }
 
@@ -381,7 +383,7 @@ BUILDNOTES
 
 # Prove the drive works before handing it over.
 #
-# run.sh runs this same check on every launch and, when it fails, tells
+# The launchers run this same check on every launch and, when it fails, tells
 # the user the drive was built for a different kind of machine.  That
 # sentence is only honest if the drive was known to work somewhere, so
 # the somewhere is here, now, on the machine that just built it.
@@ -431,10 +433,6 @@ ok "program: $SRC_DIR ($(du -sh "$SRC_DIR" | cut -f1))"
 #   • No `libs = ...` — rmail.lua automatically searches
 #     <script_dir>/libs/, which resolves to the mailbox's own source-code/libs
 #     regardless of mount point.
-#   • No `notify_ip_change = ...` — off is the default everywhere now,
-#     for the reason drives always needed it off: a mailbox that moves
-#     would announce its new address to every contact on arrival.  This
-#     used to be the drive's own special case and no longer is.
 #   • Hooks use `./hooks/<name>.sh` relative paths, which the daemon
 #     resolves against the directory holding this config — the mailbox
 #     itself — so they reach this mailbox's own copies on any host.
@@ -466,83 +464,103 @@ CONFIG
 ok "wrote config: $MAILBOX_DIR/config"
 
 # ---------------------------------------------------------------------------
-# Write the drive's top-level run.sh.
+# Write the mailbox's two launchers.
+#
+# A portable mailbox never announces itself on its own.  Plugged into a
+# friend's machine, it has no business telling every contact that it now
+# lives there -- so nothing runs until someone runs one of these, and
+# running one is the decision to be reachable here:
+#
+#   sync-with-contacts.sh [SECONDS]   one visit: announce where we are,
+#                                     send the outbox, stay reachable
+#                                     SECONDS (default 60) so contacts can
+#                                     deliver, then stop.
+#   auto-sync.sh                      the normal sync cycle, until the
+#                                     drive is unplugged or Ctrl-C.
+#
+# Both live inside the mailbox rather than at the drive root: the mailbox
+# is the installation (#382), and a mailbox copied off the drive should
+# still carry its way to run.
+#
+# Both run the daemon from a copy of source-code/ in a temporary directory
+# rather than from the drive.  Pulling the drive out from under a running
+# interpreter is a SIGBUS the next time it pages code in; from a copy, the
+# daemon notices its mailbox is gone and exits cleanly instead.  For the
+# same reason the whole script body is one function: sh reads a function
+# in full before running it, so it never needs the drive to read on.
 
-cat > "$DEST/run.sh" <<RUN
+write_launcher() {  # <file> <once|auto>
+    if [ "$2" = once ]; then
+        _what='one visit: tell contacts where this mailbox is, send the
+# outbox, stay reachable for SECONDS (default 60) so contacts can deliver,
+# then stop.  Run it again whenever you want to check for mail.
+#
+# usage: ./sync-with-contacts.sh [SECONDS]'
+        _args='--once="${1:-60}"'
+        _check='case "${1:-60}" in *[!0-9]*|"") echo "usage: $0 [SECONDS]" >&2; return 2 ;; esac'
+    else
+        _what='keep this mailbox live -- the normal sync cycle, announcing
+# where it is and delivering as mail arrives -- until the drive is unplugged
+# or you press Ctrl-C.
+#
+# usage: ./auto-sync.sh'
+        _args=''
+        _check=':'
+    fi
+    cat > "$1" <<LAUNCH
 #!/bin/sh
-# run.sh — start rmail using this drive's mailbox and config.
+# $(basename "$1") -- $_what
 #
-# Paths are resolved relative to this script's location, so the drive
-# works from whatever mount point the host picks (/run/media/…,
-# /media/…, a manual mount, …).
+# Paths are worked out from this script's own location, so the drive works
+# from whatever mount point the host picks.
 
-set -e
-DRIVE="\$(cd "\$(dirname "\$0")" && pwd)"
-MAILBOX_DIR="\$DRIVE/$MAILBOX_NAME"
-SRC="\$MAILBOX_DIR/source-code"
+main() {
+    $_check
+    MAILBOX_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+    SRC="\$MAILBOX_DIR/source-code"
 
-if [ ! -d "\$MAILBOX_DIR" ]; then
-    echo "error: no mailbox at \$MAILBOX_DIR" >&2
-    exit 1
-fi
+    # The drive's own interpreter, and only that one: a host's Lua may be a
+    # different version than these libraries were built against, and that
+    # fails as an "undefined symbol" deep inside require.
+    if [ ! -x "\$SRC/deps/lua/bin/lua" ]; then
+        echo "error: this drive has no interpreter at \$SRC/deps/lua/bin/lua" >&2
+        echo "  it is incomplete; regenerate it with make-mailbox-drive.sh" >&2
+        return 1
+    fi
 
-# The drive's own interpreter, and only that one.
-#
-# Falling back to the host's lua was the old behaviour and it is a bad
-# trade: a host's lua may be a different version than the libraries here
-# were built against, and the failure that produces is an "undefined
-# symbol" from deep inside require, not a sentence anybody can act on.
-# The drive carries an interpreter precisely so that the host's does not
-# get a vote.
-_lua="\$SRC/deps/lua/bin/lua"
-if [ ! -x "\$_lua" ]; then
-    echo "error: this drive has no interpreter at \$_lua" >&2
-    echo "  a portable drive is supposed to carry one; this drive is" >&2
-    echo "  incomplete and needs regenerating with make-mailbox-drive.sh" >&2
-    exit 1
-fi
+    # Run from a copy, so pulling the drive cannot pull code out from
+    # under the interpreter.  See make-mailbox-drive.sh.
+    RUN="\$(mktemp -d "\${XDG_RUNTIME_DIR:-/tmp}/rmail-XXXXXX")" || return 1
+    trap 'rm -rf "\$RUN"' EXIT INT TERM
+    cp -R "\$SRC/rmail.lua" "\$SRC/run-rmail.sh" "\$SRC/libs" "\$SRC/deps" "\$RUN/" || return 1
 
-# Everything the daemon needs is on the drive, so anything that fails to
-# load here is a mismatch between the drive and this host rather than
-# something missing.  Say so and stop.
-#
-# Rebuilding in place is what used to happen instead — a few minutes of
-# compiling, triggered automatically, on a machine somebody had just
-# plugged a drive into.  That is a fallback dressed as a convenience: it
-# hides the fact that the drive was built for a different machine, and it
-# writes to a drive that may well be somebody else's.
-if ! LUA_PATH="\$SRC/libs/?.lua;;" LUA_CPATH="\$SRC/libs/?.so;;" \\
-     "\$_lua" -e 'require "socket.core"; require "rmail_crypto"' >/dev/null 2>&1; then
-    echo "error: this drive was built for a different kind of machine." >&2
-    echo "" >&2
-    echo "  Its interpreter and libraries will not run here.  Almost always" >&2
-    echo "  this is a different CPU architecture — a drive built on an" >&2
-    echo "  x86-64 machine cannot run on an ARM one, and the other way" >&2
-    echo "  round.  Nothing is damaged and no mail has been touched." >&2
-    echo "" >&2
-    echo "  This drive:  \$(file -b "\$_lua" 2>/dev/null | cut -d, -f1-2)" >&2
-    echo "  This host:   \$(uname -m)" >&2
-    echo "" >&2
-    echo "  To use this mailbox here, regenerate the drive on a machine of" >&2
-    echo "  this kind, or copy the mailbox onto a host that has rmail." >&2
-    exit 1
-fi
+    # Anything that fails to load here is a mismatch between the drive and
+    # this host -- almost always CPU architecture.  Say so and stop rather
+    # than rebuilding on somebody else's machine.
+    if ! LUA_PATH="\$RUN/libs/?.lua;;" LUA_CPATH="\$RUN/libs/?.so;;" \\
+         "\$RUN/deps/lua/bin/lua" -e 'require "socket.core"; require "rmail_crypto"' >/dev/null 2>&1; then
+        echo "error: this drive was built for a different kind of machine." >&2
+        echo "  This drive:  \$(file -b "\$SRC/deps/lua/bin/lua" 2>/dev/null | cut -d, -f1-2)" >&2
+        echo "  This host:   \$(uname -m)" >&2
+        echo "  Nothing is damaged and no mail has been touched." >&2
+        return 1
+    fi
 
-# cd into the mailbox so relative hook paths in config (e.g.
-# ./hooks/on_receive.sh) resolve correctly regardless of mount point.
-# The daemon doesn't chdir during its run, so CWD stays stable.
-#
-# The daemon is handed the config file, not the mailbox directory.  It
-# takes no other form: naming the mailbox and letting the daemon hunt
-# for a matching config is how one machine's two mailboxes ended up
-# sharing a single service.  The mailbox served is wherever that config
-# turns out to be sitting, so this drive needs nothing but its own
-# location to know which mailbox it is — and that location is worked
-# out fresh from this script's path on every launch.
-cd "\$MAILBOX_DIR"
-exec "\$SRC/run-rmail.sh" "\$MAILBOX_DIR/config"
-RUN
-chmod +x "$DEST/run.sh"
+    # cd into the mailbox so relative hook paths in config resolve.  The
+    # daemon is handed the config file; the mailbox is wherever it sits.
+    cd "\$MAILBOX_DIR" || return 1
+    "\$RUN/run-rmail.sh" "\$MAILBOX_DIR/config" $_args
+}
+
+main "\$@"
+exit \$?
+LAUNCH
+    chmod +x "$1"
+}
+
+write_launcher "$MAILBOX_DIR/sync-with-contacts.sh" once
+write_launcher "$MAILBOX_DIR/auto-sync.sh" auto
+ok "wrote launchers: $MAILBOX_NAME/sync-with-contacts.sh, $MAILBOX_NAME/auto-sync.sh"
 
 # ---------------------------------------------------------------------------
 # Write the drive's top-level README.md.
@@ -550,31 +568,41 @@ chmod +x "$DEST/run.sh"
 cat > "$DEST/README.md" <<README
 # Portable rmail mailbox
 
-This USB drive **is** a running rmail mailbox.  Plug it into any Linux
-host whose router is forwarding port \`$PORT\` to that host, run
-\`./run.sh\` from the drive, and you're live.  Unplug, move to another
-host that also has port \`$PORT\` forwarded, run \`./run.sh\` again —
-same mailbox, same contacts, same history.
+This USB drive **is** an rmail mailbox.  Plug it into any Linux host
+whose router forwards port \`$PORT\` to that host and run one of the
+mailbox's two launchers.  Unplug, move to another host that also has port
+\`$PORT\` forwarded, do the same — same mailbox, same contacts, same
+history.
+
+Nothing happens on its own.  Plugging the drive in announces nothing to
+anyone; running a launcher is how you say "I'm reachable here now".
 
 ## Before first use on a new host
 
-1. **Open port \`$PORT\`** in the host's router and firewall, pointing
-   at this host's LAN IP.  Without that, the world can't reach your
-   daemon.  (The exact steps depend on your router — search its admin
-   UI for "port forwarding".)
-2. **Install a Lua interpreter** if the host doesn't have one.  Any of
-   \`lua5.4\`, \`luajit\`, \`lua5.3\`, \`lua5.2\`, \`lua5.1\`, or \`lua\`
-   on \$PATH will do.  On Debian/Ubuntu: \`sudo apt install lua5.4\`.
+**Open port \`$PORT\`** in the host's router and firewall, pointing at
+this host's LAN IP.  Without that, contacts can't deliver to you.  (The
+exact steps depend on your router — search its admin UI for "port
+forwarding".)
 
-## Run it
+## Check for mail once
 
-From the drive's mount point:
+    ./$MAILBOX_NAME/sync-with-contacts.sh
 
-    ./run.sh
+Tells your contacts where you are, sends everything in the outbox, stays
+reachable for a minute so they can deliver what they have for you, then
+stops.  Give it a number of seconds to stay longer — worth it when large
+attachments are on their way:
 
-Logs go to stdout; Ctrl-C to stop.  For a long-running daemon, use
-\`nohup ./run.sh > mail.log 2>&1 &\` or set it up as a systemd user
-service pointing at \`./run.sh\`.
+    ./$MAILBOX_NAME/sync-with-contacts.sh 300
+
+## Stay live until unplugged
+
+    ./$MAILBOX_NAME/auto-sync.sh
+
+Runs the normal sync cycle: mail goes out as soon as it lands in the
+outbox and comes in whenever a contact sends it.  It stops by itself when
+the drive is pulled out, or on Ctrl-C.  It runs the program from a
+temporary copy on the host, so pulling the drive cannot crash it.
 
 ## What this drive needs from a host
 
@@ -586,8 +614,8 @@ wants from the system is the C library and the maths library — which
 every Linux has.
 
 The one thing it cannot bring is a CPU.  A drive built on an x86-64
-machine will not run on an ARM one, or the other way round.  \`run.sh\`
-checks this on launch and stops with an explanation naming both, rather
+machine will not run on an ARM one, or the other way round.  The
+launchers check this on launch and stops with an explanation naming both, rather
 than failing somewhere confusing.  Nothing is damaged and no mail is
 touched; the mailbox is plain files and is readable anywhere.
 
@@ -622,16 +650,17 @@ Set a hook line in the config to \`""\` to disable that hook entirely.
 
 ## What's on the drive?
 
-* \`run.sh\` — launcher.  Resolves paths from its own location so the
-  mount point doesn't matter.
 * \`$MAILBOX_NAME/\` — the mailbox itself.  Inbox, outbox, contacts,
   attachments, state, hooks and the program all live here.
+* \`$MAILBOX_NAME/sync-with-contacts.sh\`, \`auto-sync.sh\` — the two
+  launchers.  They resolve paths from their own location, so the mount
+  point doesn't matter.
 * \`$MAILBOX_NAME/hooks/\` — the mailbox's hook scripts.  Edit in
   place to customise; they're referenced with relative paths from
   the mailbox config so they stay portable.
 * \`$MAILBOX_NAME/source-code/\` — the daemon, its own Lua interpreter,
   its libraries, the C sources behind the compiled ones, and
-  \`BUILD-NOTES.txt\` saying how those were built.  \`run.sh\` manages
+  \`BUILD-NOTES.txt\` saying how those were built.  The launchers use
   this; you shouldn't need to go in.
 * \`README.md\` — this file.
 
@@ -653,7 +682,8 @@ _bytes=$(du -sh "$DEST" 2>/dev/null | awk '{print $1}')
 echo ""
 ok "mailbox drive ready at $DEST (total size: ${_bytes:-unknown})"
 info "drive contents:"
-info "    $DEST/run.sh"
+info "    $DEST/$MAILBOX_NAME/sync-with-contacts.sh  (one visit)"
+info "    $DEST/$MAILBOX_NAME/auto-sync.sh          (live until unplugged)"
 info "    $DEST/README.md"
 info "    $DEST/$MAILBOX_NAME/source-code/  (the daemon and its libraries)"
 info "    $DEST/$MAILBOX_NAME/  (config, inbox, outbox, attachments, contacts, hooks)"

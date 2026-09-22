@@ -193,10 +193,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun uriToAttachLine(uri: Uri): String {
-        val path = uri.path ?: uri.toString()
-        return "attach: $path"
-    }
+    // The whole URI, not uri.path: a bare path such as
+    // /external/images/media/42 has no scheme, can't be opened, and went to
+    // the server as an attachment that did not exist.
+    private fun uriToAttachLine(uri: Uri): String = "attach: $uri"
 
     private fun buildDraft(attachLines: List<String>): String =
         "to: \n\n" + attachLines.joinToString("\n")

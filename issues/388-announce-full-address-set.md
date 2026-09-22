@@ -138,7 +138,79 @@ next:
 The general lesson: any write to a watched file needs a "did this actually
 change anything" guard, or the watcher turns it into a feedback loop.
 
-### Known gap
+### Follow-up (2026-09-22): private addresses split into `local-ip`
+
+Phase 1 sent every address to every contact.  A remote contact can never
+use our 192.168.x.x -- and on *their* network the same address names some
+other device, so trying it knocks on a stranger's machine.  Changed:
+
+- **Contacts file**: new `name.local-ip` / `name.local-ip[N]`, private IPv4
+  only (a public value is ignored with a warning; private IPv6 is ignored
+  with a "not supported yet" warning, since the subnet check below is
+  IPv4-only).  Legacy `name.lan_ip` folds in.
+- **Connecting**: `contact_endpoints` puts local addresses first, but only
+  those sharing our /24.  They carry no index, so a win on one never
+  promotes or rewrites `ip`.
+- **Announcing**: `addrset.mine` returns `(public, local)`, classifying by
+  the address rather than the state file it came from (a CGNAT "public IP"
+  is not public).  `ips` carries public only; `local_ips` is sent only to a
+  contact we hold a same-/24 private address for (`addrset.contact_on_lan`).
+- **Receiving**: private entries -- from `local_ips`, or from a phase-1
+  peer's `ips` -- are kept only if they share our /24, and replace the
+  sender's `local-ip` lines wholesale.  One that phase 1 wrote into an
+  indexed `ip[N]` is moved out.  Absent `local_ips` leaves them alone.
+- **Canonical contacts form** now carries `ip[N]`, `port[N]` and
+  `local-ip`.  It did not carry `ip[N]` before either: the phone holds this
+  text, and a contact edit on the phone posts it back as the whole file, so
+  any indexed address was deleted on the server.  Pre-existing since #347.
+- **Android**: settings take a list of server addresses and a list of
+  local addresses (`+` to add, `−` to remove, no reordering).  A private
+  address in the public list is refused on save; configs from before the
+  lists have a private host sorted into the local list automatically.
+  `HostPicker` probes same-/24 local addresses (1s) then public ones (3s)
+  at the start of each sync cycle; other calls reuse that answer until
+  the next sync.
+
+Classification is `is_private_ipv4`: 10/8, 127/8, 172.16/12, 192.168/16,
+169.254/16, 100.64/10 (CGNAT).  Note CGNAT is also Tailscale's range, so a
+Tailscale address counts as local and will only be tried from a matching
+/24 -- use `ip[N]` for one.
+
+### No notification; the dotfile is a confirmation marker (2026-09-22)
+
+Address changes were already applied automatically on receipt, and
+announcing was already unconditional -- `notify_ip_change` only decided
+whether the *receiver* wrote a human-readable notice (the config comments
+and install/migrate scripts described it as gating the announcement, which
+it never did).  The setting is removed.  `.address-update-<name>` is now
+written on every real change regardless of the sender's `notify` flag, and
+is purely bookkeeping: it drives the confirm-by-outbound-send handshake
+above and is deleted automatically on the first successful send.  The
+`notify` field is no longer sent: every peer is upgraded together, so
+there are no pre-#388 receivers to keep quiet.
+
+This dissolves the known gap below: a marker the user never acts on has no
+business on the phone, so `list_files` skipping dotfiles is correct.
+
+### Portable mailboxes announce only when asked
+
+A portable mailbox has no service and never starts on its own; the drive
+now carries two launchers inside the mailbox instead of a root `run.sh`,
+and running one is the decision to be reachable on this host:
+
+- `sync-with-contacts.sh [SECONDS]` runs the daemon with `--once`: the
+  startup announcement goes out (which resets each contact's backoff timer
+  for us, so they deliver immediately), a sync runs, the daemon stays
+  reachable SECONDS (default 60) and exits.  This is the same primitive
+  #389's wake-to-sync needs.
+- `auto-sync.sh` runs the normal cycle until the drive is pulled.
+
+Both run the program from a temporary copy on the host, and the daemon now
+exits cleanly when its mailbox directory disappears (checked every 3s, two
+misses in a row), so a pulled drive stops the daemon instead of crashing
+the interpreter mid-page-fault.
+
+### Known gap (resolved -- see above)
 
 `list_files` skips dotfiles, so `.address-update-*` notices do **not**
 currently sync to the Android client -- the trap flagged above is real and

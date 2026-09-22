@@ -278,6 +278,17 @@ class RmailClient(
     }
 
     /**
+     * POST /api/consent — answer a consent form in the server's inbox.
+     * [answer] is "accept" or "deny".  The phone's copy of the form is not
+     * synced back, so answering it locally reached nobody.
+     */
+    fun postConsent(filename: String, answer: String): Boolean {
+        val body = JSONObject().put("filename", filename).put("answer", answer).toString()
+        val (status, _) = post("/api/consent", body.toByteArray(Charsets.UTF_8))
+        return status == 200
+    }
+
+    /**
      * GET /api/attachments — list attachment metadata
      */
     fun listAttachments(): List<AttachmentInfo> {
@@ -625,7 +636,11 @@ class RmailClient(
             chunksDir.mkdirs()
             fun chunkFile(i: Int) = java.io.File(chunksDir, "chunk-%04d.bin".format(i))
 
-            // Step 1: check if chunks already exist (resume from previous zip+chunk)
+            // Step 1: check if chunks already exist (resume from previous zip+chunk).
+            // Only a set that finished splitting counts: one cut short by the
+            // app being killed would otherwise resume as a truncated file.
+            val complete = java.io.File(chunksDir, ".complete")
+            if (!complete.exists()) chunksDir.listFiles()?.forEach { it.delete() }
             val existingChunks = chunksDir.listFiles()?.filter {
                 it.name.startsWith("chunk-") && it.name.endsWith(".bin")
             }?.size ?: 0
@@ -670,6 +685,7 @@ class RmailClient(
                                 if (read == CHUNK_SIZE) chunkBuf else chunkBuf.copyOf(read))
                         }
                     }
+                    complete.createNewFile()
                 } finally {
                     zipFile.delete()
                 }

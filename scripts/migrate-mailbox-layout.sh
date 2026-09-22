@@ -219,31 +219,22 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 3. IP-change notices off.
+# 3. Obsolete notify_ip_change line.
 #
-# Now the default everywhere, because every mailbox can be moved once it
-# carries its own config, hooks and program.  An explicit `true` in an
-# existing config is turned off here rather than left, so that migrated
-# mailboxes and new ones behave alike.
+# It never gated announcing, only whether the receiving end wrote a
+# visible notice, and that notice is gone (#388): address changes are
+# applied automatically.  The line is ignored; drop it so the config does
+# not suggest a switch that does nothing.
 
-_notify=$(grep "^[[:space:]]*notify_ip_change[[:space:]]*=" "$CONFIG" |
-          sed 's/^[^=]*=[[:space:]]*//' | head -1)
-if [ "$_notify" = "true" ]; then
+if grep -q "^[[:space:]]*notify_ip_change[[:space:]]*=" "$CONFIG"; then
     if [ "$DRY_RUN" = 1 ]; then
-        act "turn notify_ip_change off (currently true)"
+        act "remove obsolete notify_ip_change line"
     else
-        sed -i 's|^\([[:space:]]*notify_ip_change[[:space:]]*=[[:space:]]*\).*|\1false|' "$CONFIG"
-        ok "turned IP-change notices off"
+        sed -i '/^[[:space:]]*notify_ip_change[[:space:]]*=/d' "$CONFIG"
+        ok "removed obsolete notify_ip_change line"
     fi
-elif [ -n "$_notify" ]; then
-    ok "IP-change notices already off"
 else
-    if [ "$DRY_RUN" = 1 ]; then
-        act "add notify_ip_change = false"
-    else
-        printf '\nnotify_ip_change = false\n' >> "$CONFIG"
-        ok "added notify_ip_change = false"
-    fi
+    ok "no obsolete notify_ip_change line"
 fi
 
 # --------------------------------------------------------------------------

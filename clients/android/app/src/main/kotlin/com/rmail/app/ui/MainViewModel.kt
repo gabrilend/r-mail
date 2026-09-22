@@ -11,6 +11,7 @@ import com.rmail.app.data.MailStore
 import com.rmail.app.data.MailboxConfig
 import com.rmail.app.data.MailboxRegistry
 import com.rmail.app.data.Settings
+import com.rmail.app.net.HostPicker
 import com.rmail.app.net.RmailClient
 import com.rmail.app.sync.SyncBackoff
 import com.rmail.app.sync.SyncManager
@@ -78,6 +79,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val daemonName: StateFlow<String?> = _daemonName
 
     private var serverLanIp: String? = null
+
+    /** A client for whichever of the mailbox's addresses answers (#388). */
+    private suspend fun clientFor(config: MailboxConfig): RmailClient {
+        val host = withContext(Dispatchers.IO) { HostPicker.pick(config, serverLanIp) }
+        return RmailClient(host, config.port, config.token)
+    }
 
     // #358: Pending compose draft delivered from ReadScreen (forward /
     // reply actions).  InboxScreen consumes it when it appears, fills
@@ -376,7 +383,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!wasSyncing) _syncStatus.value = SyncStatus.SYNCING
         viewModelScope.launch {
             try {
-                val client = RmailClient(config.host, config.port, config.token)
+                val client = clientFor(config)
                 val serverList = withContext(Dispatchers.IO) { client.listAttachments() }
                 val serverNames = serverList.map { it.filename }.toSet()
 
@@ -561,7 +568,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _deletingFiles.value = _deletingFiles.value + filename
         viewModelScope.launch {
             try {
-                val client = RmailClient(config.host, config.port, config.token)
+                val client = clientFor(config)
                 val ok = withContext(Dispatchers.IO) { client.deleteAttachment(filename) }
                 if (ok) loadAttachmentList()
             } catch (_: Exception) {}
@@ -593,7 +600,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 _downloadProgress.value = _downloadProgress.value + (info.filename to (0L to info.size))
 
-                val client = RmailClient(config.host, config.port, config.token)
+                val client = clientFor(config)
                 val file = s.cachedAttachmentFile(info.filename)
 
                 withContext(Dispatchers.IO) {
@@ -617,7 +624,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is com.rmail.app.net.ChecksumMismatchException -> {
                         Log.w("rmail", "Download checksum mismatch for ${info.filename}, attempting repair")
-                        val repairClient = RmailClient(config.host, config.port, config.token)
+                        val repairClient = clientFor(config)
                         withContext(Dispatchers.IO) {
                             repairClient.remoteLog("warn", "Checksum mismatch after downloading ${info.filename}, attempting repair")
                         }
@@ -642,7 +649,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     else -> {
                         Log.e("rmail", "Download failed for ${info.filename}: ${e.message}")
                         try {
-                            val logClient = RmailClient(config.host, config.port, config.token)
+                            val logClient = clientFor(config)
                             withContext(Dispatchers.IO) {
                                 logClient.remoteLog("error", "Download failed for ${info.filename}: ${e.message}")
                             }
@@ -666,7 +673,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val config = activeConfig ?: return
         viewModelScope.launch {
             try {
-                val client = RmailClient(config.host, config.port, config.token)
+                val client = clientFor(config)
                 val info = withContext(Dispatchers.IO) { client.getMyAddress() }
                 if (info != null) {
                     val v6 = if (info.ipv6.isNotBlank()) " (IPv6: ${info.ipv6})" else ""
@@ -678,99 +685,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Per outbox file: attachment upload progress, or why it is stuck. */
+    val uploadProgress = com.rmail.app.sync.UploadProgress.state
+
+    /**
+     * Copy a just-sent message's attachments into app storage, point its
+     * `attach:` lines at the copies, and start a sync to upload them.
+     *
+     * The copy is what makes the upload survivable: the picker's content://
+     * permission ends with this process, so an upload interrupted by the
+     * app being killed could never be finished.  The sync cycle does the
+     * uploading (see SyncManager.uploadPendingAttachments) and keeps the
+     * message off the server until every attachment is there.
+     */
     fun uploadAttachmentsInBackground(outboxFilename: String, uris: List<Uri>) {
-        val config = activeConfig ?: return
         val s = store ?: return
         if (uris.isEmpty()) return
-        val daemonLabel = config.name.ifBlank { config.host }
         viewModelScope.launch {
-            val client = RmailClient(config.host, config.port, config.token)
-            // Check which files are already on the server to avoid re-uploading
-            val serverFiles = _attachments.value.filter { it.onServer }.map { it.filename }.toSet()
-            val mailboxPath = config.mailboxPath
-
+            val app = getApplication<Application>()
             for (uri in uris) {
                 val uriStr = uri.toString()
-                if (!uriStr.startsWith("content://") && !uriStr.startsWith("file://")) continue
+                if (!uriStr.startsWith("content://")) continue
+                val name = resolveFilename(uri) ?: "attachment"
+                com.rmail.app.sync.UploadProgress.set(outboxFilename, "preparing $name…")
                 try {
-                    val filename = resolveFilename(uri) ?: "attachment"
-
-                    // Skip upload if file already exists on server — just update the path
-                    if (filename in serverFiles && mailboxPath.isNotBlank()) {
-                        val serverPath = "$mailboxPath/attachments/$filename"
-                        withContext(Dispatchers.IO) {
-                            val file = File(s.outbox, outboxFilename)
-                            if (file.exists()) {
-                                val text = file.readText()
-                                file.writeText(text.replace(uriStr, serverPath))
-                            }
-                        }
-                        continue
-                    }
-
-                    val app = getApplication<Application>()
-
-                    // Get file size for progress reporting
-                    val fileSize = withContext(Dispatchers.IO) {
-                        app.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
-                    }
-
-                    // Progress marker in the outbox file — throttled to once per second
-                    val progressMarker = "\n\n---\n"
-                    var lastProgressWrite = 0L
-                    fun writeProgress(line: String) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastProgressWrite < 1000) return
-                        lastProgressWrite = now
-                        try {
-                            val file = File(s.outbox, outboxFilename)
-                            if (!file.exists()) return
-                            val text = file.readText()
-                            val base = if (progressMarker in text)
-                                text.substringBefore(progressMarker)
-                            else text
-                            file.writeText(base + progressMarker + line)
-                        } catch (_: Exception) {}
-                    }
-
-                    val uploadChunksDir = java.io.File(app.cacheDir, "upload-chunks/$filename")
-                    val serverPath = withContext(Dispatchers.IO) {
-                        val stream = app.contentResolver.openInputStream(uri)
-                        try {
-                            RmailClient.uploadFileCompressed(
-                                client, filename, stream, fileSize,
-                                app.cacheDir, uploadChunksDir
-                            ) { phase, processed, total ->
-                                val processedMB = "%.1f".format(processed / (1024.0 * 1024.0))
-                                val totalMB = "%.1f".format(total / (1024.0 * 1024.0))
-                                val msg = when (phase) {
-                                    RmailClient.Companion.UploadPhase.ZIPPING ->
-                                        "zipping $filename... $processedMB MB / $totalMB MB"
-                                    RmailClient.Companion.UploadPhase.SENDING ->
-                                        "sending to $daemonLabel... $processedMB MB / $totalMB MB"
-                                }
-                                writeProgress(msg)
-                            }
-                        } finally {
-                            stream?.close()
-                        }
-                    } ?: continue
-
-                    // Upload done — replace URI with server path, remove progress
                     withContext(Dispatchers.IO) {
+                        // A directory per copy keeps the original name (it
+                        // becomes the name on the server) without clashing.
+                        val dir = File(s.pendingAttachments, System.nanoTime().toString()).also { it.mkdirs() }
+                        val copy = File(dir, name.replace('/', '_'))
+                        app.contentResolver.openInputStream(uri)?.use { input ->
+                            copy.outputStream().use { input.copyTo(it) }
+                        } ?: throw java.io.FileNotFoundException(name)
                         val file = File(s.outbox, outboxFilename)
                         if (file.exists()) {
-                            var text = file.readText()
-                            // Remove progress marker and everything after it
-                            if (progressMarker in text) {
-                                text = text.substringBefore(progressMarker)
-                            }
-                            file.writeText(text.replace(uriStr, serverPath))
+                            file.writeText(file.readText().replace(uriStr, Uri.fromFile(copy).toString()))
                         }
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    com.rmail.app.sync.UploadProgress.set(outboxFilename,
+                        "couldn't read $name (${e.message ?: e.javaClass.simpleName}) — " +
+                        "remove it and attach it again", error = true)
+                    Log.w("rmail", "staging attachment $name failed: ${e.message}")
+                }
             }
             refreshLocal()
+            triggerSync()
+        }
+    }
+
+    /** Answer a consent form on the server, then sync so the answer goes out. */
+    fun answerConsent(filename: String, answer: String, onResult: (Boolean) -> Unit) {
+        val config = activeConfig ?: run { onResult(false); return }
+        viewModelScope.launch {
+            val ok = try {
+                withContext(Dispatchers.IO) { clientFor(config).postConsent(filename, answer) }
+            } catch (e: Exception) {
+                Log.w("rmail", "consent answer failed: ${e.message}"); false
+            }
+            onResult(ok)
+            if (ok) triggerSync()
         }
     }
 

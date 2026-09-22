@@ -898,16 +898,9 @@ port = $RMAIL_PORT
 
 # ---- networking ----
 
-# on startup, rmail checks your public IP using multiple services.
-# with this on, a confirmed change is announced to every contact and
-# their contacts file is updated automatically.
-#
-# off by default, because a mailbox carries its own config, hooks and
-# program and can therefore be picked up and run somewhere else — and a
-# mailbox that has moved would otherwise tell everyone it knows the
-# moment it arrives.  Turn it on for a mailbox that lives on one machine
-# and whose address you want kept current without asking.
-notify_ip_change = false
+# rmail checks your public IP on startup and periodically.  A confirmed
+# change is announced to every contact and applied to their contacts file
+# automatically -- there is no setting for this and nothing to approve.
 
 # ---- NAT / port forwarding ----
 

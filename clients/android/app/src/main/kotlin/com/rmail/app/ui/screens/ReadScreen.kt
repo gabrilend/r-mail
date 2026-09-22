@@ -161,18 +161,19 @@ fun ReadScreen(
         }
     ) { padding ->
         if (msg.isConsent) {
+            // The answer is made on the server's copy of the form, which is
+            // the one the daemon reads.  (This used to write "accept" into a
+            // new outbox file with no recipient, which went nowhere.)
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            fun answer(a: String) = vm.answerConsent(filename, a) { ok ->
+                if (ok) onBack()
+                else android.widget.Toast.makeText(ctx,
+                    "Couldn't reach the server to $a — try again", android.widget.Toast.LENGTH_LONG).show()
+            }
             ConsentView(
                 message = msg,
-                onAccept = {
-                    vm.saveOutboxFile(filename, "accept")
-                    vm.triggerSync()
-                    onBack()
-                },
-                onDeny = {
-                    vm.saveOutboxFile(filename, "deny")
-                    vm.triggerSync()
-                    onBack()
-                },
+                onAccept = { answer("accept") },
+                onDeny = { answer("deny") },
                 modifier = Modifier.padding(padding)
             )
         } else {

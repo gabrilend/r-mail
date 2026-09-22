@@ -260,19 +260,21 @@ fun SetupScreen(
                     connecting = true
                     errorMessage = null
 
-                    val config = if (editConfig != null) {
+                    val config = (if (editConfig != null) {
                         editConfig.copy(
-                            host = host.trim(),
+                            // Setup edits the primary address; any others
+                            // added in Settings are kept behind it.
+                            hosts = listOf(host.trim()) + editConfig.hosts.drop(1).filter { it != host.trim() },
                             port = portInt,
                             token = token.trim()
                         )
                     } else {
                         MailboxConfig(
-                            host = host.trim(),
+                            hosts = listOf(host.trim()),
                             port = portInt,
                             token = token.trim()
                         )
-                    }
+                    }).withAddressesSorted()
 
                     if (editConfig != null) vm.updateMailbox(config)
                     else vm.addMailbox(config)

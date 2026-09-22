@@ -14,6 +14,8 @@ import com.rmail.app.data.SyncRequest
 import com.rmail.app.data.SyncState
 import com.rmail.app.net.RmailClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -30,28 +32,34 @@ class SyncManager(
     private val serverLanIp: String? = null
 ) {
 
-    suspend fun sync(): SyncResult = withContext(Dispatchers.IO) {
+    // One sync at a time per process.  The app and the background worker
+    // can both start one, and two cycles uploading the same attachment or
+    // rewriting the same outbox file would trample each other.
+    suspend fun sync(): SyncResult = syncLock.withLock { syncLocked() }
+
+    private suspend fun syncLocked(): SyncResult = withContext(Dispatchers.IO) {
         if (!config.isConfigured) return@withContext SyncResult.Error("Not configured")
 
         try {
-            // Try LAN IP first (fast, same network), fall back to configured host
-            val host = if (serverLanIp != null) {
-                try {
-                    val sock = java.net.Socket()
-                    sock.connect(java.net.InetSocketAddress(serverLanIp, config.port), 1_000)
-                    sock.close()
-                    serverLanIp
-                } catch (_: Exception) {
-                    config.host
-                }
-            } else config.host
+            // Local addresses on our own network first, then public ones (#388)
+            val host = com.rmail.app.net.HostPicker.pick(config, serverLanIp, fresh = true)
             val client = RmailClient(host, config.port, config.token)
+            // ── 0. Upload attachments still on the phone ──────────────────
+            //
+            // Done first, so a message whose attachments finish uploading
+            // goes to the server in this same cycle.
+            uploadPendingAttachments(client)
+
+            // Hashes backfilled first, so the state every later write is
+            // derived from already carries them.
+            backfillOutboxHashes()
             val state = store.readSyncState()
 
             // ── 1. Compute local diff ──────────────────────────────────────
 
             val deletedInbox = computeDeletedInbox(state)
             val (newOutbox, deletedOutbox) = computeOutboxDiff(state)
+            val changedOutbox = computeChangedOutbox(state)
             val contactsHash = store.contactsHash()
 
             // Build phone's current inbox map (only entries whose files still exist)
@@ -59,7 +67,11 @@ class SyncManager(
                 File(store.inbox, entry.filename).exists()
             }.mapValues { it.value.filename }
 
+            // A held file the server has never seen is left out: listing it
+            // would read as "the phone has a file the server does not",
+            // which is the server's cue to tell us to delete it.
             val currentOutbox = store.listOutbox()
+                .filter { it in state.outbox || !store.isHeld(it) }
 
             // ── 2. Call /api/sync ──────────────────────────────────────────
 
@@ -113,17 +125,21 @@ class SyncManager(
                 val (data, mtimeMs) = client.downloadFileWithMtime("outbox", filename)
                 store.writeOutbox(filename, data.toString(Charsets.UTF_8), mtimeMs)
                 newState.outbox.add(filename)
+                store.outboxHash(filename)?.let { newState.outboxHashes[filename] = it }
                 store.writeSyncState(newState.toImmutable())
             }
 
             // Upload new outbox files created on the phone (send the local
             // authoring time so the server and recipients preserve ordering)
+            // -- and outbox files edited on the phone since they were last
+            // sent, which the server passes on to recipients as an update.
             val newOutboxSet = newOutbox.toSet()
-            newOutbox.forEach { filename ->
-                val content = store.readOutbox(filename).toByteArray(Charsets.UTF_8)
+            (newOutbox + changedOutbox).forEach { filename ->
+                val bytes = File(store.outbox, filename).readBytes()
                 val mtimeSecs = File(store.outbox, filename).lastModified().let { if (it > 0) it / 1000 else null }
-                client.uploadOutboxFile(filename, content, mtimeSecs)
+                client.uploadOutboxFile(filename, bytes, mtimeSecs)
                 newState.outbox.add(filename)
+                newState.outboxHashes[filename] = com.rmail.app.crypto.Crypto.sha256Hex(bytes)
                 // The upload is on the server now. If the next one throws,
                 // this one must not be sent again.
                 store.writeSyncState(newState.toImmutable())
@@ -132,9 +148,10 @@ class SyncManager(
             // Remove outbox files the server says are done.
             // Skip files we just uploaded — server didn't know about them yet this cycle.
             resp.removeOutbox.forEach { filename ->
-                if (filename !in newOutboxSet) {
+                if (filename !in newOutboxSet && !store.isHeld(filename)) {
                     store.deleteOutbox(filename)
                     newState.outbox.remove(filename)
+                    newState.outboxHashes.remove(filename)
                     store.writeSyncState(newState.toImmutable())
                 }
             }
@@ -178,6 +195,9 @@ class SyncManager(
             SyncResult.Success(resp.mailboxName, resp.mailboxPath)
 
         } catch (e: Exception) {
+            // The remembered address may be the one that just failed; don't
+            // hand it to other calls until the next sync re-probes.
+            com.rmail.app.net.HostPicker.forget(config)
             SyncResult.Error(friendlySyncError(e))
         }
     }
@@ -217,10 +237,120 @@ class SyncManager(
     private fun computeOutboxDiff(state: SyncState): Pair<List<String>, List<String>> {
         val onDisk = store.listOutbox().toSet()
         val inState = state.outbox
-        val newFiles = onDisk - inState       // created on phone since last sync
+        // created on phone since last sync, and not waiting on an upload
+        val newFiles = (onDisk - inState).filterNot { store.isHeld(it) }
         val deleted = inState - onDisk        // deleted on phone since last sync
-        return Pair(newFiles.toList(), deleted.toList())
+        return Pair(newFiles, deleted.toList())
     }
+
+    /**
+     * Outbox files the server already has that were edited here since.
+     * The upload used to happen once, on first sight, so a later edit --
+     * including the attachment line being rewritten to its server path --
+     * never reached the server.  A file with no recorded hash (synced before
+     * hashes were kept) is assumed unchanged; its hash is recorded now.
+     */
+    private fun computeChangedOutbox(state: SyncState): List<String> =
+        state.outbox.filter { filename ->
+            if (store.isHeld(filename)) return@filter false
+            val then = state.outboxHashes[filename] ?: return@filter false
+            val now = store.outboxHash(filename) ?: return@filter false
+            then != now
+        }
+
+    private fun backfillOutboxHashes() {
+        val state = store.readSyncState()
+        val backfill = state.outbox
+            .filter { it !in state.outboxHashes && !store.isHeld(it) }
+            .mapNotNull { f -> store.outboxHash(f)?.let { f to it } }
+            .toMap()
+        if (backfill.isNotEmpty()) {
+            store.writeSyncState(state.copy(outboxHashes = state.outboxHashes + backfill))
+        }
+    }
+
+    /**
+     * Upload every attachment an outbox file still holds a phone-side
+     * reference to, rewriting each `attach:` line to the server path as it
+     * completes.  A failure is shown on the outbox list and retried next
+     * sync; it no longer disappears into an empty catch block.
+     */
+    private suspend fun uploadPendingAttachments(client: RmailClient) {
+        // Copies whose message was deleted before they uploaded.  The age
+        // check keeps this away from a copy being made right now, whose
+        // outbox line has not been rewritten to point at it yet.
+        val referenced = store.listOutbox().flatMap { store.localAttachRefs(it) }.joinToString("\n")
+        store.pendingAttachments.listFiles()?.forEach { dir ->
+            if (dir.path !in referenced &&
+                System.currentTimeMillis() - dir.lastModified() > 60 * 60 * 1000L) {
+                dir.deleteRecursively()
+            }
+        }
+
+        for (outboxFile in store.listOutbox()) {
+            val refs = store.localAttachRefs(outboxFile)
+            if (refs.isEmpty()) { UploadProgress.clear(outboxFile); continue }
+            for (ref in refs) {
+                val uri = android.net.Uri.parse(ref)
+                val name = if (ref.startsWith("file://")) File(uri.path ?: ref).name
+                           else displayName(uri) ?: uri.lastPathSegment ?: "attachment"
+                try {
+                    val size = openSize(uri)
+                    val chunksDir = File(context.cacheDir, "upload-chunks/$name-${ref.hashCode()}")
+                    val serverPath = context.contentResolver.openInputStream(uri).use { stream ->
+                        RmailClient.uploadFileCompressed(
+                            client, name, stream, size, context.cacheDir, chunksDir
+                        ) { phase, done, total ->
+                            val verb = if (phase == RmailClient.Companion.UploadPhase.ZIPPING)
+                                "zipping" else "uploading"
+                            UploadProgress.set(outboxFile, "$verb $name… ${mb(done)} / ${mb(total)} MB")
+                        }
+                    } ?: throw java.io.IOException("server did not accept the upload")
+
+                    // Swap the reference for the server path, in every outbox
+                    // file that names it, and drop our copy once none does.
+                    for (f in store.listOutbox()) {
+                        val text = store.readOutbox(f)
+                        if (ref in text) store.writeOutbox(f, text.replace(ref, serverPath))
+                    }
+                    if (ref.startsWith("file://")) {
+                        val local = File(uri.path ?: "")
+                        if (local.path.startsWith(store.pendingAttachments.path)) {
+                            local.delete()
+                            local.parentFile?.takeIf { it != store.pendingAttachments }?.delete()
+                        }
+                    }
+                } catch (e: SecurityException) {
+                    UploadProgress.set(outboxFile,
+                        "can't read $name any more — remove it and attach it again", error = true)
+                    return
+                } catch (e: java.io.FileNotFoundException) {
+                    UploadProgress.set(outboxFile,
+                        "$name is gone from this phone — remove it and attach it again", error = true)
+                    return
+                } catch (e: Exception) {
+                    UploadProgress.set(outboxFile,
+                        "upload of $name failed (${e.message ?: e.javaClass.simpleName}) — will retry", error = true)
+                    try { client.remoteLog("warn", "attachment upload failed for $outboxFile/$name: ${e.message}") }
+                    catch (_: Exception) {}
+                    return  // the connection is probably down; stop for this cycle
+                }
+            }
+            if (store.localAttachRefs(outboxFile).isEmpty()) UploadProgress.clear(outboxFile)
+        }
+    }
+
+    private fun mb(bytes: Long) = "%.1f".format(bytes / (1024.0 * 1024.0))
+
+    private fun openSize(uri: android.net.Uri): Long =
+        if (uri.scheme == "file") File(uri.path ?: "").length()
+        else context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+
+    private fun displayName(uri: android.net.Uri): String? = try {
+        context.contentResolver.query(
+            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null
+        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    } catch (_: Exception) { null }
 
     private fun postNotification(count: Int, sender: String?, subject: String?) {
         val detail = config.notificationDetail
@@ -254,6 +384,7 @@ class SyncManager(
 
     companion object {
         private const val NOTIFICATION_ID = 1001
+        private val syncLock = Mutex()
     }
 }
 
@@ -262,13 +393,16 @@ class SyncManager(
 private class MutableSyncState(
     val inbox: MutableMap<String, InboxEntry>,
     val outbox: MutableSet<String>,
-    var contactsHash: String?
+    var contactsHash: String?,
+    val outboxHashes: MutableMap<String, String>
 ) {
-    fun toImmutable() = SyncState(inbox.toMap(), outbox.toSet(), contactsHash)
+    fun toImmutable() = SyncState(inbox.toMap(), outbox.toSet(), contactsHash,
+        outboxHashes.filterKeys { it in outbox })
 }
 
 private fun SyncState.toMutable() = MutableSyncState(
     inbox = inbox.toMutableMap(),
     outbox = outbox.toMutableSet(),
-    contactsHash = contactsHash
+    contactsHash = contactsHash,
+    outboxHashes = outboxHashes.toMutableMap()
 )

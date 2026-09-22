@@ -156,3 +156,15 @@ same cleanup.
 ## Status
 
 Open.  Not blocking #347 QA; file-only for now.
+
+**Revised by #388 (2026-09-22):** a separate `local-ip` field was added
+after all, reversing "LAN addresses go in `ip[N]`".  What changed is that
+addresses are now *announced* and written into other people's contacts
+files by the daemon, so the daemon must know which addresses are LAN-only
+-- a remote contact holding our 192.168.x.x in `ip[N]` would try it on its
+own network and reach some other device.  When a human typed `ip[N]` by
+hand, the human knew.  Phase 1's migration should therefore be
+`lan_ip` -> `local-ip`, not `lan_ip` -> `ip[N]`; `load_contacts` already
+reads `lan_ip` as one more `local-ip` entry.  The /24 same-LAN check this
+needs is the kind of subnet guessing this issue wanted gone -- accepted,
+because it errs toward not trying.

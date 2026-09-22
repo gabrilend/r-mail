@@ -1,4 +1,7 @@
 /*
+ * SPDX-License-Identifier: AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception
+ * Copyright (C) 2026 ritz.  See LICENSE.
+ *
  * rmail_kqueue.c — macOS/BSD outbox watcher for rmail
  *
  * ---------------------------------------------------------------------

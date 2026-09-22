@@ -1,5 +1,7 @@
 #!/usr/bin/env lua
 -- rmail - file-based messaging daemon
+-- SPDX-License-Identifier: AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception
+-- Copyright (C) 2026 ritz.  See LICENSE for the terms and the hook-script permission.
 
 -- ============================================================
 -- Configuration
@@ -56,7 +58,8 @@ do
     -- {{{ usage
     local function usage(problem)
         if problem then io.stderr:write("error: " .. problem .. "\n") end
-        io.stderr:write("usage: rmail.lua <config-file>\n")
+        io.stderr:write("usage: rmail.lua <config-file> [--once[=SECONDS]]\n")
+        io.stderr:write("  --once  announce, sync, stay reachable SECONDS (default 60), exit\n")
         io.stderr:write("  e.g. lua rmail.lua ~/mail/config\n")
         io.stderr:write("  the mailbox served is the directory that file sits in\n")
         os.exit(1)
@@ -130,16 +133,19 @@ end
 
 -- Consolidated config flags
 local cfg = {
+    -- --once[=SECONDS]: a single visit rather than a running mailbox.  The
+    -- usual startup announcement goes out, a sync runs, and the daemon
+    -- stays reachable for SECONDS so contacts it just woke can deliver,
+    -- then exits.  What a portable drive's sync-with-contacts.sh runs.
+    once_window       = (function()
+        for i = 2, #(arg or {}) do
+            local v = tostring(arg[i]):match("^%-%-once=?(%d*)$")
+            if v then return tonumber(v) or 60 end
+        end
+    end)(),
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
     allow_peer_addr   = config.allow_peer_address_requests ~= false,
     libs              = config.libs,
-    -- Off unless the config asks for it.  Every mailbox can move now
-    -- that a mailbox carries its own config, hooks and program, and a
-    -- mailbox that moves would otherwise announce its new address to
-    -- every contact the moment it arrived somewhere.  The portable
-    -- drive had this turned off as a special case for exactly that
-    -- reason; making it the default retires the special case.  See #382.
-    notify_ip_change  = config.notify_ip_change == true,
     auto_port_forward = config.auto_port_forward == true,
     -- Where to mirror the log.  stderr always goes to whoever started the
     -- daemon -- journald under systemd, a terminal when run by hand -- and
@@ -594,6 +600,35 @@ local function is_private_ipv4(addr)
     return false
 end
 
+-- #388 address helpers live in one table: the main chunk is at Lua's
+-- 200-local ceiling.  Declared here so load_contacts can classify; the
+-- address-set functions are added further down.
+local addrset = {}
+
+-- IPv6 counterpart: ULA (fc00::/7), link-local (fe80::/10) and loopback.
+-- Everything else in IPv6 is globally routable, which is the point of it.
+function addrset.private_v6(addr)
+    if not addr or not addr:find(":") then return false end
+    local a = addr:lower():gsub("%%.*$", "")   -- drop a zone id (fe80::1%wlo1)
+    if a == "::1" then return true end
+    local first = tonumber(a:match("^(%x%x?%x?%x?):") or "", 16)
+    if not first then return false end
+    if first >= 0xfc00 and first <= 0xfdff then return true end   -- ULA
+    if first >= 0xfe80 and first <= 0xfebf then return true end   -- link-local
+    return false
+end
+
+-- Do two private IPv4 addresses plausibly share a LAN?  /24 is an
+-- assumption, the same one LAN discovery already makes, and it errs toward
+-- "no": a false negative only skips the fast path, whereas a false positive
+-- would have us connect to a stranger's device on a foreign network that
+-- happens to use the same private range.
+function addrset.same_lan(a, b)
+    if not a or not b then return false end
+    local na = a:match("^(%d+%.%d+%.%d+)%.%d+$")
+    return na ~= nil and na == b:match("^(%d+%.%d+%.%d+)%.%d+$")
+end
+
 local function is_hostname(addr)
     return addr ~= nil and addr ~= "" and not is_ipv4(addr) and not is_ipv6(addr)
 end
@@ -1011,7 +1046,14 @@ local function load_contacts()
                     elseif field == "port" then
                         if not c._indexed_ports then c._indexed_ports = {} end
                         c._indexed_ports[idx] = value
+                    elseif field == "local-ip" then
+                        if not c._local_ips then c._local_ips = {} end
+                        c._local_ips[idx] = value
                     end
+                elseif field == "local-ip" then
+                    -- Unindexed sorts first, as with ip.
+                    if not c._local_ips then c._local_ips = {} end
+                    c._local_ips[0] = value
                 elseif field == "ip" then
                     if not c.ip then
                         c.ip = value
@@ -1058,6 +1100,38 @@ local function load_contacts()
                 end
             end
         end
+    end
+    -- #388: local-ip / local-ip[N] are the contact's private addresses,
+    -- kept apart from `ip` because they are only reachable from inside
+    -- their network.  A public address here is a mistake we refuse rather
+    -- than act on: it would be tried as "same LAN" from anywhere.  The
+    -- older single `lan_ip` field folds in as one more entry.
+    for cname, c in pairs(contacts) do
+        local raw = c._local_ips or {}
+        local idxs = {}
+        for n in pairs(raw) do idxs[#idxs + 1] = n end
+        table.sort(idxs)
+        local list, seen = {}, {}
+        local function add(v)
+            if not v or v == "" or seen[v] then return end
+            if addrset.private_v6(v) then
+                -- same_lan() cannot yet judge an IPv6 prefix, so it would
+                -- never be tried; say so rather than hold it silently.
+                log("warning: %s.local-ip = %s: IPv6 local addresses are not supported yet — ignored",
+                    cname, v)
+                return
+            elseif not is_private_ipv4(v) then
+                log("warning: %s.local-ip = %s is not a private address — ignored (use %s.ip)",
+                    cname, v, cname)
+                return
+            end
+            seen[v] = true
+            list[#list + 1] = v
+        end
+        for _, n in ipairs(idxs) do add(raw[n]) end
+        add(c.lan_ip)
+        c.local_ips = list
+        c._local_ips = nil
     end
     -- Build endpoints for each contact.
     --
@@ -1148,17 +1222,42 @@ end
 -- a contact, in preferred order.  Default (unindexed) endpoint comes
 -- first and is immune to promotion; indexed endpoints follow and are
 -- subject to auto-reordering on fallback success.
+--
+-- #388: a contact's local-ip entries go in front, but only those that share
+-- our own LAN.  Private ranges are reused on every network in the world, so
+-- trying 192.168.1.5 from a café would reach whatever the café put there.
+-- They carry no index, so a win on one never promotes or rewrites `ip`.
 local function contact_endpoints(contact)
+    local base
     if type(contact.endpoints) == "table" and #contact.endpoints > 0 then
-        return contact.endpoints
+        base = contact.endpoints
+    else
+        -- Fallback for call paths that built a contact ad-hoc without going
+        -- through load_contacts (mostly tests and legacy migration code).
+        base = {}
+        local default_port = tonumber(contact.port)
+        local hosts = contact_hosts(contact)
+        for i, h in ipairs(hosts) do
+            base[i] = { addr = h, port = default_port, is_default = (i == 1) }
+        end
     end
-    -- Fallback for call paths that built a contact ad-hoc without going
-    -- through load_contacts (mostly tests and legacy migration code).
-    local out = {}
-    local default_port = tonumber(contact.port)
-    local hosts = contact_hosts(contact)
-    for i, h in ipairs(hosts) do
-        out[i] = { addr = h, port = default_port, is_default = (i == 1) }
+    if not contact.local_ips or #contact.local_ips == 0 then return base end
+
+    local mine = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
+    -- The per-contact gate (#377) identifies a request by the first
+    -- endpoint's contact_name, so ours must carry it too.
+    local cname = base[1] and base[1].contact_name
+    local out, seen = {}, {}
+    for _, v in ipairs(contact.local_ips) do
+        if addrset.same_lan(v, mine) and not seen[v] then
+            seen[v] = true
+            out[#out + 1] = { addr = v, port = tonumber(contact.port),
+                              is_local = true, contact_name = cname }
+        end
+    end
+    if #out == 0 then return base end
+    for _, ep in ipairs(base) do
+        if not seen[ep.addr] then out[#out + 1] = ep end
     end
     return out
 end
@@ -1372,25 +1471,75 @@ end
 -- discover.  So send all of them and let #347's existing fallback and
 -- promotion machinery converge on whichever works.
 --
--- Consolidated into a table; the main chunk is near Lua's 200-local ceiling.
-local addrset = {}
+-- `addrset` itself is declared up with is_private_ipv4.
 
--- Every address this daemon believes reaches it, best-guess order first.
+-- Every address this daemon believes reaches it, best-guess order first,
+-- split into two lists: `public` (hostname, public IPv4, global IPv6) and
+-- `local` (private IPv4).  Classified by the address itself rather than by
+-- which state file it came from -- a "public_ip" that is really CGNAT is
+-- not reachable from the internet and must not be announced as if it were.
+-- Private IPv6 (ULA, link-local) goes in neither: see load_contacts.
 function addrset.mine(port)
-    local out, seen = {}, {}
-    local function add(addr, kind)
+    local pub, loc, seen = {}, {}, {}
+    local function add(addr)
         if not addr or addr == "" or seen[addr] then return end
         seen[addr] = true
-        out[#out + 1] = {addr = addr, port = port, kind = kind}
+        if is_hostname(addr) then
+            pub[#pub + 1] = {addr = addr, port = port, kind = "hostname"}
+        elseif is_private_ipv4(addr) then
+            loc[#loc + 1] = {addr = addr, port = port, kind = "private"}
+        elseif not addrset.private_v6(addr) then
+            pub[#pub + 1] = {addr = addr, port = port, kind = "public"}
+        end
     end
     -- A configured hostname goes first: it is the only address that stays
     -- correct across our own IP churn, which is the whole point of having
     -- one.
-    add(config.hostname and tostring(config.hostname):gsub('^"(.*)"$', '%1'), "hostname")
-    add((read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$"), "public")
-    add((read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$"), "private")
-    add((read_file(STATE .. "/public_ipv6") or ""):match("^%s*(.-)%s*$"), "ipv6")
-    return out
+    add(config.hostname and (tostring(config.hostname):gsub('^"(.*)"$', '%1')))
+    add((read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$"))
+    add((read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$"))
+    add((read_file(STATE .. "/public_ipv6") or ""):match("^%s*(.-)%s*$"))
+    return pub, loc
+end
+
+-- Is this contact on our LAN?  Decides whether an announcement to them
+-- carries our local addresses.  Evidence is any private address we hold
+-- for them that shares our /24; a contact we only know by a public address
+-- or hostname is treated as remote, and a remote contact has no use for
+-- our 192.168.x.x -- worse, on their own network it names someone else.
+function addrset.contact_on_lan(contact)
+    local mine = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
+    if mine == "" then return false end
+    for _, v in ipairs(contact.local_ips or {}) do
+        if addrset.same_lan(v, mine) then return true end
+    end
+    for _, ep in ipairs(contact.endpoints or {}) do
+        if addrset.same_lan(ep.addr, mine) then return true end
+    end
+    return false
+end
+
+-- Rewrite a contact's local-ip lines to exactly `addrs` (a list of
+-- strings).  Placed after the contact's last remaining line so the block
+-- stays contiguous for align_contacts.
+function addrset.write_local(name, addrs)
+    local text = read_file(CONTACTS) or ""
+    local out, last = {}, nil
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local lname, lfield = line:match("^%s*([%w_%-]+)%.([%w_%-]+)%s*%[?%d*%]?%s*=")
+        if not (lname == name and (lfield == "local-ip" or lfield == "lan_ip")) then
+            out[#out + 1] = line
+            if lname == name then last = #out end
+        end
+    end
+    local new = {}
+    for i, v in ipairs(addrs) do
+        new[#new + 1] = name .. (i == 1 and ".local-ip = " or (".local-ip[" .. (i - 1) .. "] = ")) .. v
+    end
+    local at = (last or #out) + 1
+    for j = #new, 1, -1 do table.insert(out, at, new[j]) end
+    while #out > 0 and out[#out]:match("^%s*$") do out[#out] = nil end
+    write_file(CONTACTS, table.concat(out, "\n") .. "\n")
 end
 
 -- Is this an address we are entitled to overwrite on someone else's behalf?
@@ -2322,17 +2471,54 @@ local function handle_update_address(data, sender)
     -- about where it is, so take the set rather than a single field.  The
     -- old "leave a multi-IP contact entirely alone" rule existed because one
     -- address could not say which of N was superseded; a full set can.
-    if type(data.ips) == "table" and #data.ips > 0 then
-        local announced = {}
-        for _, a in ipairs(data.ips) do
-            -- Accept both the plain-string and {addr,port} forms so an older
-            -- peer's shape cannot crash a newer one.
-            if type(a) == "string" then
-                announced[#announced + 1] = {addr = a, port = new_port}
-            elseif type(a) == "table" and a.addr then
-                announced[#announced + 1] = {addr = a.addr, port = a.port or new_port}
+    --
+    -- Private addresses are split out into `local-ip` (#388 follow-up).  A
+    -- private address is kept only if it shares our /24: anywhere else it
+    -- names some other device on our own network, not the sender.  Peers
+    -- from #388 phase 1 put their LAN address in `ips`; the same rule sorts
+    -- it into the right place.
+    local my_lan = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
+    local announced, announced_local, local_seen = {}, {}, {}
+    local function take(addr, port)
+        if type(addr) ~= "string" or addr == "" then return end
+        if is_private_ipv4(addr) then
+            if addrset.same_lan(addr, my_lan) and not local_seen[addr] then
+                local_seen[addr] = true
+                announced_local[#announced_local + 1] = addr
             end
+        elseif not addrset.private_v6(addr) then
+            announced[#announced + 1] = {addr = addr, port = port}
         end
+    end
+    -- Accept both the plain-string and {addr,port} forms so an older
+    -- peer's shape cannot crash a newer one.
+    for _, a in ipairs(type(data.ips) == "table" and data.ips or {}) do
+        if type(a) == "table" then take(a.addr, a.port or new_port)
+        else take(a, new_port) end
+    end
+    for _, a in ipairs(type(data.local_ips) == "table" and data.local_ips or {}) do
+        if type(a) == "table" then take(a.addr) else take(a) end
+    end
+
+    -- Local set: ours to replace wholesale -- the sender is the authority
+    -- on its own LAN address, and these lines hold nothing else.  Absent
+    -- means "not told" (a remote peer is never sent them), not "none".
+    local local_changed = false
+    if #announced_local > 0 then
+        local before, after = {}, {}
+        for _, v in ipairs(contacts[sender].local_ips or {}) do before[#before + 1] = v end
+        for _, v in ipairs(announced_local) do after[#after + 1] = v end
+        table.sort(before); table.sort(after)
+        local_changed = table.concat(before, ",") ~= table.concat(after, ",")
+        if local_changed then
+            addrset.write_local(sender, announced_local)
+            log("local addresses from %s: %s", sender, table.concat(announced_local, ", "))
+        end
+        applied_set = true
+        announced_changed = local_changed
+    end
+
+    if #announced > 0 then
 
         -- Read the existing addresses from `endpoints`, which is the built,
         -- ordered list load_contacts leaves behind -- it nils out
@@ -2349,6 +2535,12 @@ local function handle_update_address(data, sender)
         end
 
         local merged = addrset.merge(contacts[sender].ip, indexed, announced)
+        -- An address that now lives in local-ip does not also belong in
+        -- the indexed ip list (where phase 1 put it).  The pinned default
+        -- stays: someone typed it there.
+        for i = #merged, 2, -1 do
+            if local_seen[merged[i].addr] then table.remove(merged, i) end
+        end
 
         -- Did anything actually move?  An announcement that tells us what we
         -- already knew is not news, and must not produce a notice.
@@ -2389,13 +2581,13 @@ local function handle_update_address(data, sender)
             -- Any cached lookup for a name we kept is now suspect.
             dns_cache[contacts[sender].ip] = nil
             applied_set = true
-            announced_changed = set_changed
+            announced_changed = true
         elseif #merged > 0 then
             -- Nothing moved: no write, no notice, and crucially still
             -- "handled", so the single-address fallback below does not
             -- rewrite the file we just decided to leave alone.
             applied_set = true
-            announced_changed = false
+            announced_changed = local_changed
         end
     end
 
@@ -2427,17 +2619,17 @@ local function handle_update_address(data, sender)
         end
     end
 
-    -- drop a notification in inbox if the sender requested it.
-    -- Hostname contacts don't need a notification — DNS re-resolution handles
-    -- IP churn invisibly, which is exactly why the user chose a hostname.
-    if data.notify ~= false and not preserve_hostname and announced_changed then
-        -- #388: machine-written notices are dotfiles, so `ls` shows a
-        -- mailbox of mail rather than a mailbox of bookkeeping.  They still
-        -- sync -- hidden is not the same as absent.
-        local filename = ".address-update-" .. sender
-        local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
-            ".\nYour contacts file has been updated automatically."
-        write_file(INBOX .. "/" .. filename, body)
+    -- The change is already applied; nobody needs to act on it.  What
+    -- remains is a claim we have not tested -- that we can reach them at
+    -- the new address -- so leave a marker that sync_address_notifications
+    -- turns into test traffic and run_sync_cycle removes on the first
+    -- successful send.  A dotfile, because it is bookkeeping rather than
+    -- mail: it is not listed, not synced to the phone, and not something
+    -- the user should ever have to delete.
+    if announced_changed then
+        write_file(INBOX .. "/.address-update-" .. sender,
+            sender .. " moved to " .. new_ip .. ":" .. tostring(new_port) ..
+            "; contacts updated automatically.  Removed once we reach them there.\n")
     end
     return 200, {ok = true}
 end
@@ -3320,6 +3512,15 @@ local function handle_attachment_request(data, sender)
         status      = "pending",
     }
     save_state("consent-pending.json", pending)
+    -- The phone's inbox is built from inbox.json alone, so a form missing
+    -- from it never reaches the phone.  `consent` marks it as a form rather
+    -- than mail: deleting it declines rather than notifying the sender of
+    -- a deleted message, and it leaves inbox.json with the form itself.
+    local inbox_state = load_state("inbox.json")
+    inbox_state[consent_file] = {
+        ["from"] = sender, message_id = "consent-" .. att_id, consent = att_id,
+    }
+    save_state("inbox.json", inbox_state)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
     return 200, {ok = true}
 end
@@ -3351,13 +3552,35 @@ end
 -- (#328).  os.remove on the symlink leaves that tmpfs target orphaned,
 -- so clear both.
 local function remove_consent_form(inbox_file, att_id)
-    if inbox_file then os.remove(INBOX .. "/" .. inbox_file) end
+    if inbox_file then
+        os.remove(INBOX .. "/" .. inbox_file)
+        -- ...and from inbox.json, so the phone drops its copy next sync.
+        local inbox_state = load_state("inbox.json")
+        if inbox_state[inbox_file] and inbox_state[inbox_file].consent then
+            inbox_state[inbox_file] = nil
+            save_state("inbox.json", inbox_state)
+        end
+    end
     if att_id then os.remove(progress_tmpfs_path("consent-" .. att_id)) end
 end
 
 local function check_consent_pending()
     local pending = load_state("consent-pending.json")
     if not next(pending) then return false end
+    -- Forms written before they were recorded in inbox.json never reached
+    -- the phone.  Record any that are still waiting on an answer.
+    local inbox_state, backfilled = load_state("inbox.json"), false
+    for att_id, entry in pairs(pending) do
+        if entry.status == "pending" and entry.inbox_file
+           and not inbox_state[entry.inbox_file]
+           and file_exists(INBOX .. "/" .. entry.inbox_file) then
+            inbox_state[entry.inbox_file] = {
+                ["from"] = entry["from"], message_id = "consent-" .. att_id, consent = att_id,
+            }
+            backfilled = true
+        end
+    end
+    if backfilled then save_state("inbox.json", inbox_state) end
     local responses = load_state("consent-responses.json")
     if type(responses) ~= "table" then responses = {} end
     -- ensure array form (dkjson may decode [] as {})
@@ -3410,8 +3633,21 @@ local function send_consent_responses(my_name)
     if type(responses) ~= "table" or not responses[1] then return false end
     local contacts = load_contacts()
     local requests, valid = {}, {}
+    local unmatched = {}
     for _, resp in ipairs(responses) do
+        -- Entries written during #348 name the contact by its hash.
+        -- Resolve those; one that matches no contact is dropped with a
+        -- log line rather than kept forever without a word.
+        if resp.to and not contacts[resp.to] then
+            local resolved = next(unmigrate_hashed_keys({[resp.to] = true}, contacts))
+            if resolved then resp.to = resolved end
+        end
         local c = contacts[resp.to]
+        if not c then
+            log("consent response for %s is addressed to unknown contact '%s' -- dropped",
+                tostring(resp.attachment_id), tostring(resp.to))
+            unmatched[resp] = true
+        end
         if c and c.ip then
             valid[#valid + 1] = resp
             requests[#requests + 1] = {
@@ -3427,9 +3663,26 @@ local function send_consent_responses(my_name)
             }
         end
     end
-    if #requests == 0 then return false end
+    if #requests == 0 then
+        if next(unmatched) then
+            local kept = {}
+            for _, resp in ipairs(responses) do
+                if not unmatched[resp] then kept[#kept + 1] = resp end
+            end
+            save_state("consent-responses.json", kept)
+            return true
+        end
+        return false
+    end
     local results = http_post_batch_with_fallback(requests)
     local remaining = {}
+    -- Responses that never became a request (known contact, no address)
+    -- wait for one; unmatched ones are gone.
+    for _, resp in ipairs(responses) do
+        local sent = false
+        for _, v in ipairs(valid) do if v == resp then sent = true; break end end
+        if not sent and not unmatched[resp] then remaining[#remaining + 1] = resp end
+    end
     local pending = load_state("consent-pending.json")
     for i, resp in ipairs(valid) do
         note_contact_result(resp.to, results[i].ok)
@@ -3454,6 +3707,17 @@ local function send_consent_responses(my_name)
                     remove_consent_form(entry.inbox_file, resp.attachment_id)
                     pending[resp.attachment_id] = nil
                 end
+            end
+        elseif results[i].status then
+            -- They answered and refused -- almost always because the
+            -- transfer no longer exists on their side.  Asking again will
+            -- not change that; retire the response and its form.
+            log("consent response for %s refused by %s (%s) -- transfer gone, clearing its form",
+                tostring(resp.attachment_id), resp.to, tostring(results[i].status))
+            local entry = pending[resp.attachment_id]
+            if entry then
+                remove_consent_form(entry.inbox_file, resp.attachment_id)
+                pending[resp.attachment_id] = nil
             end
         else
             remaining[#remaining + 1] = resp
@@ -3724,7 +3988,10 @@ local function handle_attachment_response(data, sender)
     if not att_id then return 400, {error = "missing attachment_id"} end
     local chunks = load_state("chunks-outgoing.json")
     local transfer = chunks[att_id]
-    if not transfer then return 200, {ok = true} end
+    -- Say so when the transfer is gone.  Answering "ok" left an accepting
+    -- recipient showing "being transferred" forever, waiting on chunks
+    -- nobody would send; a 404 lets it clear the form instead.
+    if not transfer then return 404, {error = "no such attachment transfer"} end
     if consent then
         transfer.status = "sending"
         local m = {}
@@ -4047,6 +4314,24 @@ local function self_delete_from_outbox(my_name, message_id)
 end
 
 local function sync_outbox(my_name)
+    -- Undo mark_missing_attachment once the file exists.  Otherwise the
+    -- marker outlives the problem and still says "file not found" beside an
+    -- attachment that has since been sent.
+    local function clear_missing_marker(outbox_path, filepath)
+        local text = read_file(outbox_path)
+        if not text then return end
+        local marker = "// MISSING ATTACHMENT: " .. filepath
+        local s, e = text:find(marker, 1, true)
+        if not s then return end
+        local line_start = s
+        while line_start > 1 and text:sub(line_start - 1, line_start - 1) ~= "\n" do
+            line_start = line_start - 1
+        end
+        local line_end = text:find("\n", e, true) or #text
+        write_file(outbox_path, text:sub(1, line_start - 1) .. text:sub(line_end + 1))
+        log("attach: found %s, cleared its missing-attachment marker", filepath)
+    end
+
     local contacts = load_contacts()
     local state = load_state("outbox.json")
     local att_state = load_state("chunks-outgoing.json")
@@ -4212,13 +4497,37 @@ local function sync_outbox(my_name)
                             log("self-delivered: %s -> %s", name, inbox_name)
                             did_work = true
                         elseif contacts[rname] then
-                            ops[#ops + 1] = {
-                                type = "deliver", filename = name,
-                                recipient = rname, message_id = uuid(),
-                                subject = name, body = body,
-                                mtime = file_mtime(OUTBOX .. "/" .. name),
-                                contact = contacts[rname],
-                            }
+                            -- Hold the body until every attachment exists.
+                            -- Sent early, the recipient gets text that
+                            -- promises a file which may never follow --
+                            -- and when the attachment is still uploading
+                            -- from the phone, it will not have arrived
+                            -- yet.  A missing path is marked in the file,
+                            -- so whoever wrote it can see why it waits;
+                            -- the marker clears when the file appears.
+                            local waiting = false
+                            for _, fp in ipairs(entry.attachments or {}) do
+                                if not file_exists(fp) then
+                                    waiting = true
+                                    mark_missing_attachment(OUTBOX .. "/" .. name, fp, name)
+                                else
+                                    clear_missing_marker(OUTBOX .. "/" .. name, fp)
+                                end
+                            end
+                            if waiting then
+                                -- Not finished with: the cleanup pass below
+                                -- must not mistake "nobody delivered yet"
+                                -- for "everybody delivered".
+                                outbox_files_with_unresolved_recipients[name] = true
+                            else
+                                ops[#ops + 1] = {
+                                    type = "deliver", filename = name,
+                                    recipient = rname, message_id = uuid(),
+                                    subject = name, body = body,
+                                    mtime = file_mtime(OUTBOX .. "/" .. name),
+                                    contact = contacts[rname],
+                                }
+                            end
                         else
                             log("unknown contact '%s' in %s", rname, name)
                             -- Mark unknown contact in the outbox file so user can see and fix it
@@ -4233,11 +4542,26 @@ local function sync_outbox(my_name)
                         if not rmeta.error then
                             for _, filepath in ipairs(entry.attachments) do
                                 local in_progress = false
-                                for _, transfer in pairs(att_state) do
+                                for tid, transfer in pairs(att_state) do
                                     if transfer.to == rname and
                                        transfer.outbox_file == name and
                                        transfer.original_path == filepath then
-                                        in_progress = true; break
+                                        in_progress = true
+                                        -- The request never got through
+                                        -- (not due yet, or unreachable):
+                                        -- ask again with the zip we have.
+                                        if transfer.request_sent == false then
+                                            ops[#ops + 1] = {
+                                                type = "attachment_request",
+                                                att_id = tid, filename = name,
+                                                recipient = rname,
+                                                contact = contacts[rname],
+                                                att_filename = transfer.filename,
+                                                expected_size = transfer.expected_size,
+                                                message_id = transfer.message_id,
+                                            }
+                                        end
+                                        break
                                     end
                                 end
                                 if not in_progress and not file_exists(filepath) then
@@ -4279,6 +4603,7 @@ local function sync_outbox(my_name)
                                             expected_size = expected_size,
                                             message_id = rmeta.message_id,
                                             status = "awaiting_consent",
+                                            request_sent = false,
                                         }
                                         att_state_changed = true
                                         ops[#ops + 1] = {
@@ -4606,19 +4931,31 @@ local function sync_outbox(my_name)
                 end
                 -- other failures: roll into the unreachable summary (#324)
             elseif op.type == "attachment_request" then
+                local transfer = att_state[op.att_id]
                 if results[i].ok then
                     log("sent attachment request to %s: %s", op.recipient, op.att_filename)
+                    if transfer then transfer.request_sent = true; att_state_changed = true end
                     did_work = true
-                else
-                    -- remove this recipient's entry; release shared zip if no other recipients need it
-                    local transfer = att_state[op.att_id]
+                elseif results[i].status then
+                    -- They answered and refused (4xx/5xx): retrying the
+                    -- same request will not change that.  Drop it and
+                    -- release the shared zip if nobody else needs it.
                     if transfer then
                         att_state[op.att_id] = nil
                         release_zip(att_state, transfer.compressed_path)
                         att_state_changed = true
                     end
-                    -- the release-and-cleanup is the action; reachability
-                    -- detail rolls into the unreachable summary (#324)
+                    log("attachment request to %s refused (%s): %s",
+                        op.recipient, tostring(results[i].status), op.att_filename)
+                elseif transfer and transfer.request_sent ~= false then
+                    -- Not due yet (#377) or unreachable: keep the transfer
+                    -- and its zip and ask again next time.  This used to
+                    -- delete both, so every cycle re-zipped the whole file
+                    -- on the main loop -- every 30s for an unreachable
+                    -- contact, and since #377 for every contact merely
+                    -- waiting on its timer.
+                    transfer.request_sent = false
+                    att_state_changed = true
                 end
             elseif op.type == "notify_deletion" then
                 if results[i].ok or results[i].status == 404 then
@@ -4687,7 +5024,15 @@ local function sync_inbox(my_name)
     -- collect deletion notifications (newly missing files + pending retries)
     local ops = {}
     for name, meta in pairs(state) do
-        if not current[name] then
+        if meta.consent then
+            -- A consent form, not mail.  Deleting one declines the
+            -- attachment, which check_consent_pending handles; there is
+            -- no message on the sender's side to notify about.
+            if not current[name] and path_state(INBOX .. "/" .. name) == "absent" then
+                state[name] = nil
+                did_work = true
+            end
+        elseif not current[name] then
             if not meta.pending_delete then
                 -- first time: fire on_delete and mark pending.  #355:
                 -- we don't touch paths.attachments — the user owns
@@ -5064,6 +5409,11 @@ local function sync_address_notifications(my_name)
 
     local requests = {}
     for i, op in ipairs(ops) do
+        -- Local addresses only go to a contact on our LAN; to anyone else
+        -- they are unusable at best, and at worst name a device on the
+        -- recipient's own network.
+        local pub, loc = addrset.mine(op.port)
+        if not addrset.contact_on_lan(op.contact) then loc = nil end
         requests[i] = {
             endpoints = contact_endpoints(op.contact),
             path = "/update-address",
@@ -5072,8 +5422,8 @@ local function sync_address_notifications(my_name)
             -- address change goes out with where we are, not where we were.
             -- ip/port stay for peers that predate #388.
             payload = json.encode({
-                ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
-                ips = addrset.mine(op.port),
+                ip = op.ip, port = op.port,
+                ips = pub, local_ips = loc,
             }),
             psk_key = op.contact.token,
         }
@@ -5126,14 +5476,37 @@ local function serialize_contacts_canonical()
         -- helpers: tostring() on a table yields a non-deterministic
         -- "table: 0x..." that corrupts the contacts file on round-trip and
         -- makes the hash unstable across daemon reloads.
+        local vals = {}
         for field in pairs(c) do
             if type(c[field]) ~= "table" and field:sub(1, 1) ~= "_" then
                 fields[#fields+1] = field
+                vals[field] = c[field]
             end
+        end
+        -- Indexed addresses (#347) and local addresses (#388) live in
+        -- tables after load, so the scalar pass above misses them.  They
+        -- must be here anyway: this text is what the phone holds, and when
+        -- the phone edits a contact it posts this text back as the whole
+        -- file -- anything left out is deleted on the server.
+        for _, ep in ipairs(c.endpoints or {}) do
+            -- (addr ~= c.ip: with no default line, load promotes ip[1]
+            -- into c.ip, which the scalar pass has already written.)
+            if not ep.is_default and ep.index and ep.addr ~= c.ip then
+                local k = "ip[" .. ep.index .. "]"
+                fields[#fields+1] = k; vals[k] = ep.addr
+                if ep.port and tostring(ep.port) ~= tostring(c.port) then
+                    k = "port[" .. ep.index .. "]"
+                    fields[#fields+1] = k; vals[k] = ep.port
+                end
+            end
+        end
+        for i, v in ipairs(c.local_ips or {}) do
+            local k = i == 1 and "local-ip" or ("local-ip[" .. (i - 1) .. "]")
+            fields[#fields+1] = k; vals[k] = v
         end
         table.sort(fields)
         for _, field in ipairs(fields) do
-            local v = tostring(c[field])
+            local v = tostring(vals[field])
             if not v:match("^%d+$") then v = '"' .. v .. '"' end
             lines[#lines+1] = name .. "." .. field .. " = " .. v
         end
@@ -5179,7 +5552,14 @@ local function handle_api_sync(data, caller_name, my_name)
     local inbox_state = load_state("inbox.json")
     for _, del in ipairs(deleted_inbox) do
         for filename, meta in pairs(inbox_state) do
-            if meta.message_id == del.message_id and not meta.pending_delete then
+            if meta.message_id == del.message_id and meta.consent then
+                -- Deleting a consent form on the phone declines it, exactly
+                -- as deleting it here does.
+                os.remove(INBOX .. "/" .. filename)
+                inbox_state[filename] = nil
+                log("phone deleted consent form: %s (declines)", filename)
+                break
+            elseif meta.message_id == del.message_id and not meta.pending_delete then
                 if file_exists(INBOX .. "/" .. filename) then
                     os.remove(INBOX .. "/" .. filename)
                 end
@@ -5575,7 +5955,7 @@ local function do_resolve_lan_host(lan_peers, host, target_port)
     local contacts = load_contacts()
     for name, c in pairs(contacts) do
         if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) then
-            local lan_ip = c.lan_ip or lan_peers[name]
+            local lan_ip = (c.local_ips and c.local_ips[1]) or lan_peers[name]
             if lan_ip then
                 log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
                 return lan_ip
@@ -5830,6 +6210,35 @@ local function handle_request(rt, client)
                 local s, ct, c = handle_api_get_contacts(); send_raw_response(resp, s, ct, c)
             elseif method == "POST" and path == "/api/contacts" then
                 local s, r = handle_api_post_contacts(body); send_response(resp, s, r)
+            elseif method == "POST" and path == "/api/consent" then
+                -- The phone's Accept/Deny: edit the form in *our* inbox the
+                -- way a person at this machine would, by deleting the line
+                -- they did not choose.  The phone's own copy is read-only
+                -- as far as sync goes.
+                local data = json.decode(body or "{}") or {}
+                local answer = data.answer
+                local entry
+                for _, e in pairs(load_state("consent-pending.json")) do
+                    if e.inbox_file == data.filename and e.status == "pending" then entry = e end
+                end
+                local text = entry and read_file(INBOX .. "/" .. entry.inbox_file)
+                if answer ~= "accept" and answer ~= "deny" then
+                    send_response(resp, 400, {error = "answer must be accept or deny"})
+                elseif not text then
+                    send_response(resp, 404, {error = "no pending consent form by that name"})
+                else
+                    local drop = answer == "accept" and "deny" or "accept"
+                    local out = {}
+                    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+                        if line:match("^%s*(.-)%s*$") ~= drop then out[#out + 1] = line end
+                    end
+                    write_file(INBOX .. "/" .. entry.inbox_file, table.concat(out, "\n"))
+                    -- Make the sender due now, so the answer goes out on the
+                    -- next pass instead of whenever their timer comes up.
+                    ctimer.get(entry["from"]).next_due = 0
+                    log("phone answered consent form %s: %s", entry.inbox_file, answer)
+                    send_response(resp, 200, {ok = true})
+                end
             elseif method == "POST" and path == "/api/sync" then
                 local data = json.decode(body or "{}") or {}
                 local s, r = handle_api_sync(data, contact_name, rt.my_name); send_response(resp, s, r)
@@ -6372,6 +6781,11 @@ local function main()
     -- wait_type is "read" or "write", wait_sock is the raw socket to select on
     local clients = {}
 
+    -- Leaving on our own: a --once visit whose window has closed, or a
+    -- mailbox that is no longer there because its drive was pulled.
+    -- Checked every few seconds, so the select below never sleeps longer.
+    local stop = {started = socket.gettime(), next_check = 0, misses = 0, every = 3}
+
     rt.server:settimeout(0)  -- non-blocking accept
 
     local function resume_client(raw_sock)
@@ -6425,6 +6839,7 @@ local function main()
         if rt.next_addr_check then
             sleep_for = math.min(sleep_for, math.max(0, rt.next_addr_check - now_s))
         end
+        sleep_for = math.min(sleep_for, stop.every)
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
@@ -6492,6 +6907,28 @@ local function main()
 
         -- Sync cycle: runs on outbox/contacts change OR when the interval expires
         local now = socket.gettime()
+        if now >= stop.next_check then
+            stop.next_check = now + stop.every
+            -- The mailbox vanished: a USB drive pulled out, or unmounted
+            -- under us.  Two misses in a row, so an editor briefly
+            -- renaming a file cannot trip it.  Nothing is flushed on the
+            -- way out because there is nowhere left to write it.
+            local h = io.open(STATE .. "/.", "r")
+            if h then h:close(); stop.misses = 0
+            else stop.misses = stop.misses + 1 end
+            if stop.misses >= 2 then
+                io.stderr:write("rmail: mailbox " .. MAIL .. " is gone (drive unplugged?) -- stopping\n")
+                os.exit(0)
+            end
+            -- A --once visit ends when its window has passed and nobody is
+            -- mid-delivery -- or ten minutes after that regardless, so one
+            -- stuck connection cannot hold it open forever.
+            if cfg.once_window and now - stop.started >= cfg.once_window
+               and (next(clients) == nil or now - stop.started >= cfg.once_window + 600) then
+                log("--once: window of %ds closed, exiting", cfg.once_window)
+                os.exit(0)
+            end
+        end
         if contacts_changed then
             log("contacts file changed, re-aligning and syncing")
             align_contacts()

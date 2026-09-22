@@ -45,7 +45,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         // Save per-mailbox settings
                         if (activeConfig != null) {
                             vm.updateMailbox(activeConfig.copy(
-                                host = host.trim(),
+                                hosts = listOf(host.trim()) + activeConfig.hosts.drop(1),
                                 port = port.toIntOrNull() ?: 8025,
                                 token = token.trim(),
                                 bgSyncIntervalMinutes = bgSyncInterval.toIntOrNull() ?: 15,

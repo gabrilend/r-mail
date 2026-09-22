@@ -74,9 +74,6 @@ make_mailbox() {
     {
         printf 'name = %s\n' "$_name"
         printf 'port = %s\n' "$_port"
-        # A test daemon that phoned contacts about its IP would be reaching
-        # out to the network from a throwaway mailbox.  Off.
-        printf 'notify_ip_change = false\n'
         [ -n "$_extra" ] && printf '%s\n' "$_extra"
     } > "$_dir/config"
 }

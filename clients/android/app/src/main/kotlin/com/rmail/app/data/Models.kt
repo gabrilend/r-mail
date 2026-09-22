@@ -7,7 +7,10 @@ data class InboxEntry(val filename: String, val from: String)
 data class SyncState(
     val inbox: Map<String, InboxEntry>,   // messageId -> {filename, from}
     val outbox: Set<String>,              // known outbox filenames
-    val contactsHash: String?             // SHA-256 hex of last-synced contacts
+    val contactsHash: String?,            // SHA-256 hex of last-synced contacts
+    // SHA-256 of each outbox file as last sent to or received from the
+    // server, so an edit made on the phone afterwards is sent again.
+    val outboxHashes: Map<String, String> = emptyMap()
 )
 
 // A mail message loaded from disk
@@ -15,9 +18,9 @@ data class MailMessage(
     val filename: String,
     val content: String
 ) {
-    val isConsent: Boolean get() =
-        content.lines().any { it.trim().equals("accept", ignoreCase = true) ||
-                               it.trim().equals("deny", ignoreCase = true) }
+    // The daemon names every consent form this way.  Guessing from the
+    // content misread any message with a line reading "accept" or "deny".
+    val isConsent: Boolean get() = filename.endsWith("-consent-to-download-form")
 
     val previewLines: String get() = content.lines()
         .dropWhile { it.isBlank() }

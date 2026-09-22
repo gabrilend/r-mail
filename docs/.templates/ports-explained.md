@@ -72,18 +72,20 @@ traffic bypasses the router's NAT entirely and goes directly between devices —
 hairpin support needed, and no port forwarding rule required either.
 
 ```
-# Single contact with both addresses — daemon tries each in order:
+# Single contact with both addresses:
 alice.ip       = 203.0.113.1
 alice.port     = 8025
 alice.token    = "shared-secret"
-alice.ip[1]    = 192.168.1.10
-alice.port[1]  = 8025
+alice.local-ip = 192.168.1.10
 ```
 
-The unindexed `ip`/`port` is always tried first. If it fails, the daemon
-falls back to `ip[1]` (the LAN address). When a fallback succeeds, the
-indexed entries are automatically reordered so the working address is tried
-first next time.
+`local-ip` is tried first, but only while you are on the same /24 as it;
+away from home the daemon skips it and uses `ip`. A daemon on your LAN
+announces its local address to you automatically when its addresses change.
+
+`ip[N]` still works for a LAN address too (tried after the default rather
+than before it), and is what to use when the LAN port differs, because
+`local-ip` always uses the default `port`.
 
 If the LAN and WAN use different ports, set `port[N]` to override:
 

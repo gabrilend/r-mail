@@ -84,3 +84,7 @@ need entirely for anyone whose router can run it.
 ## Status
 
 Open, low priority. Design recorded; not scheduled.
+
+The "announce, hold a window open, stop" step now exists as
+`rmail.lua <config> --once[=SECONDS]` (added for portable drives in
+#388).  A wake-to-sync implementation can call it from a timer.

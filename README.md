@@ -175,13 +175,15 @@ A contact can have multiple addresses. The daemon tries each one in order until 
 alice.ip       = 203.0.113.1
 alice.port     = 8025
 alice.token    = "some-shared-secret"
-alice.ip[1]    = 192.168.1.10
-alice.port[1]  = 4858
-alice.ip[2]    = alice.duckdns.org
-alice.ip[3]    = 2001:db8::1
+alice.ip[1]    = alice.duckdns.org
+alice.ip[2]    = 2001:db8::1
+alice.port[2]  = 4858
+alice.local-ip = 192.168.1.10
 ```
 
 The unindexed `ip`/`port` is the default — always tried first. Indexed entries are tried after the default, in order. A missing `port[N]` inherits the default `port`. When a non-default address succeeds after the default fails, the daemon automatically reorders the indexed entries so the working address is tried first next time (the default is never reordered).
+
+`local-ip` (and `local-ip[N]`) holds a contact's private LAN addresses — 10.x, 172.16–31.x, 192.168.x. They are tried *before* everything else, but only when your own LAN address shares their /24; private ranges are reused on every network, so from anywhere else they would name some other device. A public address in `local-ip` is ignored with a warning. Local addresses use the contact's default `port`.
 
 ## Ports
 
@@ -189,7 +191,7 @@ Each person runs their daemon on a single port. Unless provided, the install scr
 
 The only thing your contacts need from you is your **router's public IP** and the **port number** you'd like your router to "route" the messages to. These two numbers are what goes in their contacts file.
 
-Local/LAN IP addresses are never shared with contacts, but you will need your local IP when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
+Local/LAN IP addresses are only shared with contacts on your own LAN (they arrive as `local-ip` in their contacts file), but you will need your local IP when setting up port forwarding on your router — the router needs to know which machine on the Local Area Network (LAN) to send traffic to. If multiple people are behind the same router, each person needs a unique port:
 
 | Person | Router forward config      | What contacts put in their file |
 |--------|----------------------------|---------------------------------|
@@ -377,3 +379,16 @@ If the port isn't open or forwarded, the connection will either time out (packet
 - [docs/.templates/protocol.md](docs/.templates/protocol.md) — wire protocol reference, sync timing
 - [docs/.templates/ports-explained.md](docs/.templates/ports-explained.md) — plain-language explanation of ports and port forwarding
 - [docs/.templates/nat-traversal-report.md](docs/.templates/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security
+
+## License
+
+GNU Affero General Public License, version 3 or (at your option) any later
+version — see [LICENSE](LICENSE).  If you run a modified r-mail that other
+people interact with over a network, section 13 requires you to offer them
+its source.
+
+One additional permission (under section 7): hook scripts are yours.
+r-mail launches them as separate processes, so a hook script may be
+distributed under any terms you like, including proprietary ones.  The
+permission covers the hook only, never r-mail itself; the exact wording is
+at the top of [LICENSE](LICENSE).

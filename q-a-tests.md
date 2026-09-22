@@ -293,9 +293,30 @@ RFC 5737 TEST-NET addresses and a live loopback peer pair:
 - [ ] A peer that predates #388 (sends `ip`/`port`, no `ips`) still works
       via the single-address fallback
 - [ ] IPv6 addresses round-trip through the set correctly
-- [ ] **Known gap:** `.address-update-*` notices do not sync to Android,
-      because `list_files` skips dotfiles. Needs the sync manifest to carry
-      dotfiles while the message list excludes them.
+- [x] `name.local-ip` / `local-ip[N]` parsed; a public value is ignored
+      with a warning
+- [x] Local addresses are tried first only when they share our /24; a
+      different-/24 local address is not tried at all
+- [x] Announcement carries local addresses only to a contact on our LAN
+- [x] Received private address from another /24 is dropped, not stored
+- [x] Received local set replaces the sender's `local-ip` lines; re-sending
+      the same set rewrites nothing and writes no notice
+- [x] Canonical contacts form carries `ip[N]`/`port[N]`/`local-ip` and
+      round-trips to an identical hash
+- [ ] Phone contact edit no longer deletes `ip[N]` / `local-ip` lines on
+      the server (end to end)
+- [ ] Android settings: add/remove server and local addresses; private
+      address in the server list refused on save; old single-host config
+      with a LAN host shows it under local addresses
+- [ ] Android at home connects via local address; on mobile data skips it
+      without delay (re-probed at the start of each sync cycle)
+- [ ] `.address-update-*` marker written on a real change even when the
+      sender sends `notify = false`, and removed after the next successful
+      send to that contact (no user action)
+- [ ] ~~`.address-update-*` notices do not sync to Android~~ — by design
+      now: the marker is bookkeeping, not a notification
+- [ ] Android: other calls between syncs reuse the address the last sync
+      picked; a failed sync forgets it
 
 ### Public IP recheck every 36h ±12h (#379) — implemented 2026-09-22
 
@@ -519,7 +540,7 @@ The installer and migration rows are not — they need a real run.
 - [ ] The installer no longer reads other mailboxes' configs for anything — verify with a second install while the first mailbox is unreadable (#382)
 - [ ] The port prompt warns when something is already listening on the chosen port, including a non-rmail program (#382)
 - [ ] With neither `ss` nor `netstat` installed, the port check says it could not run rather than passing silently (#382)
-- [ ] IP-change notices default to off in a newly generated config (#382)
+- [ ] ~~IP-change notices default to off in a newly generated config (#382)~~ — setting removed (#388): changes are always announced and applied
 - [ ] `migrate-mailbox-layout.sh --dry-run` reports every change and writes nothing (#382)
 - [ ] Migration is idempotent: a second run keeps existing hooks, removes nothing twice, and refreshes only the program files (#382)
 - [ ] Migration leaves inbox, outbox, contacts, attachments and `.state/` untouched — compare file counts before and after (#382)
@@ -533,7 +554,12 @@ The installer and migration rows are not — they need a real run.
 - [ ] The generator verifies before finishing that the copied Lua loads the copied libraries, and refuses if not (#382)
 - [ ] The generator warns when the bundled Lua links readline, naming `install.sh --force` as the fix (#382)
 - [ ] After a Lua rebuild, `ldd deps/lua/bin/lua` shows only libc and libm — no readline, no ncurses (#382)
-- [ ] A running drive daemon uses the drive's own interpreter — check with `pgrep -af rmail.lua` that the path is `<mailbox>/source-code/deps/lua/bin/lua`, not a system lua (#382)
+- [ ] A running drive daemon uses the drive's own interpreter — check with `pgrep -af rmail.lua` that the path is a temporary copy (`$XDG_RUNTIME_DIR/rmail-*/deps/lua/bin/lua`) of the drive's, not a system lua (#382, #388)
+- [ ] Plugging a drive in announces nothing; only running a launcher does (#388)
+- [ ] `sync-with-contacts.sh` announces, sends the outbox, stays reachable 60s (or the given seconds), exits 0, and removes its temporary copy (#388)
+- [ ] `sync-with-contacts.sh abc` prints usage and exits 2 (#388)
+- [ ] `auto-sync.sh` runs until the drive is pulled, then exits cleanly ("mailbox ... is gone") and removes its temporary copy (#388) — verified with a simulated unplug; not yet with a real USB pull
+- [ ] Mail from a contact arrives within a `sync-with-contacts.sh` window after they had backed off (the announcement resets their timer) (#388)
 - [ ] A drive whose libraries cannot load stops with the architecture message, naming both the drive's and the host's, and does NOT try to recompile (#382)
 - [ ] `BUILD-NOTES.txt` names the two `cc` commands and the `make linux` that built what ships (#382)
 - [ ] A drive's `rmail_crypto.so` needs no `libcrypto` from the host — `ldd` shows libc only (#382)
@@ -582,3 +608,23 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] #309 — Android script editor (depends on #308)
 - [ ] #310 — Periodics (depends on #308)
 - [ ] #329 — Thin client desktop viewer (design phase)
+
+### Attachment pipeline audit (#391) — implemented 2026-09-22
+
+- [x] New-recipient body held while an `attach:` path is missing; marker written, cleared once the file exists
+- [x] Held outbox file is not deleted by the "no recipients left" cleanup
+- [x] Consent form recorded in `inbox.json` and offered to the phone by `/api/sync`
+- [x] Phone deleting a consent form declines it and sends no /delete to the sender
+- [x] `remove_consent_form` drops the form's `inbox.json` entry
+- [x] Consent response to an unknown (hashed) contact is dropped with a log line
+- [x] Failed/skipped attachment request keeps the transfer and zip; next cycle re-asks with the same zip
+- [x] Phone: stuck attachment shows an error under the message in the outbox list (seen on device)
+- [x] Phone: sync state records outbox hashes; held files are skipped
+- [ ] Phone: send a photo → "preparing / zipping / uploading" under the message, then the message goes out with a consent form arriving at the recipient
+- [ ] Phone: kill the app mid-upload, reopen → upload resumes from the staged copy and completes
+- [ ] Phone: consent form appears in the phone inbox; Accept → transfer starts; Deny → form disappears on both sides
+- [ ] Phone: editing an already-sent outbox message on the phone reaches the recipient as an update
+- [ ] Share-sheet attachment (from Gallery) arrives as an attachment, not a missing file
+- [ ] Response to a transfer the sender no longer has → sender 404 → receiver clears the form
+- [ ] July victory-garden.jpg accept resolves to kuvalu and is sent or cleared (check log after restart)
+

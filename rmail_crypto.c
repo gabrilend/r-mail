@@ -1,4 +1,7 @@
 /*
+ * SPDX-License-Identifier: AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception
+ * Copyright (C) 2026 ritz.  See LICENSE.
+ *
  * rmail_crypto.c — AES-256-GCM encryption for rmail
  *
  * Exposes four functions to Lua:

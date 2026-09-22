@@ -57,6 +57,44 @@ class MailStore(context: Context, mailboxId: String) {
         File(outbox, filename).delete()
     }
 
+    fun outboxHash(filename: String): String? {
+        val f = File(outbox, filename)
+        return if (f.exists()) com.rmail.app.crypto.Crypto.sha256Hex(f.readBytes()) else null
+    }
+
+    // ── Attachments waiting to upload ─────────────────────────────────────
+    //
+    // An attachment is copied here when the message is sent, so the upload
+    // can be retried by any later sync.  The picker's content:// grant dies
+    // with the app process; a copy of our own does not.
+
+    val pendingAttachments: File = File(root, "pending-attachments").also { it.mkdirs() }
+
+    /**
+     * `attach:` values in an outbox file's header that still point at the
+     * phone rather than the server.  While any remain, the file is held back
+     * from the server: sent early, the body would arrive promising a file
+     * the server does not have.
+     */
+    fun localAttachRefs(filename: String): List<String> {
+        val f = File(outbox, filename)
+        if (!f.exists()) return emptyList()
+        // Same header rule as the daemon's _scan_outbox_header: to:/attach:
+        // lines, with blank and // lines passed over, until anything else.
+        return f.readLines()
+            .takeWhile { line ->
+                val l = line.trimStart().lowercase()
+                l.isEmpty() || l.startsWith("//") || l.startsWith("to:") || l.startsWith("attach:")
+            }
+            .mapNotNull { line ->
+                if (!line.trimStart().lowercase().startsWith("attach:")) null
+                else line.substringAfter(':').trim()
+                    .takeIf { it.startsWith("content://") || it.startsWith("file://") }
+            }
+    }
+
+    fun isHeld(filename: String): Boolean = localAttachRefs(filename).isNotEmpty()
+
     // ── Sync state ─────────────────────────────────────────────────────────
 
     fun readSyncState(): SyncState {
@@ -72,7 +110,9 @@ class MailStore(context: Context, mailboxId: String) {
             val outboxArr = obj.optJSONArray("outbox") ?: JSONArray()
             val outboxSet = mutableSetOf<String>()
             for (i in 0 until outboxArr.length()) outboxSet.add(outboxArr.getString(i))
-            SyncState(inboxMap, outboxSet, obj.optString("contacts_hash").ifBlank { null })
+            val hashesObj = obj.optJSONObject("outbox_hashes") ?: JSONObject()
+            val hashes = hashesObj.keys().asSequence().associateWith { hashesObj.getString(it) }
+            SyncState(inboxMap, outboxSet, obj.optString("contacts_hash").ifBlank { null }, hashes)
         } catch (_: Exception) {
             SyncState(emptyMap(), emptySet(), null)
         }
@@ -92,6 +132,7 @@ class MailStore(context: Context, mailboxId: String) {
         state.outbox.forEach { outboxArr.put(it) }
         obj.put("outbox", outboxArr)
         if (state.contactsHash != null) obj.put("contacts_hash", state.contactsHash)
+        obj.put("outbox_hashes", JSONObject(state.outboxHashes))
         syncStateFile.writeText(obj.toString(2))
     }
 
