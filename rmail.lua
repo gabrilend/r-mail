@@ -821,6 +821,7 @@ local ctimer = {
     timers    = {},
     skipped   = {},   -- contacts whose ops we withheld this cycle
     attempted = {},   -- contacts we actually tried this cycle
+    outcome   = {},   -- name -> did we reach them at all this cycle
 }
 
 function ctimer.jittered(interval)
@@ -2609,10 +2610,22 @@ local function http_post_batch_with_fallback(requests)
             -- Any HTTP status at all means we reached them and they answered;
             -- a 404 ("already done on my end") is a reachable contact, not a
             -- dead one, and must not be allowed to grow their backoff.
-            if r.ok or r.status then
-                ctimer.mark_success(cname, now)
-            else
-                ctimer.mark_failure(cname, now)
+            --
+            -- Recorded, not applied.  The timer advances once per contact per
+            -- *cycle*, at the end of run_sync_cycle -- not once per op.  Six
+            -- queued messages to one unreachable contact are one failure to
+            -- reach them, not six: applying it per op multiplied a single
+            -- failed cycle's backoff by the number of messages waiting, so
+            -- one cycle took a contact from 30s straight to 36 minutes.
+            --
+            -- Deferring also keeps a contact due for the whole cycle.  Applied
+            -- immediately, a success in sync_outbox pushed next_due into the
+            -- future and the gate then withheld that same contact's inbox and
+            -- address ops later in the same cycle, spreading work that should
+            -- have gone out together across several cycles.
+            local reached = (r.ok or r.status) and true or false
+            if ctimer.outcome[cname] == nil or reached then
+                ctimer.outcome[cname] = reached
             end
         end
     end
@@ -5606,6 +5619,16 @@ local function run_sync_cycle(rt)
     -- being wrong is nil: a contact with no ops sends no packets, so this
     -- buys a loop wakeup every 30s and no network traffic whatsoever.
     local now = socket.gettime()
+
+    -- Apply this cycle's per-contact outcomes, exactly once each.  A contact
+    -- counts as reached if *any* op reached them, matching the unreachable
+    -- summary's rule that one success anywhere keeps them off the list.
+    for name, reached in pairs(ctimer.outcome) do
+        if reached then ctimer.mark_success(name, now)
+        else ctimer.mark_failure(name, now) end
+    end
+    ctimer.outcome = {}
+
     for name in pairs(load_contacts()) do
         if name ~= rt.my_name
             and not ctimer.attempted[name]
