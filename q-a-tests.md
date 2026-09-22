@@ -631,4 +631,14 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Files tab `+` → file shows "waiting to upload", then "Present on: <server>, android" after sync; no consent form anywhere
 - [ ] Attachment sent from Write appears in Files, and the recipient receives the real file (not a zip)
 - [ ] Adding a file whose name exists on the server with different content → stored as `name-2.ext` on both sides
+- [x] Received attachment with a name already in `attachments/` is saved as `name-2.ext`; identical content is not duplicated; folder attachments are not merged (harness)
+- [ ] Receive a real attachment from a contact whose name clashes with a file uploaded from the phone → both kept
+
+### Attachment source picker (#375) — implemented 2026-09-22
+
+- [x] Files Upload opens the rmail "Add from: Gallery / File" dialog; Gallery then shows Android's app chooser (seen on device)
+- [ ] Files `+` and Upload behave identically (both add to Files, no message)
+- [ ] Write → attach uses the same dialog; picked items appear as attachments
+- [ ] File route: Android offers file apps; the system picker opens on Recent (newest first)
+- [ ] Multi-select works in both routes
 

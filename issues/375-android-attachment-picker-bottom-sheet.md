@@ -120,4 +120,17 @@ current single/tree behavior; only the new Image route is multi-select.)
 
 ## Status
 
-Open.
+**Implemented 2026-09-22, differently from the sketch above.**  The user
+asked for an rmail dialog offering **Gallery** or **File**, after which
+Android's own chooser asks *which* gallery or file app to use.  So:
+
+- `AttachmentSourcePicker.kt`: one dialog used by every pick in the app
+  (compose attach in both compose screens, Files `+`, Files Upload).
+- Gallery = `ACTION_PICK` on MediaStore images (+ video MIME), multi-select,
+  wrapped in `Intent.createChooser` -- gallery apps open newest-first.
+- File = `ACTION_GET_CONTENT` `*/*` openable, multi-select, in a chooser.
+  Not `OPEN_DOCUMENT`: that always goes to the system picker, so there would
+  be no app to choose.  No starting folder is passed, so the system picker
+  opens on Recent (newest first).  Sort order itself still cannot be set.
+- The Photo Picker route was not used: it is not an app the user can
+  choose between.  Folder attach (`OpenDocumentTree`) is unchanged.

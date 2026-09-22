@@ -57,4 +57,6 @@ commit makes the duplicate never exist, so nothing has to be filtered.
 
 ## Status
 
-Open. Diagnosed 2026-09-22, not yet fixed.
+Fixed in 01b0175 ("commit sync state incrementally"): every transfer
+commits its own state the moment the server acknowledges it.  Kept open
+only until the QA items are ticked; then move to completed/.

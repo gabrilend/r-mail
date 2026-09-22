@@ -80,6 +80,17 @@ failed.
 - Files `+` used to open a message to this mailbox with the file
   attached; it now adds straight to Files.
 
+## Received attachments no longer overwrite (2026-09-22)
+
+A contact's attachment was unzipped straight into `attachments/` with
+`unzip -o`, silently replacing any file of the same name -- now including
+files uploaded from the phone.  It is extracted into the transfer's own
+pending directory first, then each entry is filed by the same rule as phone
+uploads (`upload.final_path` / `upload.file_entry`): identical content is
+not duplicated, a differing file becomes `name-2.ext`, and a folder
+attachment is never merged into an existing folder (`album-2`).  The rename
+is logged and passed to the on_package hook as the real path.
+
 ## Status
 
 Implemented 2026-09-22.  Daemon changes need a restart of every daemon

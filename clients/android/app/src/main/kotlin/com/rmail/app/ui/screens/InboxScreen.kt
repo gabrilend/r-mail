@@ -205,18 +205,13 @@ fun InboxScreen(
 
     val context = LocalContext.current
 
-    // File picker for compose attachments
-    // Files tab "+": copy picked files into Files; the next sync uploads them.
-    val addToFilesPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris: List<android.net.Uri> ->
-        if (uris.isNotEmpty()) vm.addToFiles(uris)
-    }
+    // Files tab "+" and "Upload" (the same action on purpose): copy picked
+    // files into Files; the next sync uploads them.
+    val addToFiles = rememberAttachmentSourcePicker { uris -> vm.addToFiles(uris) }
 
-    val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
+    // Attaching to the message being written.
+    val pickAttachments = rememberAttachmentSourcePicker { uris ->
+        for (uri in uris) {
             val name = resolveDisplayName(context, uri) ?: uri.lastPathSegment ?: "attachment"
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
             draftAttachments.add(AttachmentEntry(uri, name, mime))
@@ -348,7 +343,7 @@ fun InboxScreen(
                     // mailbox with the file attached; the phone is this
                     // mailbox's own device, so there is nobody to ask.)
                     if (currentPanel == Panel.FILES) {
-                        IconButton(onClick = { addToFilesPicker.launch(arrayOf("*/*")) }) {
+                        IconButton(onClick = addToFiles) {
                             Icon(Icons.Default.Add, contentDescription = "Add files")
                         }
                     }
@@ -448,17 +443,9 @@ fun InboxScreen(
                             }
                         }
                         VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.FORWARD, false)
+                        // Same as the + above: straight into Files.
                         BottomBarButton("Upload", false, uploadColor, Modifier.weight(1f),
-                            unselectedColor = filesRowGray) {
-                            val activeId = vm.activeMailboxId.value
-                            val config = activeId?.let { vm.registry.get(it) }
-                            draftRecipients = listOf(config?.name ?: "")
-                            draftAttachments.clear()
-                            draftSubject = ""
-                            draftBody = ""
-                            currentPanel = Panel.WRITE
-                            filePicker.launch(arrayOf("*/*"))
-                        }
+                            unselectedColor = filesRowGray) { addToFiles() }
                     }
                 }
                 // Top row (always present)
@@ -749,7 +736,7 @@ fun InboxScreen(
                     recipients = draftRecipients,
                     onRecipientsChange = { draftRecipients = it },
                     attachments = draftAttachments,
-                    filePicker = { filePicker.launch(arrayOf("*/*")) },
+                    filePicker = pickAttachments,
                     dirPicker = { dirPicker.launch(null) },
                     subject = draftSubject,
                     onSubjectChange = { draftSubject = it },

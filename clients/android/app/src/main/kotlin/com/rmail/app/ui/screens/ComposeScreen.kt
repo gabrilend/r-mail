@@ -149,10 +149,8 @@ fun ComposeScreen(
     }
 
     // File picker for adding attachments
-    val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
+    val pickAttachments = rememberAttachmentSourcePicker { uris ->
+        for (uri in uris) {
             val name = resolveDisplayName(context, uri) ?: uri.lastPathSegment ?: "attachment"
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
             attachments.add(ComposeAttachmentEntry(uri, name, mime))
@@ -306,7 +304,7 @@ fun ComposeScreen(
                 IconButton(onClick = { dirPicker.launch(null) }) {
                     Icon(Icons.Default.Folder, contentDescription = "Attach folder")
                 }
-                IconButton(onClick = { filePicker.launch(arrayOf("*/*")) }) {
+                IconButton(onClick = pickAttachments) {
                     Icon(Icons.Default.Add, contentDescription = "Attach file")
                 }
             }

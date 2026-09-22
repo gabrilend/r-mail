@@ -3775,6 +3775,51 @@ local function send_attachment_cancellations(my_name)
     return true
 end
 
+-- Filing into the attachments directory, shared by phone uploads and
+-- attachments received from contacts: one flat folder, so names collide.
+-- One table rather than several locals: the main chunk is at Lua's
+-- 200-local ceiling.
+local upload = {}
+
+-- Pick the name a new file is stored under: its own if free, the
+-- existing file's if the content is identical (no duplicate), otherwise
+-- name-2.ext, name-3.ext, ...
+function upload.final_path(filename, tmp_path)
+    local sum = sha256_file(tmp_path)
+    local stem, ext = filename:match("^(.+)(%.[^.]+)$")
+    if not stem then stem, ext = filename, "" end
+    for n = 1, 1000 do
+        local name = n == 1 and filename or (stem .. "-" .. n .. ext)
+        local path = paths.attachments .. "/" .. name
+        if not file_exists(path) then return path, false end
+        if sha256_file(path) == sum then return path, true end
+    end
+    return nil
+end
+
+-- Move one extracted entry (a file, or a directory for a folder
+-- attachment) into the attachments directory without overwriting anything.
+-- Returns its final path.  Directories are never merged into an existing
+-- one of the same name; they get name-2 like a differing file.
+function upload.file_entry(src, name)
+    local h = io.open(src .. "/.", "r")
+    local is_dir = h ~= nil
+    if h then h:close() end
+    if not is_dir then
+        local final, existed = upload.final_path(name, src)
+        if not final then return nil end
+        if existed then os.remove(src) else os.rename(src, final) end
+        return final
+    end
+    for n = 1, 1000 do
+        local path = paths.attachments .. "/" .. (n == 1 and name or (name .. "-" .. n))
+        if not file_exists(path) and not io.open(path .. "/.", "r") then
+            os.rename(src, path)
+            return path
+        end
+    end
+end
+
 local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
@@ -3949,9 +3994,14 @@ local function handle_attachment_chunk(data, sender)
         return 200, {ok = true, missing = repair_missing}
     end
 
+    -- Extract somewhere private first, then file each entry.  Extracting
+    -- straight into attachments/ with -o silently replaced any file of the
+    -- same name -- including one uploaded from the phone.
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
+    local extract_dir = pending_dir .. "/extract"
+    os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
     local ret = os.execute(tools.unzip .. ' -o ' .. shell_quote(zip_path) ..
-                           ' -d ' .. shell_quote(paths.attachments) .. ' >/dev/null 2>&1')
+                           ' -d ' .. shell_quote(extract_dir) .. ' >/dev/null 2>&1')
     -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
     if not ret then
         log("failed to extract %s from %s", filename, sender)
@@ -3959,6 +4009,15 @@ local function handle_attachment_chunk(data, sender)
     end
 
     local target = paths.attachments .. "/" .. filename
+    local lh = io.popen('ls -A ' .. shell_quote(extract_dir) .. ' 2>/dev/null')
+    for entry in (lh and lh:lines() or function() end) do
+        local final = upload.file_entry(extract_dir .. "/" .. entry, entry)
+        if final and entry == filename then target = final end
+        if final and final ~= paths.attachments .. "/" .. entry then
+            log("attachment %s from %s: name taken, saved as %s", entry, sender, final)
+        end
+    end
+    if lh then lh:close() end
     if hooks.on_package then
         os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
                    shell_quote(filename) .. " " .. shell_quote(target) .. " &")
@@ -5792,31 +5851,13 @@ local function handle_api_attachment_chunk(filename, chunk_n)
     return 200, "application/octet-stream", data
 end
 
--- Phone-to-server uploads (#391).  One table rather than three locals: the
--- main chunk is at Lua's 200-local ceiling.
---
--- A finished upload lands in the attachments directory itself, where the
--- Files tab lists it, rather than hidden under .uploads/<id>/.  The phone
--- zips before chunking, so the assembled file is a zip; it is unpacked here.
--- It used to be stored as the zip under the original name, which is what
--- every recipient then received: a "photo.jpg" that was an archive.
-local upload = {}
-
--- Pick the name a finished upload is stored under: its own if free, the
--- existing file's if the content is identical (no duplicate), otherwise
--- name-2.ext, name-3.ext, ...
-function upload.final_path(filename, tmp_path)
-    local sum = sha256_file(tmp_path)
-    local stem, ext = filename:match("^(.+)(%.[^.]+)$")
-    if not stem then stem, ext = filename, "" end
-    for n = 1, 1000 do
-        local name = n == 1 and filename or (stem .. "-" .. n .. ext)
-        local path = paths.attachments .. "/" .. name
-        if not file_exists(path) then return path, false end
-        if sha256_file(path) == sum then return path, true end
-    end
-    return nil
-end
+-- Phone-to-server uploads (#391).  A finished upload lands in the
+-- attachments directory itself, where the Files tab lists it, rather than
+-- hidden under .uploads/<id>/.  The phone zips before chunking, so the
+-- assembled file is a zip; it is unpacked here.  It used to be stored as the
+-- zip under the original name, which is what every recipient then received:
+-- a "photo.jpg" that was an archive.  (`upload` is declared further up, with
+-- the naming rule it shares with received attachments.)
 
 -- Assemble, unpack and file a completed upload.  Returns the final path.
 function upload.finish(upload_id, uploads)
