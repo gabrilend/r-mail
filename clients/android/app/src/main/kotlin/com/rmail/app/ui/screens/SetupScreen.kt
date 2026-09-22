@@ -64,17 +64,22 @@ fun SetupScreen(
     var loadingNetwork by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    fun loadNetworkInfo() {
+    // The gateway comes from the phone itself.  The public IP means asking an
+    // outside service (ifconfig.me, icanhazip.com), so that only happens
+    // when the user taps for it -- never just because Setup opened.
+    fun loadNetworkInfo(lookupPublicIp: Boolean) {
         scope.launch {
             loadingNetwork = true
             gateway = getDefaultGateway(context)
-            publicIp = getPublicIpAddress()
-            if (host.isBlank() && publicIp != null) host = publicIp!!
+            if (lookupPublicIp) {
+                publicIp = getPublicIpAddress()
+                if (host.isBlank() && publicIp != null) host = publicIp!!
+            }
             loadingNetwork = false
         }
     }
 
-    LaunchedEffect(Unit) { loadNetworkInfo() }
+    LaunchedEffect(Unit) { loadNetworkInfo(lookupPublicIp = false) }
 
     Scaffold(
         topBar = {
@@ -226,17 +231,26 @@ fun SetupScreen(
                 if (loadingNetwork) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 } else {
-                    IconButton(onClick = { loadNetworkInfo() }, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = { loadNetworkInfo(lookupPublicIp = publicIp != null) },
+                        modifier = Modifier.size(32.dp)) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh",
                             modifier = Modifier.size(16.dp))
                     }
                 }
             }
-            NetworkInfoRow(
-                label = "Your router's public IP",
-                value = publicIp,
-                hint = "Use this as the router IP above if your Android is currently connected to your home wifi"
-            )
+            if (publicIp == null) {
+                OutlinedButton(
+                    onClick = { loadNetworkInfo(lookupPublicIp = true) },
+                    enabled = !loadingNetwork,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Detect public IP (asks ifconfig.me)") }
+            } else {
+                NetworkInfoRow(
+                    label = "Your router's public IP",
+                    value = publicIp,
+                    hint = "Use this as the router IP above if your Android is currently connected to your home wifi"
+                )
+            }
             NetworkInfoRow(
                 label = "Default gateway",
                 value = gateway,

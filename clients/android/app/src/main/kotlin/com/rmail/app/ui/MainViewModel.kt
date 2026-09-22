@@ -600,6 +600,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Active download jobs, keyed by filename, so they can be cancelled
     private val downloadJobs = mutableMapOf<String, Job>()
 
+    /**
+     * Save to device: copy files from Files into shared storage, where the
+     * gallery and file apps see them.  A file only on the server is
+     * downloaded first (and so also lands in Files on the phone).
+     *
+     * Android 10+ saves straight to Pictures/, Movies/, Music/ or Download/
+     * under rmail/.  Older Android would need storage permission for that,
+     * so [saveAs] is handed the files instead and asks the system "Save as"
+     * dialog for each.
+     */
+    fun saveToDevice(filenames: List<String>, saveAs: (List<File>) -> Unit) {
+        val s = store ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val local = mutableListOf<File>()
+            var failed = 0  // couldn't download, or couldn't save
+            for (name in filenames) {
+                val cached = s.cachedAttachmentFile(name)
+                if (cached.exists()) { local += cached; continue }
+                val info = _attachments.value.find { it.filename == name }
+                val got = if (info == null) null else
+                    kotlinx.coroutines.suspendCancellableCoroutine<File?> { cont ->
+                        downloadAttachment(info) { f -> if (cont.isActive) cont.resume(f) {} }
+                    }
+                if (got != null && got.exists()) local += got else failed++
+            }
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+                if (local.isNotEmpty()) saveAs(local)
+            } else {
+                val folders = mutableSetOf<String>()
+                var saved = 0
+                for (f in local) {
+                    try {
+                        folders += withContext(Dispatchers.IO) {
+                            com.rmail.app.data.DeviceExport.save(app, f)
+                        }
+                        saved++
+                    } catch (e: Exception) {
+                        failed++
+                        Log.w("rmail", "save to device failed for ${f.name}: ${e.message}")
+                    }
+                }
+                val msg = buildString {
+                    if (saved > 0) append("Saved $saved to ${folders.joinToString(", ")}")
+                    if (failed > 0) { if (isNotEmpty()) append(" — "); append("$failed couldn't be saved") }
+                }
+                if (msg.isNotEmpty()) android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     fun downloadAttachment(info: AttachmentInfo, onDone: (File?) -> Unit) {
         val config = activeConfig ?: run { onDone(null); return }
         val s = store ?: run { onDone(null); return }

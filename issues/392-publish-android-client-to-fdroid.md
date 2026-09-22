@@ -29,7 +29,7 @@ build needs nothing outside the repo; LICENSE is AGPL-3.0-or-later.
   title, short and full description, screenshots, changelogs.  The
   description must say plainly that the app is a client for an rmail
   daemon you run yourself.
-- **B4. Third-party network calls without consent.**  Setup fetches
+- ~~**B4. Third-party network calls without consent.**~~ *Fixed 2026-09-22: the public-IP lookup runs only when "Detect public IP (asks ifconfig.me)" is tapped.*  Setup fetches
   `https://ifconfig.me/ip` and `https://icanhazip.com` the moment it opens
   (`SetupScreen.kt`).  Make it a button the user presses ("find my public
   IP"), or ask the daemon (`/api/myaddress`) once connected.  Otherwise it

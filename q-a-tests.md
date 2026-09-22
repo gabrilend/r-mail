@@ -642,3 +642,16 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] File route: Android offers file apps; the system picker opens on Recent (newest first)
 - [ ] Multi-select works in both routes
 
+### Save to device — implemented 2026-09-22
+
+- [x] Files → Save → select an on-device and a server-only image → both land in `Pictures/rmail`, byte-identical, and appear in the media index (seen on device, Android 12)
+- [ ] Video → `Movies/rmail`, audio → `Music/rmail`, other → `Download/rmail`
+- [ ] Android 8-9: one system "Save as" dialog per selected file
+- [ ] Saving the same file twice gives the system's own " (1)" name, not an overwrite
+
+### Setup (#392) — 2026-09-22
+
+- [ ] Public IP lookup happens only when "Detect public IP" is tapped (no ifconfig.me call on opening Setup)
+- [ ] Connect with a wrong port → "Couldn't reach…"; wrong token → "didn't accept this token"; token without own=true → "not as one of your own devices"; "Save anyway" appears after a failure
+- [ ] New mailbox: port field is blank
+

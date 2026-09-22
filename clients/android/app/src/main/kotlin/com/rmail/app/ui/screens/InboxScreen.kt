@@ -78,7 +78,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 private enum class Panel { INBOX, OUTBOX, FILES, CONTACTS, SETTINGS, WRITE }
-private enum class FilesMode { NORMAL, DELETE, FORWARD }
+private enum class FilesMode { NORMAL, DELETE, FORWARD, SAVE }
 
 @Composable
 private fun rememberKeyboardOpen(): Boolean {
@@ -204,6 +204,24 @@ fun InboxScreen(
     val selectedFiles = remember { mutableStateListOf<String>() }
 
     val context = LocalContext.current
+
+    // Save to device on Android 8-9: one system "Save as" dialog per file,
+    // taken from this queue in turn.  (Android 10+ saves directly.)
+    var saveAsQueue by remember { mutableStateOf<List<File>>(emptyList()) }
+    val saveAs = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        val file = saveAsQueue.firstOrNull()
+        if (uri != null && file != null) {
+            try { com.rmail.app.data.DeviceExport.copyTo(context, file, uri) }
+            catch (e: Exception) {
+                android.widget.Toast.makeText(context, "Couldn't save ${file.name}",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+        saveAsQueue = saveAsQueue.drop(1)
+    }
+    LaunchedEffect(saveAsQueue) { saveAsQueue.firstOrNull()?.let { saveAs.launch(it.name) } }
 
     // Files tab "+" and "Upload" (the same action on purpose): copy picked
     // files into Files; the next sync uploads them.
@@ -439,6 +457,7 @@ fun InboxScreen(
                     val deleteColor = Color(0xFFD32F2F)
                     val forwardColor = Color(0xFF7B1FA2)
                     val uploadColor = ButtonColors[Panel.WRITE]!!
+                    val saveColor = Color(0xFF2E7D32)
                     val filesRowGray = Color(0xFF9E9E9E)  // light gray for unselected files actions
                     HorizontalDivider(thickness = gridWidth, color = gridColor)
                     Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
@@ -459,7 +478,16 @@ fun InboxScreen(
                                 filesMode = FilesMode.FORWARD; selectedFiles.clear()
                             }
                         }
-                        VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.FORWARD, false)
+                        VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.FORWARD, filesMode == FilesMode.SAVE)
+                        BottomBarButton("Save", filesMode == FilesMode.SAVE, saveColor,
+                            Modifier.weight(1f), unselectedColor = filesRowGray) {
+                            if (filesMode == FilesMode.SAVE) {
+                                filesMode = FilesMode.NORMAL; selectedFiles.clear()
+                            } else {
+                                filesMode = FilesMode.SAVE; selectedFiles.clear()
+                            }
+                        }
+                        VerticalDivider(gridWidth, gridColor, filesMode == FilesMode.SAVE, false)
                         // Same as the + above: straight into Files.
                         BottomBarButton("Upload", false, uploadColor, Modifier.weight(1f),
                             unselectedColor = filesRowGray) { addToFiles() }
@@ -671,6 +699,22 @@ fun InboxScreen(
                                         Text("Delete on device", fontWeight = FontWeight.Bold,
                                             color = Color.Black)
                                     }
+                                }
+                            }
+                        }
+                        if (filesMode == FilesMode.SAVE && selectedFiles.isNotEmpty()) {
+                            // Save to device: out of rmail's private storage and
+                            // into the gallery / Downloads.  Server-only files
+                            // are downloaded first.
+                            Surface(color = Color(0xFF2E7D32),
+                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).clickable {
+                                    vm.saveToDevice(selectedFiles.toList()) { files -> saveAsQueue = files }
+                                    selectedFiles.clear(); filesMode = FilesMode.NORMAL
+                                }) {
+                                Box(contentAlignment = Alignment.Center,
+                                    modifier = Modifier.padding(vertical = 10.dp)) {
+                                    Text("Save ${selectedFiles.size} to device", fontWeight = FontWeight.Bold,
+                                        color = Color.Black)
                                 }
                             }
                         }
