@@ -1341,6 +1341,150 @@ local function write_contact_fields(name, fields)
     write_file(CONTACTS, table.concat(lines, "\n") .. "\n")
 end
 
+-- List dot-prefixed regular files in a directory.
+--
+-- list_files() deliberately skips dotfiles, which is right for mail but
+-- makes daemon-written notices invisible to it -- and #388 stores those as
+-- dotfiles precisely so `ls` shows mail rather than bookkeeping.  This is
+-- the deliberate way back in for the code that manages them.
+local function list_notices(dir)
+    local out = {}
+    local h = io.popen('ls -1ap "' .. dir .. '" 2>/dev/null')
+    if not h then return out end
+    for name in h:lines() do
+        if name:sub(1, 1) == "." and name ~= "." and name ~= ".."
+           and name:sub(-1) ~= "/" then
+            out[#out + 1] = name
+        end
+    end
+    h:close()
+    return out
+end
+
+-- ---- #388: address sets -------------------------------------------------
+--
+-- An announcement used to send one address and overwrite one field, which
+-- is lossy in a way that breaks working setups: a contact on our LAN holding
+-- our LAN address would have it replaced by our public address, demoting a
+-- direct route to a hairpin-NAT one.  The sender knows its own addresses but
+-- cannot know which of them is reachable from any given contact -- that
+-- depends on the contact's network position, which only the contact can
+-- discover.  So send all of them and let #347's existing fallback and
+-- promotion machinery converge on whichever works.
+--
+-- Consolidated into a table; the main chunk is near Lua's 200-local ceiling.
+local addrset = {}
+
+-- Every address this daemon believes reaches it, best-guess order first.
+function addrset.mine(port)
+    local out, seen = {}, {}
+    local function add(addr, kind)
+        if not addr or addr == "" or seen[addr] then return end
+        seen[addr] = true
+        out[#out + 1] = {addr = addr, port = port, kind = kind}
+    end
+    -- A configured hostname goes first: it is the only address that stays
+    -- correct across our own IP churn, which is the whole point of having
+    -- one.
+    add(config.hostname and tostring(config.hostname):gsub('^"(.*)"$', '%1'), "hostname")
+    add((read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$"), "public")
+    add((read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$"), "private")
+    add((read_file(STATE .. "/public_ipv6") or ""):match("^%s*(.-)%s*$"), "ipv6")
+    return out
+end
+
+-- Is this an address we are entitled to overwrite on someone else's behalf?
+--
+-- Public addresses are ours: we are authoritative about where we are on the
+-- internet.  Private addresses are not -- we cannot know whether their route
+-- to our LAN address works, and they can.  Hostnames are never touched;
+-- re-resolution already handles IP churn invisibly.
+function addrset.ours_to_replace(addr)
+    if is_hostname(addr) then return false end
+    if is_private_ipv4(addr) then return false end
+    return true
+end
+
+-- Rewrite a contact's address lines to exactly `addrs`, leaving every other
+-- field (token, own, ...) untouched.  Idempotent: re-announcing the same set
+-- produces the same file rather than appending duplicates, which a
+-- write_contact_fields-based approach could not do because its field matcher
+-- does not see the bracketed `ip[N]` form at all.
+function addrset.write(name, addrs, port)
+    local text  = read_file(CONTACTS) or ""
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+
+    local out, anchor_at = {}, nil
+    for _, line in ipairs(lines) do
+        local lname, lfield = line:match("^%s*([%w_%-]+)%.([%w_%-]+)%s*%[?%d*%]?%s*=")
+        local is_addr_line = (lname == name) and (lfield == "ip" or lfield == "ipv6")
+        local is_idx_port  = (lname == name) and lfield == "port"
+                             and line:match("%.port%s*%[%d+%]")
+        if is_addr_line or is_idx_port then
+            if not anchor_at then anchor_at = #out + 1 end
+        else
+            out[#out + 1] = line
+        end
+    end
+    if not anchor_at then
+        -- No address lines today: put them just before the contact's first
+        -- remaining line so the block stays contiguous for align_contacts.
+        for i, line in ipairs(out) do
+            if line:match("^%s*" .. name .. "%.") then anchor_at = i; break end
+        end
+        anchor_at = anchor_at or (#out + 1)
+    end
+
+    local new = {}
+    for i, a in ipairs(addrs) do
+        local v = a.addr
+        if v:match("[^%d%.]") then v = '"' .. v .. '"' end
+        if i == 1 then
+            new[#new + 1] = name .. ".ip = " .. v
+        else
+            new[#new + 1] = name .. ".ip[" .. (i - 1) .. "] = " .. v
+            if a.port and tostring(a.port) ~= tostring(port) then
+                new[#new + 1] = name .. ".port[" .. (i - 1) .. "] = " .. tostring(a.port)
+            end
+        end
+    end
+    for j = #new, 1, -1 do table.insert(out, anchor_at, new[j]) end
+
+    -- Removing address lines leaves the blank line that followed them, and
+    -- the split on a trailing newline contributes one more.  Left alone they
+    -- accumulate at the end of the file, one per announcement.
+    while #out > 0 and out[#out]:match("^%s*$") do out[#out] = nil end
+
+    write_file(CONTACTS, table.concat(out, "\n") .. "\n")
+end
+
+-- Merge an announced set into what we already hold for that contact.
+-- Returns the ordered list to write.
+function addrset.merge(existing_default, existing_indexed, announced)
+    local result, seen = {}, {}
+    local function push(addr, port)
+        if not addr or addr == "" or seen[addr] then return end
+        seen[addr] = true
+        result[#result + 1] = {addr = addr, port = port}
+    end
+
+    -- Their pinned default survives if it is one we may not replace: a
+    -- hostname, or a private address whose reachability only they know.
+    -- Keeping it *first* keeps it the unindexed default, which #347 pins
+    -- against promotion reordering.
+    if existing_default and not addrset.ours_to_replace(existing_default) then
+        push(existing_default)
+    end
+    -- Then everything we were told, in the sender's preferred order.
+    for _, a in ipairs(announced) do push(a.addr, a.port) end
+    -- Then any other address they held that is not ours to replace.
+    for _, v in ipairs(existing_indexed or {}) do
+        if not addrset.ours_to_replace(v) then push(v) end
+    end
+    return result
+end
+
 -- Normalise the contacts file:
 --   1. Scattered lines for the same contact are grouped together at the
 --      position of that contact's first line (#347 auto-grouping).
@@ -2171,6 +2315,94 @@ local function handle_update_address(data, sender)
     -- We still accept a port change, and still invalidate the cached lookup
     -- so the next comparison picks up the new IP immediately.
     local preserve_hostname = is_hostname(contacts[sender].ip)
+    local applied_set = false
+    local announced_changed = true
+
+    -- #388: a sender that announces its whole address set is authoritative
+    -- about where it is, so take the set rather than a single field.  The
+    -- old "leave a multi-IP contact entirely alone" rule existed because one
+    -- address could not say which of N was superseded; a full set can.
+    if type(data.ips) == "table" and #data.ips > 0 then
+        local announced = {}
+        for _, a in ipairs(data.ips) do
+            -- Accept both the plain-string and {addr,port} forms so an older
+            -- peer's shape cannot crash a newer one.
+            if type(a) == "string" then
+                announced[#announced + 1] = {addr = a, port = new_port}
+            elseif type(a) == "table" and a.addr then
+                announced[#announced + 1] = {addr = a.addr, port = a.port or new_port}
+            end
+        end
+
+        -- Read the existing addresses from `endpoints`, which is the built,
+        -- ordered list load_contacts leaves behind -- it nils out
+        -- `_indexed_ips` once endpoints exist, so reading that field gave an
+        -- empty list every time.  "before" was therefore always just the
+        -- default address, never matched "after", and every announcement
+        -- rewrote the contacts file, tripped the inotify watcher and
+        -- re-announced: two idle daemons at 1,500 exchanges in 15 seconds.
+        local indexed = {}
+        for _, ep in ipairs(contacts[sender].endpoints or {}) do
+            if not ep.is_default and ep.addr then
+                indexed[#indexed + 1] = ep.addr
+            end
+        end
+
+        local merged = addrset.merge(contacts[sender].ip, indexed, announced)
+
+        -- Did anything actually move?  An announcement that tells us what we
+        -- already knew is not news, and must not produce a notice.
+        --
+        -- This is also what stops two peers ping-ponging forever: a notice
+        -- queues an announcement of our own to verify the claim (below), the
+        -- peer receives it, and if it changes nothing on their side they
+        -- write no notice and queue nothing back.  Without this the pair
+        -- would notify each other into an endless loop.
+        -- Compare as sorted sets, not as ordered lists.  Which address sits
+        -- first is a local decision -- promotion reorders it based on what
+        -- actually connects -- so a pure reordering is not news and must not
+        -- trigger a rewrite.  Only membership changes are.
+        local before, after = {}, {}
+        if contacts[sender].ip then before[#before + 1] = contacts[sender].ip end
+        for _, v in ipairs(indexed) do before[#before + 1] = v end
+        for _, m in ipairs(merged) do after[#after + 1] = m.addr end
+        table.sort(before); table.sort(after)
+        local set_changed = (#before ~= #after)
+        if not set_changed then
+            for i = 1, #after do
+                if before[i] ~= after[i] then set_changed = true; break end
+            end
+        end
+
+        -- Only touch the file when something actually moved.  Rewriting it
+        -- with identical content still fires the contacts inotify watcher,
+        -- which forces an immediate sync, which re-announces to the peer,
+        -- which rewrites their file and announces back -- two idle daemons
+        -- saturating each other at full speed over an address neither of
+        -- them changed.  Observed: 374KB of log in seconds.
+        if #merged > 0 and set_changed then
+            addrset.write(sender, merged, new_port or contacts[sender].port)
+            if new_port then write_contact_fields(sender, {port = new_port}) end
+            local shown = {}
+            for _, m in ipairs(merged) do shown[#shown + 1] = m.addr end
+            log("address set from %s: %s", sender, table.concat(shown, ", "))
+            -- Any cached lookup for a name we kept is now suspect.
+            dns_cache[contacts[sender].ip] = nil
+            applied_set = true
+            announced_changed = set_changed
+        elseif #merged > 0 then
+            -- Nothing moved: no write, no notice, and crucially still
+            -- "handled", so the single-address fallback below does not
+            -- rewrite the file we just decided to leave alone.
+            applied_set = true
+            announced_changed = false
+        end
+    end
+
+    if not applied_set then
+
+    -- Single-address fallback, for peers that predate #388.
+    --
     -- If the contact is configured with multiple IPs (#347), the user is
     -- managing that list explicitly.  A single address update can't know
     -- which of the N addresses was superseded, so leave all of them alone
@@ -2180,20 +2412,29 @@ local function handle_update_address(data, sender)
     if not preserve_hostname and not has_multi then fields.ip = new_ip end
     if new_port then fields.port = new_port end
     if next(fields) then write_contact_fields(sender, fields) end
+    end
 
-    if preserve_hostname then
-        log("address update from %s: keeping hostname '%s' (will re-resolve to %s)",
-            sender, contacts[sender].ip, new_ip)
-        dns_cache[contacts[sender].ip] = nil
-    else
-        log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+    -- The set path logs its own, more informative line and has already
+    -- invalidated the DNS cache; saying "updated address for X" after it
+    -- would describe a single-field write that did not happen.
+    if not applied_set then
+        if preserve_hostname then
+            log("address update from %s: keeping hostname '%s' (will re-resolve to %s)",
+                sender, contacts[sender].ip, new_ip)
+            dns_cache[contacts[sender].ip] = nil
+        else
+            log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
+        end
     end
 
     -- drop a notification in inbox if the sender requested it.
     -- Hostname contacts don't need a notification — DNS re-resolution handles
     -- IP churn invisibly, which is exactly why the user chose a hostname.
-    if data.notify ~= false and not preserve_hostname then
-        local filename = "address-update-" .. sender
+    if data.notify ~= false and not preserve_hostname and announced_changed then
+        -- #388: machine-written notices are dotfiles, so `ls` shows a
+        -- mailbox of mail rather than a mailbox of bookkeeping.  They still
+        -- sync -- hidden is not the same as absent.
+        local filename = ".address-update-" .. sender
         local body = sender .. "'s address has changed to " .. new_ip .. ":" .. tostring(new_port) ..
             ".\nYour contacts file has been updated automatically."
         write_file(INBOX .. "/" .. filename, body)
@@ -4780,6 +5021,27 @@ local function sync_address_notifications(my_name)
     local contacts = load_contacts()
     local pending = unmigrate_hashed_keys(
         load_state("pending-address.json"), contacts)
+
+    -- #388: an unconfirmed address notice is a claim we have not tested.
+    -- Testing it needs traffic to that contact, and an idle pair generates
+    -- none -- so the notice queues an announcement of our own, which is a
+    -- real request over the exact path in question.  Succeeding retires the
+    -- notice (see run_sync_cycle); failing leaves it standing, which is the
+    -- correct reading of "we still cannot reach them there".
+    --
+    -- Using our own announcement rather than a dedicated probe keeps this
+    -- free of new protocol surface, and avoids leaning on /peer-address,
+    -- which #365 removes as dead code.
+    local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+    if my_public and my_public ~= "" then
+        for _, f in ipairs(list_notices(INBOX)) do
+            local who = f:match("^%.address%-update%-(.+)$")
+            if who and contacts[who] and contacts[who].ip and not pending[who] then
+                pending[who] = {ip = my_public, port = tonumber(config.port)}
+            end
+        end
+    end
+
     if not next(pending) then return false end
 
     local ops = {}
@@ -4805,8 +5067,13 @@ local function sync_address_notifications(my_name)
         requests[i] = {
             endpoints = contact_endpoints(op.contact),
             path = "/update-address",
+            -- #388: the set is computed now rather than read from the
+            -- pending entry, so a queued announcement that sat through an
+            -- address change goes out with where we are, not where we were.
+            -- ip/port stay for peers that predate #388.
             payload = json.encode({
                 ip = op.ip, port = op.port, notify = cfg.notify_ip_change,
+                ips = addrset.mine(op.port),
             }),
             psk_key = op.contact.token,
         }
@@ -5503,6 +5770,7 @@ local function handle_request(rt, client)
         -- malformed packet cannot reset anybody's timer.
         ctimer.saw_inbound(contact_name)
 
+
         -- Cache sender for subsequent requests on this connection
         if not known_contact then
             known_contact = contact_name
@@ -5652,8 +5920,27 @@ local function run_sync_cycle(rt)
     -- counts as reached if *any* op reached them, matching the unreachable
     -- summary's rule that one success anywhere keeps them off the list.
     for name, reached in pairs(ctimer.outcome) do
-        if reached then ctimer.mark_success(name, now)
-        else ctimer.mark_failure(name, now) end
+        if reached then
+            ctimer.mark_success(name, now)
+            -- #388: an address-change notice is a claim that this contact
+            -- has moved.  What retires the claim is *using* the new address
+            -- successfully -- we just did, so the notice has served its
+            -- purpose and becomes noise.
+            --
+            -- Note this is deliberately the outbound direction.  Receiving
+            -- something from them would prove only that they can reach us,
+            -- which is the half that was never in doubt: they sent us the
+            -- announcement.  The half that a stale port-forward or a wrong
+            -- address breaks is ours-to-theirs, and only a successful send
+            -- tests it.
+            local notice = INBOX .. "/.address-update-" .. name
+            if file_exists(notice) then
+                os.remove(notice)
+                log("address change for %s confirmed: reached them at the new address", name)
+            end
+        else
+            ctimer.mark_failure(name, now)
+        end
     end
     ctimer.outcome = {}
 

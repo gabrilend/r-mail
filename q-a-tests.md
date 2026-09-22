@@ -275,6 +275,28 @@ RFC 5737 TEST-NET addresses and a live loopback peer pair:
 - [ ] A contact with no queued ops does not spin the main loop (op-less
       contacts are swept back to the floor; confirm no busy-wait)
 
+### Address-set announcement (#388) — phase 1 implemented 2026-09-22
+
+- [x] A contact holding a private address for us keeps it as the pinned
+      default and gains our public/LAN addresses as `ip[N]`
+- [x] Announcing an unchanged set rewrites nothing (no contacts-file write,
+      no inotify storm, no notice)
+- [x] Notice is written as a dotfile `.address-update-<name>`
+- [x] Notice is retired by a successful *outbound* exchange with that
+      contact, not by receiving from them
+- [x] An idle pair still retires the notice (it queues an announcement of
+      our own as the verifying traffic)
+- [x] Normal delivery unaffected: 6 queued files still go out in one batch
+      in the same second
+- [ ] Hostnames survive an address-set announcement (logic present, not yet
+      exercised end to end)
+- [ ] A peer that predates #388 (sends `ip`/`port`, no `ips`) still works
+      via the single-address fallback
+- [ ] IPv6 addresses round-trip through the set correctly
+- [ ] **Known gap:** `.address-update-*` notices do not sync to Android,
+      because `list_files` skips dotfiles. Needs the sync manifest to carry
+      dotfiles while the message list excludes them.
+
 ### Public IP recheck every 36h ±12h (#379) — implemented 2026-09-22
 
 Changed from the originally-filed "once per day": the delay is drawn
