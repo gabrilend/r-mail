@@ -343,10 +343,9 @@ No `on_tick` hook exists.  To run something every N seconds you'd
 normally want a cron job, but rmail can already approximate one with
 three ingredients it already has:
 
-1. **Self-addressed outbox message.** Put your self-address word (the
-   `self_address = ...` line from your config) in the `to:` header of an
-   outbox file.  The mailbox's `name` is only a label and is refused on a
-   `to:` line.  The daemon detects that the recipient is yourself and writes
+1. **Self-addressed outbox message.** Put your own configured name (the
+   `name = ...` line from your config) in the `to:` header of an outbox
+   file.  The daemon detects that the recipient is yourself and writes
    the body directly to your own inbox with no network traffic and no
    contact entry required.
 2. **Living messages.** Editing the outbox body re-delivers it as an
@@ -364,18 +363,18 @@ pattern for sub-second timing.
 
 #### Minimal example: log a tick every 30 seconds
 
-**Step 1.** Create `~/mail/outbox/heartbeat` with your self-address
-word in the `to:` line.  If your config has `self_address = me`, this looks
+**Step 1.** Create `~/mail/outbox/heartbeat` with your own configured
+name in the `to:` line.  If your config has `name = alice`, this looks
 like:
 
 ```
-to: me
+to: alice
 remaining_ms: 30000
 last_tick: 0
 tick count: 0
 ```
 
-The daemon sees `to: me`, recognises it as itself, and self-delivers
+The daemon sees `to: alice`, recognises it as itself, and self-delivers
 the body to `~/mail/inbox/heartbeat` — no network round-trip, no
 contacts entry needed.  (Self-delivery is a separate code path from
 contact delivery; `own = true` in a contacts entry is unrelated — that

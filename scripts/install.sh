@@ -166,7 +166,7 @@ _parse_bool() {
 
 # Option keys the installer recognises.  Value keys need a string, yn keys
 # take a boolean.  Used by show_help and the CLI parser.
-OPT_VALUE_KEYS="mail_dir name self_address port service_name"
+OPT_VALUE_KEYS="mail_dir name port service_name"
 OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service"
 
 show_help() {
@@ -185,9 +185,7 @@ Generic:
 
 Required values (supplying --flag skips the matching prompt):
   --mail-dir=PATH         Mailbox directory
-  --name=STR              This mailbox's label (used only on this machine)
-  --self-address=WORD     The word you write on a to: line to send a
-                          message to yourself (e.g. me)
+  --name=STR              Local identity (used only on this machine)
   --port=NUM              TCP port the daemon listens on
 
 Optional values (a default is derived if not supplied):
@@ -657,7 +655,6 @@ CONFIG_FILE="$MAIL_DIR/config"
 # mailbox.  No other mailbox is consulted, now or anywhere below.
 if [ -f "$CONFIG_FILE" ]; then
     _existing_name=$(read_config_value "$CONFIG_FILE" "name")
-    _existing_self_address=$(read_config_value "$CONFIG_FILE" "self_address")
     _existing_port=$(read_config_value "$CONFIG_FILE" "port")
 fi
 
@@ -778,28 +775,9 @@ DEFAULT_PORT=$(gen_random_port)
 # beats checking a proxy for it at install time, and it does not require
 # one mailbox to go reading another's files.
 while true; do
-    RMAIL_NAME=$(ask_value name "A label for this mailbox (used locally)" "$DEFAULT_NAME") || exit 1
+    RMAIL_NAME=$(ask_value name "Your own name (used locally)" "$DEFAULT_NAME") || exit 1
     if ! echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
         warn "Name must contain only letters, numbers, hyphens, and underscores."
-        continue
-    fi
-    break
-done
-
-# prompt for the self-address word (#394)
-#
-# The word written on a `to:` line to send a message to yourself.  It used
-# to be the name above, which made the label double as an address; now the
-# owner picks it.  "me" is offered because it reads naturally, but it is
-# written into the config like any other answer, so the daemon never
-# assumes a word nobody chose.  The shape rule matches contact names,
-# because the daemon matches it against `to:` lines the same way.
-DEFAULT_SELF_ADDRESS="${_existing_self_address:-me}"
-while true; do
-    RMAIL_SELF_ADDRESS=$(ask_value self_address \
-        "Word for sending a message to yourself (to: WORD)" "$DEFAULT_SELF_ADDRESS") || exit 1
-    if ! echo "$RMAIL_SELF_ADDRESS" | grep -qE '^[a-zA-Z0-9_-]+$'; then
-        warn "The word must contain only letters, numbers, hyphens, and underscores."
         continue
     fi
     break
@@ -890,27 +868,20 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
 # ---- identity ----
 
-# this mailbox's label — shown by the phone app, and used locally to keep
-# a contact that happens to share it out of address-change notices.  Your
-# contacts do not see it in the mail you send them: each of them sees you by
-# whatever name they assigned you in their own contacts file.  It is not an
-# address: \`to: <name>\` is refused with a note pointing at self_address.
+# your own name — used locally so the daemon can tell "me" from "everyone else"
+# in your contacts file.  Your contacts do not see it in the mail you send
+# them: each of them sees you by whatever name they assigned you in their own
+# contacts file.
 #
 # It is not a secret, though.  The daemon answers the plaintext health check
 # documented in README.md with this name, without asking who is calling, so
 # anyone who can reach your port can read it.
-name = $RMAIL_NAME
-
-# the word you write on a \`to:\` line to send a message to yourself — it is
-# delivered straight into this mailbox's inbox with no network involved.
-# The periodic-task pattern in docs/scripting-tutorial.md is built on it.
-# Remove the line to switch sending to yourself off.
 #
-# The daemon tests a recipient against this word before it looks in your
-# contacts, so do not give a contact the same name as this word.  A \`to:\`
-# line that means both at once is refused rather than guessed at, and the
-# message waits in your outbox with a note explaining why.
-self_address = $RMAIL_SELF_ADDRESS
+# The daemon tests a recipient against this name before it looks in your
+# contacts, so do not give a contact the same name as this.  A \`to:\` line
+# that means both at once is refused rather than guessed at, and the message
+# waits in your outbox with a note explaining why.
+name = $RMAIL_NAME
 
 # port rmail listens on for incoming messages
 port = $RMAIL_PORT
@@ -971,7 +942,6 @@ CONFIG
     ok "created config: $CONFIG_FILE"
 else
     set_config_value "$CONFIG_FILE" "name" "$RMAIL_NAME"
-    set_config_value "$CONFIG_FILE" "self_address" "$RMAIL_SELF_ADDRESS"
     set_config_value "$CONFIG_FILE" "port" "$RMAIL_PORT"
     ok "updated config: $CONFIG_FILE"
     # A `mail` key from the old layout is left where it is rather than

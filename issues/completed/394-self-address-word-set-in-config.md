@@ -2,41 +2,41 @@
 
 ## Status
 
-Completed 2026-09-22.  Tested by `scripts/test-mailbox-selection.sh`
-(self-address, label refusal, malformed word, and old-record cases).
+Built 2026-09-22 (commit 7efbdba), then **reverted the same day** at the
+owner's request.  Kept as the record of a design that was tried and set
+aside; the Intended Behavior and steps below describe that design, not
+the running code.
+
+Owner (2026-09-22), on the built version: "Ehhhhh let's change it back to
+how it was before. More config file options for the same result I think,
+which is annoying to the user. So just one field that does both
+self-routing and mailbox labelling."  On the self mark and the startup
+conversion: "yeah let's strip that behavior out, I don't think we need it."
 
 ## Current Behavior
 
-Built as described under Intended Behavior:
+- `name` is both the mailbox's label and the `to:` word for sending to
+  yourself, as before this issue.  There is no `self_address` setting.
+- Self-delivered messages are recognised by their inbox record's `from`
+  equalling `name`, as before.
+- Two changes made alongside this issue were kept, because they are not
+  part of the self-address design:
+  - The first-pass sync: a mailbox with no contacts never ran a sync at
+    startup, because per-contact timers (#377) only make a cycle due when
+    some contact is due, and an outbox file written while the daemon was
+    down raises no file-change event.  The daemon now always syncs on its
+    first pass.
+  - LAN discovery files a found address under the local contact name
+    (#393).
 
-- `self_address` (config, optional, one word) is the `to:` word for sending
-  to yourself.  `name` is the label only.
-- `to: <name>` (not also a contact) is marked NOT AN ADDRESS in the outbox
-  file, with the word to use or a note to set `self_address`.
-- Self-delivered inbox records carry `self = true` and `from =
-  <self_address>`; every self path (delete, update, inbox sync) tests the
-  mark, not a name.
-- On startup, records from the old scheme are converted (inbox marked,
-  outbox record rekeyed, outbox `to:` line rewritten); with none of the
-  new word configured, the daemon stops with the line to add.
-- The installer asks for the word after the label (offering `me`), writes
-  it into new configs, pre-fills it on a re-run, and takes
-  `--self-address=WORD`.  The config comment, README and scripting
-  tutorial describe it.
-- Found while testing: a mailbox with no contacts never ran its first sync,
-  because per-contact timers (#377) only make a cycle due when some contact
-  is due, and an outbox file written while the daemon was down raises no
-  file-change event.  A self-only mailbox therefore never delivered to
-  itself until something touched the outbox.  The daemon now always syncs
-  on its first pass.  This also fixed two cases of
-  `test-mailbox-selection.sh` that were already failing before this issue.
+Why it was set aside: one field doing both jobs is fewer settings for the
+same result.  The risk the split addressed -- a contact that shares the
+mailbox's name -- is already refused on the `to:` line as ambiguous.
 
-Before this issue, `name` doubled as the self-address, and self-delivered
-records were recognised by `from` equalling it.  Owner (2026-09-22),
-weighing the options: "Okay maybe we do need to keep the name. Let's keep
-the label, it sounds like it has a lot of little jobs. ... Instead of a
-reserved word, let's make the user define one with the name. I think
-that's more clean."
+The owner's reasoning that led to the attempt: "Okay maybe we do need to
+keep the name. Let's keep the label, it sounds like it has a lot of little
+jobs. ... Instead of a reserved word, let's make the user define one with
+the name. I think that's more clean."
 
 ## Intended Behavior
 

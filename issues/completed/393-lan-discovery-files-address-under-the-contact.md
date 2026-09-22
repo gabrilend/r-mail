@@ -39,5 +39,8 @@ Completed 2026-09-22.  Tested by `scripts/test-lan-discovery-names.sh`.
 ## Related
 
 - #347 (multiple addresses per contact), #365 (LAN detection), #388
-  (announce the full address set; introduced `local-ip`), #394 (the
-  mailbox's own name becomes a label only).
+  (announce the full address set; introduced `local-ip`), #394 (a
+  separate self-address word; tried and reverted — `name` still does both
+  jobs).
+- #395 (tell the owner when a contact calls itself by a different name;
+  whether to drop the name from the discovery packet).

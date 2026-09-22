@@ -138,14 +138,9 @@ second directory with its own config in it, so nothing has to be named
 uniquely to keep them apart:
 
 ```
-name         = yourname
-self_address = me
-port         = 8025
+name = yourname
+port = 8025
 ```
-
-`name` is this mailbox's label. `self_address` is the word you put on a
-`to:` line to send a message to yourself (`to: me`); leave it out to switch
-that off.
 
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
