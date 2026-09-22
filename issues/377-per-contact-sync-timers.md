@@ -167,4 +167,29 @@ May, and confirming there is no backoff path anywhere in the daemon.
 
 ## Status
 
-Open.
+**Implemented 2026-09-22.**
+
+Decisions taken (resolving the open questions above):
+
+- **Ping** = an `/update-address` announce to every contact at boot — "hi,
+  I'm still here, at this location".  Not a new endpoint: it queues the same
+  pending-address entry an IP change queues, so it rides the ordinary sync
+  cycle.  This also makes a restart a full repair for contacts holding a
+  stale address for us, not just a re-detection.
+- **Growth** stays additive `+360`, floor **30s**, ceiling **2h**, with
+  **±30s jitter** on every due time so contacts that failed together do not
+  stay in lockstep and re-storm together.
+- **No TTL.**  A permanently-failing op is backed off, never dropped.  At the
+  ceiling `aurelia` costs ~12 attempts/day instead of ~5,700, and nothing is
+  discarded silently.
+- **Reset on inbound** is hooked after successful decryption, so only a
+  sender proving possession of the shared token can reset a timer.
+
+The gate lives in `http_post_batch_with_fallback`, the single choke point
+every outbound op passes through, rather than being duplicated into the six
+op builders.  A withheld request is returned to its builder as an ordinary
+failed result — which is the correct signal, since every builder already
+treats failure as "leave the op queued and change nothing".
+
+Not addressed here: #371 (log coalescing) is much less urgent now, as
+predicted, since backoff removes most of the repeat volume.

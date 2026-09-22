@@ -165,4 +165,32 @@ and #378.
 
 ## Status
 
-Open.
+**Implemented 2026-09-22**, with one change from the title: the period is
+**36h ±12h** (uniform over `[24h, 48h)`), not once per day.  A window wider
+than a day cannot land in the same part of the clock twice running, and a
+36h mean is not a divisor of 24h, so the check precesses through the day
+instead of settling into a slot.
+
+Decisions taken (resolving the open questions above):
+
+- **Confirmation on change: kept.**  The costs are asymmetric — a missed
+  change costs one window of staleness, a false one broadcasts a bad address
+  to every contact and rewrites their contacts files.
+- **All three checks moved onto the timer**, not just public IPv4.  They were
+  the same bug on three consecutive lines, and the LAN check has already
+  fired for real here (`192.168.0.6` → `.22`); a stale LAN IP silently breaks
+  the router's port-forward target.
+- **A failed probe retries in 1h**, not a full window.  `detect_ip_change`
+  now returns whether any provider answered, so "no answer" and "no change"
+  are finally distinguishable.
+- **`next_addr_check` is re-drawn on boot**, not persisted — simpler, and a
+  restart loop cannot pin the probe to one time of day.
+- The generator is **reseeded on every check**, so a months-long process does
+  not ride a single boot-time seed for its whole life.
+
+The "one provider is enough" requirement needed no code change:
+`check_public_ip` already returns on the first provider that answers, and
+`verify_ip_change` only runs when the address actually differs.
+
+The `math.randomseed` gotcha described above was real and is fixed centrally,
+which also repairs `shuffled_ip_services()`.

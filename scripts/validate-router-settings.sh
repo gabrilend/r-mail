@@ -85,7 +85,7 @@ fi
 if [ -n "$LOCAL_IP" ]; then
     printf "  Local IP:               %s\n" "$LOCAL_IP"
     printf "  Checking local port...  "
-    curl -s --max-time 2 "http://$LOCAL_IP:$PORT/" >/dev/null 2>&1
+    curl -s --max-time 5 "http://$LOCAL_IP:$PORT/" >/dev/null 2>&1
     LOCAL_EXIT=$?
     if [ "$LOCAL_EXIT" -eq 28 ]; then
         fail "timed out"
@@ -109,7 +109,7 @@ IPV6_ADDR=$(ip -6 addr show scope global 2>/dev/null | grep -v "temporary\|depre
 if [ -n "$IPV6_ADDR" ]; then
     printf "  IPv6 address:           %s\n" "$IPV6_ADDR"
     printf "  Checking IPv6 port...   "
-    curl -s -g --max-time 2 "http://[$IPV6_ADDR]:$PORT/" >/dev/null 2>&1
+    curl -s -g --max-time 5 "http://[$IPV6_ADDR]:$PORT/" >/dev/null 2>&1
     IPV6_EXIT=$?
     if [ "$IPV6_EXIT" -eq 28 ]; then
         warn "timed out"
@@ -132,8 +132,17 @@ fi
 # rmail uses AES-256-GCM encryption, so a plain curl will get a garbled
 # response — but that still means the TCP connection reached the machine.
 # Only curl exit code 28 (timeout) means the packet was dropped by the router.
+#
+# The timeout is deliberately generous.  A router's hairpin path is a slow
+# path -- the packet leaves, is NATted back in, and is NATted a second time
+# on the way to the daemon -- and it is often rate-limited on top of that.
+# This was 2s, which reported "not supported" on a router where hairpin
+# works fine but takes ~10s to complete the handshake on a cold conntrack
+# entry.  A false "not supported" sends you off rewriting contact files to
+# chase a problem you do not have, so err long: this test only costs its
+# full duration when the answer really is no.
 printf "  Testing hairpin NAT...  "
-curl -s --max-time 2 "http://$PUBLIC_IP:$PORT/" >/dev/null 2>&1
+curl -s --max-time 15 "http://$PUBLIC_IP:$PORT/" >/dev/null 2>&1
 CURL_EXIT=$?
 if [ "$CURL_EXIT" -eq 28 ]; then
     warn "not supported"
@@ -189,7 +198,7 @@ fi
 PARSED=$(awk '
 {
     sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "")
-    if ($0 == "" || $0 ~ /^[\/\#]/) next
+    if ($0 == "" || $0 ~ /^[\/#]/) next
     if ($0 !~ /^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+[ \t]*=/) next
 
     dotpos = index($0, ".")
@@ -227,7 +236,7 @@ else
     echo ""
     echo "$CONTACT_LIST" | while IFS=: read -r cname cip cport; do
         printf "    %-18s %s:%s  " "$cname" "$cip" "$cport"
-        curl -s --max-time 3 "http://$cip:$cport/" >/dev/null 2>&1
+        curl -s --max-time 10 "http://$cip:$cport/" >/dev/null 2>&1
         RESULT=$?
         if [ "$RESULT" -eq 28 ]; then
             printf "\033[33m!!\033[0m  timed out\n"

@@ -116,6 +116,18 @@ local paths = {
 }
 paths.uploads = paths.attachments .. "/.uploads"
 
+-- The config parser leaves quotes on values, so `log_file = "/tmp/x.log"`
+-- arrives as a string with literal quote characters that would become part
+-- of the filename.  Strip them, treat an empty value as "no file copy",
+-- and expand a leading ~ the way the mailbox argument is expanded.
+local function _log_file(v, state_dir)
+    if v == nil or v == false then return state_dir .. "/rmail.log" end
+    v = tostring(v):gsub('^"(.*)"$', '%1'):gsub("^'(.*)'$", '%1')
+    v = v:match("^%s*(.-)%s*$")
+    if v == "" then return nil end
+    return (v:gsub("^~", os.getenv("HOME") or "/tmp"))
+end
+
 -- Consolidated config flags
 local cfg = {
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
@@ -129,6 +141,19 @@ local cfg = {
     -- reason; making it the default retires the special case.  See #382.
     notify_ip_change  = config.notify_ip_change == true,
     auto_port_forward = config.auto_port_forward == true,
+    -- Where to mirror the log.  stderr always goes to whoever started the
+    -- daemon -- journald under systemd, a terminal when run by hand -- and
+    -- that copy is not optional.  This is the *second* copy, a plain file
+    -- you can tail, grep and paste without journalctl's invocation between
+    -- you and the text.  Both, not either: the journal is what the OS
+    -- expects, the file is what a person reaching for `tail -f` expects.
+    --
+    -- The default lives in the mailbox rather than at a fixed path because
+    -- a machine can hold several mailboxes (#382) and a shared path would
+    -- interleave two daemons' lines into one unreadable file.  Set
+    -- `log_file` in the config to put it somewhere else, or to `""` to
+    -- keep the journal copy only.
+    log_file          = _log_file(config.log_file, paths.state),
 }
 
 -- Hook scripts.  The config parser doesn't strip quotes, so a user who
@@ -580,6 +605,63 @@ local function sanitize_filename(name)
     return name
 end
 
+-- ---- Randomness --------------------------------------------------------
+--
+-- math.random is unusable until the generator is seeded, and nothing seeded
+-- it.  The only math.randomseed call in the file sat inside uuid()'s
+-- /dev/urandom *fallback* branch, which never executes on a host where
+-- /dev/urandom opens -- i.e. never.  Under LuaJIT an unseeded generator
+-- replays an identical sequence on every process start, so everything built
+-- on math.random was deterministic across boots:
+--
+--   * shuffled_ip_services() picked the same "random" order every run,
+--     quietly defeating the comment that says it spreads load across
+--     resolvers so none gets pinned as primary;
+--   * #379's daily IP probe would have drawn the same "random" time of day
+--     on every boot -- exactly the fixed-schedule behaviour the requirement
+--     rules out.
+--
+-- Seed once, centrally, from the source uuid() already prefers.  That
+-- repairs every existing caller at the same time.
+
+local function urandom_bytes(n)
+    local f = io.open("/dev/urandom", "rb")
+    if not f then return nil end
+    local b = f:read(n)
+    f:close()
+    if not b or #b < n then return nil end
+    return b
+end
+
+local function urandom_u32()
+    local b = urandom_bytes(4)
+    if not b then return nil end
+    local a, c, d, e = b:byte(1, 4)
+    return ((a * 256 + c) * 256 + d) * 256 + e
+end
+
+-- Uniform integer in [0, n).  Rejection-sampled rather than a plain modulo,
+-- which would skew results toward low values whenever n does not divide
+-- 2^32 evenly.  For a 86400-second offset that bias is small but free to
+-- avoid, and this is the function the daily probe's unpredictability rests
+-- on.  Falls back to math.random only if /dev/urandom is unavailable.
+local function random_below(n)
+    n = math.floor(n)
+    if n <= 1 then return 0 end
+    for _ = 1, 16 do
+        local v = urandom_u32()
+        if not v then return math.random(0, n - 1) end
+        local limit = 4294967296 - (4294967296 % n)  -- drop the ragged tail
+        if v < limit then return v % n end
+    end
+    return math.random(0, n - 1)  -- pathological; take the biased answer
+end
+
+do
+    local v = urandom_u32()
+    math.randomseed(v or (socket.gettime() * 1000))
+end
+
 local function uuid()
     local f = io.open("/dev/urandom", "rb")
     if not f then
@@ -604,9 +686,53 @@ end
 -- Config & state
 -- ============================================================
 
+-- A log file that nothing trims will fill its filesystem, and the usual
+-- home for this one is RAM-backed /tmp, where "fills up" means the machine
+-- suffers rather than just the log.  Rotate at 5 MB keeping one old copy,
+-- so the cost is bounded at 10 MB no matter how long the daemon runs or how
+-- noisy an unreachable contact gets.
+local LOG_MAX_BYTES = 5 * 1024 * 1024
+local log_fh        = nil
+local log_broken    = false   -- complain once, not once per line
+
+local function log_handle()
+    if log_broken or not cfg.log_file then return nil end
+    if log_fh then return log_fh end
+    local fh, err = io.open(cfg.log_file, "a")
+    if not fh then
+        log_broken = true
+        io.stderr:write(os.date("%Y-%m-%d %H:%M:%S ") .. string.format(
+            "cannot open log_file '%s': %s -- continuing with journal only\n",
+            tostring(cfg.log_file), tostring(err)))
+        io.stderr:flush()
+        return nil
+    end
+    log_fh = fh
+    return log_fh
+end
+
+local function log_rotate()
+    if not log_fh then return end
+    log_fh:close()
+    log_fh = nil
+    os.remove(cfg.log_file .. ".1")
+    os.rename(cfg.log_file, cfg.log_file .. ".1")
+end
+
 local function log(fmt, ...)
-    io.stderr:write(os.date("%Y-%m-%d %H:%M:%S ") .. string.format(fmt, ...) .. "\n")
+    local line = os.date("%Y-%m-%d %H:%M:%S ") .. string.format(fmt, ...) .. "\n"
+
+    -- stderr first and unconditionally.  If the file copy is going to fail
+    -- it must not take the journal copy down with it.
+    io.stderr:write(line)
     io.stderr:flush()
+
+    local fh = log_handle()
+    if not fh then return end
+    fh:write(line)
+    fh:flush()
+    local size = fh:seek("end")
+    if size and size >= LOG_MAX_BYTES then log_rotate() end
 end
 
 -- ---- The daemon reporting its own problems as mail (#382) ---------------
@@ -655,6 +781,113 @@ local function clear_problem(direction, problem_id)
     return true
 end
 
+-- ---- Per-contact sync timers (#377) -------------------------------------
+--
+-- The cadence used to be one global interval shared by every contact, moved
+-- by an aggregate did_work flag, with no per-contact failure backoff.  Two
+-- bugs fell out of that.
+--
+-- An unreachable contact became a permanent beacon: every op type re-queues
+-- on failure (the recipient entry is written only on success), so a contact
+-- who goes offline is retried forever at the floor rate.  `aurelia` had been
+-- dialed at a superseded address since May -- roughly 5,700 connect attempts
+-- a day, at an address her own address-update message replaced months
+-- earlier.  It could never succeed, so it could never stop.
+--
+-- And failure was self-sustaining in both directions.  A cycle whose only
+-- activity was a failed op counted as idle, so the interval parked at the
+-- ceiling; meanwhile one chatty contact held the timer at the floor and every
+-- other contact got polled at that rate too.  One knob for N contacts with N
+-- different reachability profiles.
+--
+-- Each contact now carries its own interval and due time.  Growth is
+-- additive (+360s) to a 2h ceiling, with +/-30s of jitter on every due time
+-- so that N contacts who failed in the same cycle do not stay in lockstep
+-- and re-storm together.  Success returns a contact to the floor.
+--
+-- There is deliberately no TTL: a permanently-failing op is backed off, never
+-- dropped.  At the ceiling `aurelia` costs ~12 attempts a day rather than
+-- 5,700, and nothing is ever silently discarded.
+
+-- Consolidated into one table rather than a dozen top-level locals: the main
+-- chunk is close to Lua's 200-local ceiling, which is the same pressure that
+-- produced the `paths` and `cfg` tables above.
+local ctimer = {
+    FLOOR   = 30,     -- seconds; fastest we will poll one contact
+    CEILING = 7200,   -- 2h
+    STEP    = 360,    -- additive growth per failed cycle
+    JITTER  = 30,     -- +/- this much on every due time
+
+    timers    = {},
+    skipped   = {},   -- contacts whose ops we withheld this cycle
+    attempted = {},   -- contacts we actually tried this cycle
+}
+
+function ctimer.jittered(interval)
+    -- random_below draws from /dev/urandom, so this is not the fixed-seed
+    -- math.random sequence that made shuffled_ip_services() deterministic.
+    return interval + (random_below(2 * ctimer.JITTER + 1) - ctimer.JITTER)
+end
+
+function ctimer.get(name)
+    local t = ctimer.timers[name]
+    if not t then
+        -- A contact we have never reached is due immediately.  That is what
+        -- makes a newly added contact, and every contact at startup, get
+        -- contacted on the next cycle rather than after a floor-length wait.
+        t = {interval = ctimer.FLOOR, next_due = 0, last_ok = nil}
+        ctimer.timers[name] = t
+    end
+    return t
+end
+
+function ctimer.is_due(name, now)
+    return now >= ctimer.get(name).next_due
+end
+
+function ctimer.mark_success(name, now)
+    local t = ctimer.get(name)
+    t.interval = ctimer.FLOOR
+    t.last_ok  = now
+    t.next_due = now + ctimer.jittered(ctimer.FLOOR)
+end
+
+function ctimer.mark_failure(name, now)
+    local t    = ctimer.get(name)
+    local prev = t.interval
+    t.interval = math.min(ctimer.CEILING, t.interval + ctimer.STEP)
+    t.next_due = now + ctimer.jittered(t.interval)
+    -- Logged only when the interval actually moves, so a contact at the
+    -- ceiling is silent rather than announcing itself forever -- which is
+    -- the failure mode this whole issue is about.  Bounded at ~20 lines per
+    -- contact for the lifetime of the process.
+    if t.interval ~= prev then
+        log("backing off %s: retrying every %ds", name, t.interval)
+    end
+end
+
+-- Inbound contact resets that contact's timer only (#377 requirement 3).
+-- This is what gives two online peers push-like latency: when they talk to
+-- us we become due immediately, so our reply goes out on the next loop pass
+-- rather than up to two hours later.  Everyone else's backoff is untouched.
+function ctimer.saw_inbound(name)
+    if not name or name == "" then return end
+    local t = ctimer.get(name)
+    t.interval = ctimer.FLOOR
+    t.last_ok  = socket.gettime()
+    t.next_due = 0
+end
+
+-- Seconds until the earliest contact comes due, for the main loop's sleep.
+function ctimer.time_to_due(now)
+    local soonest = nil
+    for _, t in pairs(ctimer.timers) do
+        if not soonest or t.next_due < soonest then soonest = t.next_due end
+    end
+    if not soonest then return nil end
+    return math.max(0, soonest - now)
+end
+
 -- ---- Per-cycle reachability tracking (#324) -----------------------------
 --
 -- Without this, one offline contact produces N separate "failed to notify
@@ -676,11 +909,19 @@ end
 local function flush_unreachable_summary()
     local unreachable = {}
     for name, s in pairs(_cycle_contact_stats) do
-        if s.fail > 0 and s.ok == 0 then
+        -- A withheld op reaches the builders as a failed result, because that
+        -- is exactly how they must treat it: leave the op queued and change
+        -- nothing.  But "we chose not to dial you this cycle" is not the same
+        -- claim as "we dialed you and you did not answer", and only the
+        -- second belongs in this summary.  Requiring a real attempt keeps a
+        -- backed-off contact from being reported unreachable every 30s while
+        -- we are deliberately not calling them.
+        if s.fail > 0 and s.ok == 0 and ctimer.attempted[name] then
             unreachable[#unreachable + 1] = name
         end
     end
     _cycle_contact_stats = {}
+    ctimer.skipped, ctimer.attempted = {}, {}
     if #unreachable == 0 then return end
     table.sort(unreachable)
     log("unreachable contacts this cycle: %s", table.concat(unreachable, ", "))
@@ -2254,7 +2495,7 @@ end
 --
 -- First-attempt parallelism is preserved; fallback is only serial for
 -- the entries that actually failed, which are usually a small minority.
-local function http_post_batch_with_fallback(requests)
+local function http_post_batch_raw(requests)
     for _, req in ipairs(requests) do
         if req.endpoints and req.endpoints[1] then
             req.host = req.endpoints[1].addr
@@ -2310,6 +2551,70 @@ local function http_post_batch_with_fallback(requests)
                 end
             end
         end)
+    end
+
+    return results
+end
+
+-- ---- #377: the per-contact gate ----------------------------------------
+--
+-- Every outbound op in the daemon funnels through here, which makes this the
+-- one place the per-contact timers can be enforced.  The alternative -- a
+-- due-check inside sync_outbox, sync_inbox, sync_address_notifications, the
+-- chunk sender, the consent senders and the cancellation sender -- is the
+-- same rule written six times, and the seventh op builder somebody adds
+-- later would silently not have it.
+--
+-- A withheld request is reported back to its builder as an ordinary failed
+-- result.  That is not a workaround, it is the correct signal: every builder
+-- already treats failure as "leave the op queued and change nothing", which
+-- is exactly what should happen to an op we chose not to send yet.  Nothing
+-- is dropped and no state is mutated.  The two places where "withheld" and
+-- "failed" genuinely differ are handled explicitly -- the unreachable
+-- summary ignores contacts with no real attempt, and the timers below are
+-- only advanced for requests actually put on the wire, so a withheld op
+-- never compounds a contact's own backoff.
+local function http_post_batch_with_fallback(requests)
+    local now      = socket.gettime()
+    local results  = {}
+    local send, map = {}, {}
+
+    for i, req in ipairs(requests) do
+        -- load_contacts stamps contact_name onto every endpoint, so the
+        -- builders did not have to be changed to carry it a second time.
+        local cname = req.contact_name
+            or (req.endpoints and req.endpoints[1] and req.endpoints[1].contact_name)
+
+        if cname and not ctimer.is_due(cname, now) then
+            ctimer.skipped[cname] = true
+            results[i] = {ok = false, skipped = true}
+        else
+            if cname then ctimer.attempted[cname] = true end
+            send[#send + 1] = req
+            map[#send]      = i
+        end
+    end
+
+    if #send == 0 then return results end
+
+    local sub = http_post_batch_raw(send)
+
+    for j, i in ipairs(map) do
+        local r = sub[j] or {ok = false}
+        results[i] = r
+        local cname = send[j].contact_name
+            or (send[j].endpoints and send[j].endpoints[1]
+                and send[j].endpoints[1].contact_name)
+        if cname then
+            -- Any HTTP status at all means we reached them and they answered;
+            -- a 404 ("already done on my end") is a reachable contact, not a
+            -- dead one, and must not be allowed to grow their backoff.
+            if r.ok or r.status then
+                ctimer.mark_success(cname, now)
+            else
+                ctimer.mark_failure(cname, now)
+            end
+        end
     end
 
     return results
@@ -4321,28 +4626,42 @@ local function verify_ip_change(new_ip, used_service)
     return false
 end
 
+-- Returns true if the probe got an answer (whether or not the address had
+-- changed), false if no provider answered at all.  The caller needs to tell
+-- those apart: "no answer" is not evidence of "no change", it is usually the
+-- network being down, and #379's daily timer retries sooner on it rather
+-- than banking a whole further day of staleness on a failed lookup.
+--
+-- Note the probe cost is already what #379 asks for: check_public_ip returns
+-- on the *first* provider that answers, so the routine case is one DNS
+-- query.  verify_ip_change only runs when the address actually differs, so
+-- the second, independent-provider query is paid only on the rare day it
+-- matters.  That keeps the confirmation guard -- which is worth keeping,
+-- because the costs are asymmetric: a missed change costs a day of
+-- staleness, while a *false* change broadcasts a bad address to every
+-- contact and rewrites their contacts files, which is far harder to undo.
 local function detect_ip_change(my_name, port)
     local new_ip, service = check_public_ip()
-    if not new_ip then return end
+    if not new_ip then return false end
 
     local stored_ip = read_file(STATE .. "/public_ip")
     if stored_ip then stored_ip = stored_ip:match("^%s*(.-)%s*$") end
     -- Discard stored value if it's not a valid IP (e.g. stale HTML from old bug)
     if stored_ip and not stored_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_ip = nil end
 
-    if stored_ip == new_ip then return end
+    if stored_ip == new_ip then return true end
 
     -- first run: just save it
     if not stored_ip then
         log("public IP recorded: %s", new_ip)
         write_file(STATE .. "/public_ip", new_ip)
-        return
+        return true
     end
 
     -- verify with a different provider before notifying
     if not verify_ip_change(new_ip, service) then
         log("public IP change not confirmed (%s reported %s)", service.provider, new_ip)
-        return
+        return true
     end
 
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
@@ -4359,6 +4678,7 @@ local function detect_ip_change(my_name, port)
         end
     end
     save_state("pending-address.json", pending)
+    return true
 end
 
 -- Get the system's global IPv6 address (no external service needed — no NAT with IPv6).
@@ -5129,6 +5449,18 @@ local function handle_request(rt, client)
         end
         if not plaintext then log("decryption failed: no matching contact key"); return end
 
+        -- #377 requirement 3: a contact who talks to us is demonstrably
+        -- alive, so drop their backoff to the floor and mark them due now.
+        -- Their reply then goes out on the next loop pass instead of up to
+        -- two hours later, which is what gives two online peers push-like
+        -- latency on top of a polling design.  Only this contact's timer
+        -- moves; everyone else's backoff is untouched.
+        --
+        -- Placed after decryption on purpose.  Decrypting with a contact's
+        -- key proves the sender holds the shared token, so a spoofed or
+        -- malformed packet cannot reset anybody's timer.
+        ctimer.saw_inbound(contact_name)
+
         -- Cache sender for subsequent requests on this connection
         if not known_contact then
             known_contact = contact_name
@@ -5262,16 +5594,40 @@ local function run_sync_cycle(rt)
     local w6 = send_next_chunks(rt.my_name)
     local w7 = send_attachment_cancellations(rt.my_name)
     write_transfers_file(load_state("chunks-outgoing.json"))
+
+    -- #377: a contact who was due but had nothing queued this cycle still
+    -- needs their timer moved on.  Their ops never reach the gate -- an
+    -- op-less contact builds no request at all -- so nothing above has
+    -- touched their due time, and leaving it in the past would make them
+    -- permanently due and collapse the main loop's sleep to zero.
+    --
+    -- They return to the floor rather than backing off.  Having nothing to
+    -- say to somebody is not evidence they are unreachable, and the cost of
+    -- being wrong is nil: a contact with no ops sends no packets, so this
+    -- buys a loop wakeup every 30s and no network traffic whatsoever.
+    local now = socket.gettime()
+    for name in pairs(load_contacts()) do
+        if name ~= rt.my_name
+            and not ctimer.attempted[name]
+            and not ctimer.skipped[name]
+            and ctimer.is_due(name, now)
+        then
+            ctimer.get(name).next_due = now + ctimer.jittered(ctimer.FLOOR)
+        end
+    end
+
     -- One summary log for contacts whose every op failed this cycle
     -- (#324), instead of a separate "failed to X" line per queued op.
+    -- Also clears the per-cycle attempted/skipped sets, so it has to run
+    -- after the sweep above reads them.
     flush_unreachable_summary()
-    if w1 or w2 or w3 or w4 or w5 or w6 or w7 then
-        rt.interval = math.max(rt.min_interval, rt.interval - 240)
-        log("had work, interval -> %ds", rt.interval)
-    else
-        rt.interval = math.min(rt.interval + 360, rt.max_interval)
-        log("idle, interval -> %ds", rt.interval)
-    end
+
+    -- The old global interval lived here, moved by the aggregate did_work
+    -- flag across all seven op types.  It is gone: cadence is per contact
+    -- now, set at the gate in http_post_batch_with_fallback from that
+    -- contact's own result.  The w1..w7 flags are kept because the builders
+    -- still report them and they read as documentation of what a cycle does.
+    local _ = w1 or w2 or w3 or w4 or w5 or w6 or w7
 end
 
 local function poll_udp_cycle(rt)
@@ -5286,6 +5642,83 @@ end
 -- ============================================================
 -- Init runtime — setup, validation, returns state table
 -- ============================================================
+
+-- ---- #379: periodic re-detection of our own address ---------------------
+--
+-- detect_ip_change and its two siblings ran exactly once, from init_runtime,
+-- and nowhere else.  A daemon whose normal state is to run for months could
+-- therefore never notice its own address moving -- not as an oversight but
+-- by construction.  The Aug 6 -> Sep 21 window on this machine cost 41
+-- stranded Android outbox notes and left every contact holding a dead
+-- address for 46 days, and the detection code was never at fault: queried by
+-- hand the same day, all three providers answered correctly and agreed.  It
+-- worked.  It just never ran.
+--
+-- All three checks move onto the timer, not only the public-IPv4 one.  They
+-- are the same bug on three consecutive lines, and the LAN check has already
+-- fired for real here (192.168.0.6 -> .22).  A stale LAN IP silently breaks
+-- the router's port-forward target, which is this same outage wearing a
+-- different hat.
+--
+-- The delay is 36h +/- 12h -- drawn uniformly from [24h, 48h) -- and redrawn
+-- after *every* check rather than fixed once per install.  Two properties
+-- fall out of that.  The window is wider than a day, so the probe cannot
+-- land in the same part of the clock twice running the way a 24h period
+-- with jitter tends to; and because the mean is not a divisor of 24h, the
+-- check precesses through the day instead of settling into a slot.  A daily
+-- beacon at 03:14 is a fingerprint; one that drifts is much weaker signal.
+--
+-- The draw comes from random_below (/dev/urandom).  math.random would have
+-- produced an identical "random" schedule on every boot, which is precisely
+-- the failure the requirement rules out.
+-- One table rather than five top-level locals; see the note on `ctimer`
+-- about the main chunk's 200-local ceiling.
+local addrchk = {
+    BASE   = 36 * 3600,   -- 36h mean
+    JITTER = 12 * 3600,   -- +/- 12h, so [24h, 48h)
+    RETRY  = 3600,        -- when the probe got no answer at all
+}
+
+function addrchk.schedule(rt, answered)
+    -- Reseed math.random on every check.  random_below already draws from
+    -- /dev/urandom and does not need it, but the process-wide generator is
+    -- shared with uuid()'s fallback path, shuffled_ip_services() and the DNS
+    -- query id in dns_query_public_ip -- and a daemon that runs for months
+    -- otherwise rides a single boot-time seed for its entire life.  Folding
+    -- in fresh entropy roughly daily costs one 4-byte read and keeps a
+    -- long-lived process from becoming more predictable than one that
+    -- restarts often.
+    local fresh = urandom_u32()
+    if fresh then math.randomseed(fresh) end
+
+    -- A probe nobody answered is not evidence of "no change" -- it is no
+    -- evidence at all, usually a network that is down.  Sleeping another day
+    -- and a half on it would turn a transient outage into a second month of
+    -- staleness, so come back in an hour instead.
+    local delay = addrchk.RETRY
+    if answered then
+        delay = (addrchk.BASE - addrchk.JITTER)
+                + random_below(2 * addrchk.JITTER)
+    end
+    rt.next_addr_check = socket.gettime() + delay
+    return delay
+end
+
+function addrchk.run(rt)
+    local pok, answered = pcall(detect_ip_change, rt.my_name, rt.port)
+    pcall(detect_ipv6_change, rt.my_name, rt.port)
+    pcall(check_lan_ip_change, rt.port)
+
+    local got   = pok and answered ~= false
+    local delay = addrchk.schedule(rt, got)
+    if not got then
+        log("address check: no provider answered, retrying in %dm",
+            math.floor(delay / 60))
+    else
+        log("address check done, next in %dh%02dm",
+            math.floor(delay / 3600), math.floor((delay % 3600) / 60))
+    end
+end
 
 local function init_runtime()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
@@ -5329,9 +5762,10 @@ local function init_runtime()
         my_name      = config.name,
         port         = configured_port,
         nat_mapping  = nil,
-        interval     = 10,   -- TODO: increase for production
-        min_interval = 10,
-        max_interval = 30,   -- TODO: increase for production
+        -- interval/min_interval/max_interval used to live here: one global
+        -- cadence for every contact.  Replaced by per-contact timers (#377);
+        -- see the `ctimer` table.  last_sync is kept only so an inotify
+        -- trigger can still tell how long it has been since the last cycle.
         last_sync    = socket.gettime(),
         lan = { udp = nil, peers = {}, discovery_sent = {} },
         outbox_inotify_fd = nil,
@@ -5445,6 +5879,50 @@ local function init_runtime()
     pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(detect_ipv6_change, rt.my_name, rt.port)
     pcall(check_lan_ip_change, rt.port)
+    -- #377 requirement 1, the startup ping itself: tell every contact where
+    -- we are, at boot.  Deliberately not a new mechanism -- it queues the
+    -- same pending-address entry that a detected IP change queues, so it
+    -- travels as an ordinary /update-address op through the ordinary sync
+    -- cycle.  "Hi, I'm still here, at this location."
+    --
+    -- This matters most for the case that motivated #379: a contact whose
+    -- stored address for us went stale has no way to ask, and we are the
+    -- only party who can tell them.  Announcing unprompted at boot means a
+    -- restart is a full repair, not just a re-detection.
+    --
+    -- Contacts stored under a hostname are unaffected by design: the
+    -- receiving end preserves a hostname against an address update, because
+    -- re-resolution already handles our IP churn.
+    pcall(function()
+        local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+        if not my_public or my_public == "" then return end
+        local contacts = load_contacts()
+        local pending  = unmigrate_hashed_keys(
+            load_state("pending-address.json"), contacts)
+        local n = 0
+        for name, c in pairs(contacts) do
+            if name ~= rt.my_name and c.ip then
+                pending[name] = {ip = my_public, port = rt.port}
+                n = n + 1
+            end
+        end
+        save_state("pending-address.json", pending)
+        if n > 0 then log("startup: announcing %s:%d to %d contact(s)", my_public, rt.port, n) end
+    end)
+
+    -- Seed a timer for every contact
+    -- with next_due in the past, so the first cycle after boot contacts
+    -- everyone rather than waiting out a floor-length delay.  ctimer.get
+    -- creates exactly that, so touching each name is the whole of it.
+    for name in pairs(load_contacts()) do
+        if name ~= rt.my_name then ctimer.get(name) end
+    end
+
+    -- Arm the daily re-check (#379).  Redrawn on boot rather than persisted:
+    -- simpler, and it means a restart loop cannot pin the probe to one time
+    -- of day.  The startup checks above have just run, so the first timed
+    -- one is a full draw away.
+    addrchk.schedule(rt, true)
     join_multicast_group(rt.lan.udp)
 
     -- Initial LAN discovery
@@ -5591,13 +6069,28 @@ local function main()
             end
         end
 
-        -- Sleep until: a socket has data, an outbox file changes, or it's
-        -- time for the next sync cycle.  No wasted wakeups.
-        local time_to_sync = math.max(0, rt.interval - (socket.gettime() - rt.last_sync))
+        -- Sleep until: a socket has data, an outbox file changes, it's time
+        -- for the next sync cycle, or the daily address re-check (#379) comes
+        -- due.  No wasted wakeups -- which is why the address timer has to be
+        -- part of this calculation rather than checked opportunistically: an
+        -- idle daemon can sit in select() for the whole sync interval, and a
+        -- check that only runs when something else happens to wake us is a
+        -- check that does not run on a quiet machine.
+        local now_s = socket.gettime()
+        -- #377: sleep until the *earliest* contact comes due, not until one
+        -- global interval elapses.  A backed-off contact no longer drags the
+        -- others' cadence with it, and a chatty one no longer pins everyone
+        -- to the floor.  nil means no contacts are known yet, in which case
+        -- there is nothing to poll and a minute is a fine idle wait.
+        local time_to_sync = ctimer.time_to_due(now_s) or 60
+        local sleep_for    = time_to_sync
+        if rt.next_addr_check then
+            sleep_for = math.min(sleep_for, math.max(0, rt.next_addr_check - now_s))
+        end
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
-            time_to_sync)
+            sleep_for)
 
         -- Handle readable sockets
         local outbox_changed = false
@@ -5670,7 +6163,15 @@ local function main()
         if outbox_changed then
             log("outbox change detected, syncing")
         end
-        if outbox_changed or contacts_changed or now - rt.last_sync >= rt.interval then
+        -- Runs before the sync block so that a confirmed change is written to
+        -- .state and queued into pending-address.json in time for the very
+        -- next cycle to deliver it, rather than a whole interval later.
+        if rt.next_addr_check and now >= rt.next_addr_check then
+            pcall(addrchk.run, rt)
+        end
+
+        local any_due = (ctimer.time_to_due(now) or math.huge) <= 0
+        if outbox_changed or contacts_changed or any_due then
             for raw_sock, info in pairs(clients) do
                 if now - info.last_activity > 30 then
                     pcall(function() raw_sock:close() end)

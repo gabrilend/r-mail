@@ -240,34 +240,71 @@ jump around.
 ### Simultaneous IP change (#313)
 - [ ] (Design phase — no tests yet)
 
-### Per-contact sync timers (#377)
-- [ ] On daemon start, every contact is contacted once (startup ping)
-- [ ] Each contact has an independent timer — one unreachable contact does
-      not slow polling for a reachable one, and one chatty contact does not
-      speed it up for everyone
-- [ ] An unreachable contact backs off progressively instead of retrying at
-      a fixed rate forever; verify over a multi-hour run that it settles at
-      the 2h ceiling
-- [ ] Backoff resets to the floor after a successful exchange with that contact
-- [ ] An inbound request from a contact resets **only that contact's** timer;
-      other contacts' timers are unchanged
-- [ ] A reply to an inbound message goes out promptly rather than waiting for
-      the backoff delay to expire
-- [ ] Deleting an unreachable contact stops its retries entirely
+### Per-contact sync timers (#377) — implemented 2026-09-22
 
-### Daily public IP recheck (#379)
-- [ ] Public IP is re-checked once per day with no daemon restart
-- [ ] Check fires at a random time — it is not the same clock time two days
-      running, and not a fixed offset from boot
-- [ ] Restarting the daemon does not reproduce the same "random" time
-      (`math.random` is effectively unseeded — see issue)
-- [ ] The routine daily probe queries only one provider
-- [ ] A detected change is confirmed against a *different* provider before
-      any contact is notified
-- [ ] IP change mid-run → `.state/public_ip` updated and address-change
-      notifications queued for all contacts, without a restart
-- [ ] A failed probe (network down, resolver unreachable) is not mistaken for
-      an IP change
+Settings as built: floor **30s**, additive **+360s** per failed cycle, **2h**
+ceiling, **±30s** jitter on every due time. No TTL — a permanently-failing op
+is backed off, never dropped. The "startup ping" is an `/update-address`
+announce ("hi, I'm still here, at this location"), reusing the existing
+pending-address path rather than a new endpoint.
+
+Verified at scaled constants (floor 2s, step 3s, ceiling 20s) against two
+RFC 5737 TEST-NET addresses and a live loopback peer pair:
+
+- [x] On daemon start, every contact is contacted once (startup ping)
+      — `startup: announcing <ip>:<port> to 2 contact(s)`, delivered
+- [x] Each contact has an independent timer — two contacts that failed in the
+      same cycle drifted apart and stayed apart, confirming jitter decouples
+      them rather than keeping them in lockstep
+- [x] An unreachable contact backs off progressively — observed
+      2→5→8→11→14→17→20s and then silent at the ceiling
+- [x] Backoff settles at the ceiling and stops growing (no lines above it)
+- [x] An inbound request from a contact resets that contact's timer — peer
+      came up at 17s backoff, next retry was at the floor
+- [x] A withheld op is not reported as "unreachable" (only contacts with a
+      real attempt reach the summary)
+- [ ] Backoff resets to the floor after a *successful outbound* exchange
+      (inbound reset verified; success path not yet exercised end-to-end)
+- [ ] Inbound resets **only that contact's** timer, others unchanged —
+      needs a 3-contact run; only a single-contact case was tested
+- [ ] A reply to an inbound message goes out promptly rather than waiting for
+      the backoff delay (implied by the reset, not directly measured)
+- [ ] Deleting an unreachable contact stops its retries entirely
+- [ ] Verify at **production** constants over a multi-hour run that a dead
+      contact settles at the 2h ceiling (~12 attempts/day, down from ~5,700)
+- [ ] A contact with no queued ops does not spin the main loop (op-less
+      contacts are swept back to the floor; confirm no busy-wait)
+
+### Public IP recheck every 36h ±12h (#379) — implemented 2026-09-22
+
+Changed from the originally-filed "once per day": the delay is drawn
+uniformly from **[24h, 48h)**, redrawn after every check. A wider-than-a-day
+window means it cannot land in the same part of the clock twice running, and
+a 36h mean is not a divisor of 24h so the check precesses through the day.
+All three startup-only checks moved onto the timer, not just public IPv4.
+
+- [x] Public IP is re-checked with no daemon restart (verified at a scaled
+      6s ±2s interval; fires repeatedly at correctly-varying gaps)
+- [x] Delay distribution is correct — 20,000 draws gave
+      `min=24.00h max=48.00h mean=36.00h`
+- [x] Restarting the daemon does not reproduce the same "random" time.
+      The root cause is fixed: `math.randomseed` was never called, so
+      unseeded LuaJIT returned `794207` from three separate processes;
+      seeded from `/dev/urandom` it returns different values each time
+- [x] The generator is also reseeded on every check, so a months-long
+      process does not ride one boot-time seed for its whole life
+- [x] The routine probe queries only one provider — `check_public_ip`
+      returns on the first provider that answers (this was already true)
+- [x] A real IP change mid-run is detected and confirmed — the live daemon
+      logged `public IP changed: 184.3.192.218 -> 97.120.253.166 (confirmed)`
+      and queued notifications, which was the outage that motivated the issue
+- [x] `detect_ip_change` now distinguishes "no answer" from "no change"
+      (returns false vs true), so a failed probe cannot read as "unchanged"
+- [ ] A failed probe retries in 1h rather than waiting the full window —
+      implemented, but not yet exercised by fault injection (block DNS)
+- [ ] `detect_ipv6_change` and `check_lan_ip_change` fire on the timer too
+      (wired, but neither has been observed changing mid-run)
+- [ ] Confirm over several days that the check time visibly precesses
 
 ## 7. Android — connection and sync
 
