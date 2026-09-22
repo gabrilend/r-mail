@@ -249,6 +249,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _syncStatus.value = SyncStatus.SYNCING
             lastSyncTime = System.currentTimeMillis()
             val manager = SyncManager(getApplication(), config, s, serverLanIp)
+            val hadUploads = withContext(Dispatchers.IO) { s.pendingUploads().isNotEmpty() }
             when (val result = manager.sync()) {
                 is SyncResult.Success, is SyncResult.NewMessages -> {
                     // Reachable: straight back to the floor. New mail resets
@@ -260,6 +261,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _syncStatus.value = SyncStatus.IDLE
                     _syncError.value = null
                     refreshLocal()
+                    // Files added here have just gone up (or been renamed to
+                    // the server's name); show that.
+                    if (hadUploads) loadAttachmentList()
                     if (_myAddress.value == null) fetchMyAddress()
                     // Update mailbox name from server if we don't have one
                     val serverName = when (result) {
@@ -392,7 +396,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val combined = withContext(Dispatchers.IO) {
                     serverList.map { info ->
                         var onDevice = s.isAttachmentCached(info.filename)
-                        if (onDevice && info.checksum.isNotBlank()) {
+                        // A file added here and not uploaded yet is ours, not a
+                        // damaged copy of the server's same-named file.
+                        if (onDevice && info.checksum.isNotBlank() &&
+                            info.filename !in s.pendingUploads()) {
                             val localFile = s.cachedAttachmentFile(info.filename)
                             val localHash = com.rmail.app.crypto.Crypto.sha256HexFile(localFile)
                             if (localHash != info.checksum) {
@@ -689,44 +696,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uploadProgress = com.rmail.app.sync.UploadProgress.state
 
     /**
-     * Copy a just-sent message's attachments into app storage, point its
-     * `attach:` lines at the copies, and start a sync to upload them.
-     *
-     * The copy is what makes the upload survivable: the picker's content://
-     * permission ends with this process, so an upload interrupted by the
-     * app being killed could never be finished.  The sync cycle does the
-     * uploading (see SyncManager.uploadPendingAttachments) and keeps the
-     * message off the server until every attachment is there.
+     * Copy a file the user picked into the Files tab (attachments/) and
+     * mark it for upload.  Returns the local file, or null if it could not
+     * be read.  The copy is ours, so an upload interrupted by the app being
+     * killed can be finished later -- the picker's content:// permission
+     * ends with this process.  No consent form is involved: the phone is
+     * this mailbox's own device, and the server trusts it outright.
+     */
+    private suspend fun copyIntoFiles(s: MailStore, uri: Uri): File? = withContext(Dispatchers.IO) {
+        val app = getApplication<Application>()
+        val wanted = resolveFilename(uri) ?: "attachment"
+        val serverNames = _attachments.value.filter { it.onServer }.map { it.filename }.toSet()
+        val file = File(s.attachments, s.freeAttachmentName(wanted, serverNames))
+        try {
+            app.contentResolver.openInputStream(uri)?.use { input ->
+                file.outputStream().use { input.copyTo(it) }
+            } ?: return@withContext null
+            s.setPendingUpload(file.name, true)
+            file
+        } catch (e: Exception) {
+            file.delete()
+            Log.w("rmail", "copying $wanted into Files failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Files tab "+": put picked files in Files and sync them to the server. */
+    fun addToFiles(uris: List<Uri>) {
+        val s = store ?: return
+        viewModelScope.launch {
+            var failed = 0
+            for (uri in uris) if (copyIntoFiles(s, uri) == null) failed++
+            if (failed > 0) android.widget.Toast.makeText(getApplication(),
+                "Couldn't read $failed file(s)", android.widget.Toast.LENGTH_LONG).show()
+            loadAttachmentList()
+            triggerSync()
+        }
+    }
+
+    /**
+     * A just-sent message's attachments: each goes into Files like any
+     * other added file, and the message's `attach:` line is pointed at it.
+     * The sync cycle uploads it, swaps the line for the server path, and
+     * keeps the message off the server until every attachment is there
+     * (see SyncManager.uploadPendingAttachments).
      */
     fun uploadAttachmentsInBackground(outboxFilename: String, uris: List<Uri>) {
         val s = store ?: return
         if (uris.isEmpty()) return
         viewModelScope.launch {
-            val app = getApplication<Application>()
             for (uri in uris) {
                 val uriStr = uri.toString()
                 if (!uriStr.startsWith("content://")) continue
                 val name = resolveFilename(uri) ?: "attachment"
                 com.rmail.app.sync.UploadProgress.set(outboxFilename, "preparing $name…")
-                try {
-                    withContext(Dispatchers.IO) {
-                        // A directory per copy keeps the original name (it
-                        // becomes the name on the server) without clashing.
-                        val dir = File(s.pendingAttachments, System.nanoTime().toString()).also { it.mkdirs() }
-                        val copy = File(dir, name.replace('/', '_'))
-                        app.contentResolver.openInputStream(uri)?.use { input ->
-                            copy.outputStream().use { input.copyTo(it) }
-                        } ?: throw java.io.FileNotFoundException(name)
-                        val file = File(s.outbox, outboxFilename)
-                        if (file.exists()) {
-                            file.writeText(file.readText().replace(uriStr, Uri.fromFile(copy).toString()))
-                        }
-                    }
-                } catch (e: Exception) {
+                val copy = copyIntoFiles(s, uri)
+                if (copy == null) {
                     com.rmail.app.sync.UploadProgress.set(outboxFilename,
-                        "couldn't read $name (${e.message ?: e.javaClass.simpleName}) — " +
-                        "remove it and attach it again", error = true)
-                    Log.w("rmail", "staging attachment $name failed: ${e.message}")
+                        "couldn't read $name — remove it and attach it again", error = true)
+                    continue
+                }
+                withContext(Dispatchers.IO) {
+                    val file = File(s.outbox, outboxFilename)
+                    if (file.exists()) {
+                        file.writeText(file.readText().replace(uriStr, Uri.fromFile(copy).toString()))
+                    }
                 }
             }
             refreshLocal()

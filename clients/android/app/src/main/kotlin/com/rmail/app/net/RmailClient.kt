@@ -535,13 +535,15 @@ class RmailClient(
             val (status, respBody) = post("/api/upload/start", body)
             if (status != 200) return null
             val obj = JSONObject(respBody.toString(Charsets.UTF_8))
-            UploadStartResult(obj.getString("upload_id"), obj.getString("server_path"))
+            // The final path arrives with the last chunk (see uploadChunk).
+            UploadStartResult(obj.getString("upload_id"), obj.optString("server_path"))
         } catch (_: Exception) {
             null
         }
     }
 
-    data class UploadResumeResult(val uploadId: String, val serverPath: String, val missing: List<Int>)
+    /** [serverPath] is set only when nothing was missing and the server filed the upload. */
+    data class UploadResumeResult(val uploadId: String, val serverPath: String?, val missing: List<Int>)
 
     /**
      * POST /api/upload/resume — resume an interrupted upload.
@@ -563,19 +565,28 @@ class RmailClient(
             obj.optJSONArray("missing")?.let { arr ->
                 for (i in 0 until arr.length()) missing.add(arr.getInt(i))
             }
-            UploadResumeResult(obj.getString("upload_id"), obj.getString("server_path"), missing)
+            UploadResumeResult(obj.getString("upload_id"),
+                obj.optString("server_path").ifBlank { null }, missing)
         } catch (_: Exception) { null }
     }
 
     /**
      * PUT /api/upload/<id>/chunk/<n> — send one chunk
      */
-    fun uploadChunk(uploadId: String, chunkN: Int, data: ByteArray): Boolean {
+    /**
+     * Returns null on failure, "" when accepted, or the upload's final
+     * server path when this chunk completed it.  The server picks that path
+     * once it has the content -- it may reuse an identical file or add a
+     * -2 suffix -- so it is only known at the end.
+     */
+    fun uploadChunk(uploadId: String, chunkN: Int, data: ByteArray): String? {
         return try {
-            val (status, _) = put("/api/upload/$uploadId/chunk/$chunkN", data)
-            status == 200
+            val (status, body) = put("/api/upload/$uploadId/chunk/$chunkN", data)
+            if (status != 200) return null
+            try { JSONObject(body.toString(Charsets.UTF_8)).optString("server_path") }
+            catch (_: Exception) { "" }
         } catch (_: Exception) {
-            false
+            null
         }
     }
 
@@ -702,6 +713,7 @@ class RmailClient(
             // Step 3: ask server which chunks are missing (resume-aware)
             val resume = client.uploadResume(filename, numChunks, checksums) ?: return null
             val missing = resume.missing
+            var finalPath: String? = resume.serverPath
 
             // Step 4: upload only missing chunks
             var bytesSent = (numChunks - missing.size).toLong() * CHUNK_SIZE
@@ -709,14 +721,15 @@ class RmailClient(
 
             for (i in missing) {
                 val data = chunkFile(i).readBytes()
-                if (!client.uploadChunk(resume.uploadId, i, data)) return null
+                val r = client.uploadChunk(resume.uploadId, i, data) ?: return null
+                if (r.isNotEmpty()) finalPath = r
                 bytesSent += data.size
                 onProgress?.invoke(UploadPhase.SENDING, bytesSent, compressedSize)
             }
 
             // Success — clean up chunk files
             chunksDir.deleteRecursively()
-            return resume.serverPath
+            return finalPath
         }
     }
 }

@@ -627,4 +627,8 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Share-sheet attachment (from Gallery) arrives as an attachment, not a missing file
 - [ ] Response to a transfer the sender no longer has → sender 404 → receiver clears the form
 - [ ] July victory-garden.jpg accept resolves to kuvalu and is sent or cleared (check log after restart)
+- [x] Phone upload is stored unzipped in `attachments/` under its own name; identical re-upload reuses it; different content becomes `name-2.ext`; `.uploads/` left empty (harness)
+- [ ] Files tab `+` → file shows "waiting to upload", then "Present on: <server>, android" after sync; no consent form anywhere
+- [ ] Attachment sent from Write appears in Files, and the recipient receives the real file (not a zip)
+- [ ] Adding a file whose name exists on the server with different content → stored as `name-2.ext` on both sides
 

@@ -56,6 +56,30 @@ failed.
   new code to resolve and send; if kuvalu no longer has the transfer, it
   refuses and the form is cleared.
 
+## Files the phone sends appear in Files (2026-09-22)
+
+- **Found while doing this:** the phone zips a file before chunking it and
+  the server concatenated the chunks and stored the *zip* under the
+  original name.  Every file sent from the phone reached its recipients as
+  a zip named `.jpg`.  All 24 files in `~/mail/attachments/.uploads/` are
+  such zips.  The server now unpacks the upload (`unzip -p`, one entry,
+  ignoring any path inside the archive).
+- Finished uploads are filed in `attachments/` itself -- where the Files
+  tab lists them -- instead of hidden `.uploads/<id>/`.  Name clashes:
+  identical content reuses the existing file; different content becomes
+  `name-2.ext`.  The final path is only known once the content is, so it
+  comes back with the last chunk (or from resume when nothing is missing).
+  The three upload handlers became one `upload` table (200-local ceiling).
+- Phone: a picked file -- Files tab `+`, or an attachment on a sent
+  message -- is copied into Files (`attachments/`), listed in
+  `pending-uploads.json`, and uploaded by the next sync with no consent
+  form (the phone is the mailbox's own device).  After upload the local
+  copy takes the server's name.  Files shows "waiting to upload" /
+  progress / errors per file.  The checksum repair skips files still
+  waiting, so it cannot "repair" a new file into a same-named server file.
+- Files `+` used to open a message to this mailbox with the file
+  attached; it now adds straight to Files.
+
 ## Status
 
 Implemented 2026-09-22.  Daemon changes need a restart of every daemon

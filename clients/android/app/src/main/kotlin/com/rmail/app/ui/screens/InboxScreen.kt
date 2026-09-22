@@ -206,6 +206,13 @@ fun InboxScreen(
     val context = LocalContext.current
 
     // File picker for compose attachments
+    // Files tab "+": copy picked files into Files; the next sync uploads them.
+    val addToFilesPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<android.net.Uri> ->
+        if (uris.isNotEmpty()) vm.addToFiles(uris)
+    }
+
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -336,23 +343,13 @@ fun InboxScreen(
                             Icon(Icons.Default.Add, contentDescription = "Write new message")
                         }
                     }
-                    // Files: + button opens file picker pre-addressed to this mailbox.
-                    // Sends user through the compose workflow to reinforce the message
-                    // passing paradigm — they can review, edit, or redirect before sending.
+                    // Files: + puts picked files straight into Files and syncs
+                    // them to the server.  (It used to open a message to this
+                    // mailbox with the file attached; the phone is this
+                    // mailbox's own device, so there is nobody to ask.)
                     if (currentPanel == Panel.FILES) {
-                        IconButton(onClick = {
-                            val activeId = vm.activeMailboxId.value
-                            val config = activeId?.let { vm.registry.get(it) }
-                            val name = config?.name ?: ""
-                            draftRecipients = listOf(name)
-                            draftAttachments.clear()
-                            draftSubject = ""
-                            draftBody = ""
-                            currentPanel = Panel.WRITE
-                            // Immediately open the file picker
-                            filePicker.launch(arrayOf("*/*"))
-                        }) {
-                            Icon(Icons.Default.Add, contentDescription = "Upload file")
+                        IconButton(onClick = { addToFilesPicker.launch(arrayOf("*/*")) }) {
+                            Icon(Icons.Default.Add, contentDescription = "Add files")
                         }
                     }
                     if (currentPanel == Panel.WRITE) {
@@ -1872,6 +1869,8 @@ private fun AttachmentList(
     val config = activeId?.let { vm.registry.get(it) }
     val daemonLabel = config?.name?.ifBlank { null } ?: config?.host ?: "server"
 
+    val uploads by vm.uploadProgress.collectAsState()
+    val pendingUploads = remember(attachments) { vm.store?.pendingUploads() ?: emptySet() }
     Column(Modifier.fillMaxSize()) {
         // Delete action bar (when in delete selection mode with selections)
         if (selectionMode && selectedFiles.isNotEmpty()) {
@@ -1956,6 +1955,15 @@ private fun AttachmentList(
                                 Text("Present on: ${locations.joinToString(", ")}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                // Added on this phone and not on the server yet
+                                val up = uploads["file:${info.filename}"]
+                                if (up != null) {
+                                    Text(up.text, style = MaterialTheme.typography.labelSmall,
+                                        color = if (up.error) MaterialTheme.colorScheme.error else accentColor)
+                                } else if (!info.onServer && info.filename in pendingUploads) {
+                                    Text("waiting to upload", style = MaterialTheme.typography.labelSmall,
+                                        color = accentColor)
+                                }
                             }
                             when {
                                 isDeleting -> CircularProgressIndicator(

@@ -70,6 +70,44 @@ class MailStore(context: Context, mailboxId: String) {
 
     val pendingAttachments: File = File(root, "pending-attachments").also { it.mkdirs() }
 
+    // ── Files waiting to go to the server ─────────────────────────────────
+    //
+    // A file added on the phone -- picked in the Files tab, or attached to a
+    // message -- is copied into attachments/, where the Files tab shows it,
+    // and named here until the next sync uploads it.  Without the list the
+    // phone could not tell its own new files from ones it downloaded.
+
+    private val pendingUploadsFile = File(root, "pending-uploads.json")
+
+    fun pendingUploads(): Set<String> = try {
+        if (!pendingUploadsFile.exists()) emptySet()
+        else JSONArray(pendingUploadsFile.readText()).let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }
+    } catch (_: Exception) { emptySet() }
+
+    @Synchronized
+    fun setPendingUpload(name: String, pending: Boolean) {
+        val now = pendingUploads().let { if (pending) it + name else it - name }
+        pendingUploadsFile.writeText(JSONArray(now.sorted()).toString())
+    }
+
+    /**
+     * A name for a new file in attachments/ that clashes with nothing here
+     * or in [taken] (the server's names, when known): photo.jpg, photo-2.jpg…
+     * The server makes the final call; this only avoids overwriting a file
+     * of ours, or having the checksum repair "fix" it into someone else's.
+     */
+    fun freeAttachmentName(wanted: String, taken: Set<String> = emptySet()): String {
+        val clean = wanted.replace('/', '_').ifBlank { "attachment" }
+        val dot = clean.lastIndexOf('.')
+        val (stem, ext) = if (dot > 0) clean.substring(0, dot) to clean.substring(dot) else clean to ""
+        var n = 1
+        while (true) {
+            val name = if (n == 1) clean else "$stem-$n$ext"
+            if (!File(attachments, name).exists() && name !in taken) return name
+            n++
+        }
+    }
+
     /**
      * `attach:` values in an outbox file's header that still point at the
      * phone rather than the server.  While any remain, the file is held back

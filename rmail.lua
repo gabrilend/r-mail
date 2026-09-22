@@ -5792,9 +5792,68 @@ local function handle_api_attachment_chunk(filename, chunk_n)
     return 200, "application/octet-stream", data
 end
 
+-- Phone-to-server uploads (#391).  One table rather than three locals: the
+-- main chunk is at Lua's 200-local ceiling.
+--
+-- A finished upload lands in the attachments directory itself, where the
+-- Files tab lists it, rather than hidden under .uploads/<id>/.  The phone
+-- zips before chunking, so the assembled file is a zip; it is unpacked here.
+-- It used to be stored as the zip under the original name, which is what
+-- every recipient then received: a "photo.jpg" that was an archive.
+local upload = {}
+
+-- Pick the name a finished upload is stored under: its own if free, the
+-- existing file's if the content is identical (no duplicate), otherwise
+-- name-2.ext, name-3.ext, ...
+function upload.final_path(filename, tmp_path)
+    local sum = sha256_file(tmp_path)
+    local stem, ext = filename:match("^(.+)(%.[^.]+)$")
+    if not stem then stem, ext = filename, "" end
+    for n = 1, 1000 do
+        local name = n == 1 and filename or (stem .. "-" .. n .. ext)
+        local path = paths.attachments .. "/" .. name
+        if not file_exists(path) then return path, false end
+        if sha256_file(path) == sum then return path, true end
+    end
+    return nil
+end
+
+-- Assemble, unpack and file a completed upload.  Returns the final path.
+function upload.finish(upload_id, uploads)
+    local u = uploads[upload_id]
+    local zip = u.upload_dir .. "/assembled.zip"
+    local f = io.open(zip, "wb")
+    if not f then return nil, "cannot create assembled file" end
+    for i = 0, u.num_chunks - 1 do
+        local d = read_file_binary(u.upload_dir .. "/chunk-" .. tostring(i))
+        if d then f:write(d) end
+    end
+    f:close()
+
+    local tmp = u.upload_dir .. "/unpacked"
+    local head = (read_file_binary(zip) or ""):sub(1, 4)
+    if head == "PK\3\4" and tools.unzip then
+        -- One entry, the file itself; -p writes it without trusting any
+        -- path stored inside the archive.
+        os.execute(tools.unzip .. " -p " .. shell_quote(zip) .. " > " .. shell_quote(tmp) .. " 2>/dev/null")
+    else
+        os.rename(zip, tmp)
+    end
+    if not file_exists(tmp) then return nil, "could not unpack upload" end
+
+    local final, existed = upload.final_path(sanitize_filename(u.filename), tmp)
+    if not final then return nil, "no free name for " .. u.filename end
+    if existed then os.remove(tmp) else os.rename(tmp, final) end
+    os.execute("rm -rf " .. shell_quote(u.upload_dir))
+    uploads[upload_id] = nil
+    save_state("uploads.json", uploads)
+    log("phone upload complete: %s -> %s%s id=%s", u.filename, final,
+        existed and " (identical file already there)" or "", upload_id)
+    return final
+end
+
 -- POST /api/upload/start — register a new phone-to-server attachment upload.
--- Returns upload_id and the server_path the phone should reference in attach: lines.
-local function handle_api_upload_start(data)
+function upload.start(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
@@ -5804,59 +5863,48 @@ local function handle_api_upload_start(data)
     local upload_id  = uuid()
     local upload_dir = paths.uploads .. "/" .. upload_id
     os.execute("mkdir -p " .. shell_quote(upload_dir))
-    local server_path = upload_dir .. "/" .. filename
     local uploads = load_state("uploads.json")
     uploads[upload_id] = {
         filename   = filename,
         num_chunks = num_chunks,
-        path       = server_path,
         upload_dir = upload_dir,
         created_at = os.time(),
     }
     save_state("uploads.json", uploads)
     log("phone upload started: %s (%d chunks) id=%s", filename, num_chunks, upload_id)
-    return 200, {upload_id = upload_id, server_path = server_path}
+    -- The final path is only known once the content is (see final_path);
+    -- the last chunk's response carries it.
+    return 200, {upload_id = upload_id}
 end
 
 -- PUT /api/upload/<id>/chunk/<n> — receive one chunk of a phone-to-server upload.
--- Auto-assembles the file once all chunks are present.
-local function handle_api_upload_chunk(upload_id, chunk_n, body)
+-- Files the upload once all chunks are present; that response carries
+-- server_path, the upload's final location.
+function upload.chunk(upload_id, chunk_n, body)
     if not body or body == "" then return 400, {error = "empty chunk"} end
     local uploads = load_state("uploads.json")
-    local upload = uploads[upload_id]
-    if not upload then return 404, {error = "upload not found"} end
-    if chunk_n < 0 or chunk_n >= upload.num_chunks then
+    local u = uploads[upload_id]
+    if not u then return 404, {error = "upload not found"} end
+    if chunk_n < 0 or chunk_n >= u.num_chunks then
         return 400, {error = "chunk index out of range"}
     end
-    write_file_binary(upload.upload_dir .. "/chunk-" .. tostring(chunk_n), body)
-    -- Check whether all chunks are now present
-    for i = 0, upload.num_chunks - 1 do
-        if not file_exists(upload.upload_dir .. "/chunk-" .. tostring(i)) then
-            save_state("uploads.json", uploads)
+    write_file_binary(u.upload_dir .. "/chunk-" .. tostring(chunk_n), body)
+    for i = 0, u.num_chunks - 1 do
+        if not file_exists(u.upload_dir .. "/chunk-" .. tostring(i)) then
             return 200, {ok = true, complete = false}
         end
     end
-    -- All chunks present: assemble and clean up
-    local f = io.open(upload.path, "wb")
-    if not f then return 500, {error = "cannot create output file"} end
-    for i = 0, upload.num_chunks - 1 do
-        local cp = upload.upload_dir .. "/chunk-" .. tostring(i)
-        local d  = read_file_binary(cp)
-        if d then f:write(d) end
-        os.remove(cp)
-    end
-    f:close()
-    uploads[upload_id] = nil
-    save_state("uploads.json", uploads)
-    log("phone upload complete: %s id=%s", upload.filename, upload_id)
-    return 200, {ok = true, complete = true}
+    local final, err = upload.finish(upload_id, uploads)
+    if not final then return 500, {error = err} end
+    return 200, {ok = true, complete = true, server_path = final}
 end
 
 -- POST /api/upload/resume — resume an interrupted upload.
 -- Phone sends filename + num_chunks + per-chunk checksums.
 -- Server finds the existing upload (or creates a new one) and responds with
--- which chunks are missing so the phone only uploads what's needed.
-local function handle_api_upload_resume(data)
+-- which chunks are missing so the phone only uploads what's needed.  When
+-- none are, the upload is filed now and server_path is final.
+function upload.resume(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
@@ -5865,38 +5913,33 @@ local function handle_api_upload_resume(data)
     end
     local checksums = data.chunk_checksums or {}
 
-    -- Find existing upload for this filename
     local uploads = load_state("uploads.json")
-    local upload_id, upload
-    for uid, u in pairs(uploads) do
-        if u.filename == filename and u.num_chunks == num_chunks then
-            upload_id = uid; upload = u; break
+    local upload_id, u
+    for uid, x in pairs(uploads) do
+        if x.filename == filename and x.num_chunks == num_chunks then
+            upload_id = uid; u = x; break
         end
     end
-
-    -- No existing upload — create a new one
-    if not upload then
+    if not u then
         upload_id = uuid()
         local upload_dir = paths.uploads .. "/" .. upload_id
         os.execute("mkdir -p " .. shell_quote(upload_dir))
-        upload = {
+        u = {
             filename   = filename,
             num_chunks = num_chunks,
-            path       = upload_dir .. "/" .. filename,
             upload_dir = upload_dir,
             created_at = os.time(),
         }
-        uploads[upload_id] = upload
+        uploads[upload_id] = u
         save_state("uploads.json", uploads)
     end
 
-    -- Check which chunks the server already has (and verify checksums)
+    -- Which chunks the server already has, verified against the checksums
     local missing = {}
     for i = 0, num_chunks - 1 do
-        local chunk_path = upload.upload_dir .. "/chunk-" .. tostring(i)
+        local chunk_path = u.upload_dir .. "/chunk-" .. tostring(i)
         if file_exists(chunk_path) then
-            -- Verify checksum if provided
-            local expected = checksums[tostring(i)] or checksums[i + 1]  -- handle both 0-indexed and 1-indexed
+            local expected = checksums[tostring(i)] or checksums[i + 1]
             if expected and expected ~= "" then
                 local actual = sha256_of_bytes(read_file_binary(chunk_path) or "")
                 if actual ~= expected then
@@ -5904,18 +5947,19 @@ local function handle_api_upload_resume(data)
                     missing[#missing + 1] = i
                 end
             end
-            -- chunk exists and is valid (or no checksum to verify)
         else
             missing[#missing + 1] = i
         end
     end
 
     log("phone upload resume: %s — %d/%d chunks missing, id=%s", filename, #missing, num_chunks, upload_id)
-    return 200, {
-        upload_id   = upload_id,
-        server_path = upload.path,
-        missing     = missing,
-    }
+    local final
+    if #missing == 0 then
+        local err
+        final, err = upload.finish(upload_id, uploads)
+        if not final then return 500, {error = err} end
+    end
+    return 200, {upload_id = upload_id, server_path = final, missing = missing}
 end
 
 -- ============================================================
@@ -6275,13 +6319,13 @@ local function handle_request(rt, client)
                 local s, r = handle_api_log(data, contact_name); send_response(resp, s, r)
             elseif method == "POST" and path == "/api/upload/resume" then
                 local data = json.decode(body or "{}") or {}
-                local s, r = handle_api_upload_resume(data); send_response(resp, s, r)
+                local s, r = upload.resume(data); send_response(resp, s, r)
             elseif method == "POST" and path == "/api/upload/start" then
                 local data = json.decode(body or "{}") or {}
-                local s, r = handle_api_upload_start(data); send_response(resp, s, r)
+                local s, r = upload.start(data); send_response(resp, s, r)
             elseif method == "PUT" and path:match("^/api/upload/([^/]+)/chunk/(%d+)$") then
                 local uid, cn = path:match("^/api/upload/([^/]+)/chunk/(%d+)$")
-                local s, r = handle_api_upload_chunk(uid, tonumber(cn), body or ""); send_response(resp, s, r)
+                local s, r = upload.chunk(uid, tonumber(cn), body or ""); send_response(resp, s, r)
             else send_response(resp, 404, {error = "not found"}) end
         end
     elseif method == "POST" and body and body ~= "" then

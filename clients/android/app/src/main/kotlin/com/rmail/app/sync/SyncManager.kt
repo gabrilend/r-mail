@@ -270,15 +270,16 @@ class SyncManager(
     }
 
     /**
-     * Upload every attachment an outbox file still holds a phone-side
-     * reference to, rewriting each `attach:` line to the server path as it
-     * completes.  A failure is shown on the outbox list and retried next
-     * sync; it no longer disappears into an empty catch block.
+     * Upload everything the phone has that the server should: attachments
+     * an outbox file still points at on the phone, then files added to the
+     * Files tab.  Each `attach:` line is rewritten to the server path as its
+     * upload completes.  A failure shows under the message (and in Files)
+     * and is retried next sync; it no longer disappears into an empty catch.
      */
     private suspend fun uploadPendingAttachments(client: RmailClient) {
-        // Copies whose message was deleted before they uploaded.  The age
-        // check keeps this away from a copy being made right now, whose
-        // outbox line has not been rewritten to point at it yet.
+        // Legacy staging area (before files went into Files): copies whose
+        // message was deleted before they uploaded.  The age check keeps
+        // this away from a copy being made right now.
         val referenced = store.listOutbox().flatMap { store.localAttachRefs(it) }.joinToString("\n")
         store.pendingAttachments.listFiles()?.forEach { dir ->
             if (dir.path !in referenced &&
@@ -295,30 +296,12 @@ class SyncManager(
                 val name = if (ref.startsWith("file://")) File(uri.path ?: ref).name
                            else displayName(uri) ?: uri.lastPathSegment ?: "attachment"
                 try {
-                    val size = openSize(uri)
-                    val chunksDir = File(context.cacheDir, "upload-chunks/$name-${ref.hashCode()}")
-                    val serverPath = context.contentResolver.openInputStream(uri).use { stream ->
-                        RmailClient.uploadFileCompressed(
-                            client, name, stream, size, context.cacheDir, chunksDir
-                        ) { phase, done, total ->
-                            val verb = if (phase == RmailClient.Companion.UploadPhase.ZIPPING)
-                                "zipping" else "uploading"
-                            UploadProgress.set(outboxFile, "$verb $name… ${mb(done)} / ${mb(total)} MB")
-                        }
-                    } ?: throw java.io.IOException("server did not accept the upload")
-
+                    val serverPath = uploadOne(client, uri, name, outboxFile)
                     // Swap the reference for the server path, in every outbox
-                    // file that names it, and drop our copy once none does.
+                    // file that names it.
                     for (f in store.listOutbox()) {
                         val text = store.readOutbox(f)
                         if (ref in text) store.writeOutbox(f, text.replace(ref, serverPath))
-                    }
-                    if (ref.startsWith("file://")) {
-                        val local = File(uri.path ?: "")
-                        if (local.path.startsWith(store.pendingAttachments.path)) {
-                            local.delete()
-                            local.parentFile?.takeIf { it != store.pendingAttachments }?.delete()
-                        }
                     }
                 } catch (e: SecurityException) {
                     UploadProgress.set(outboxFile,
@@ -329,15 +312,77 @@ class SyncManager(
                         "$name is gone from this phone — remove it and attach it again", error = true)
                     return
                 } catch (e: Exception) {
-                    UploadProgress.set(outboxFile,
-                        "upload of $name failed (${e.message ?: e.javaClass.simpleName}) — will retry", error = true)
-                    try { client.remoteLog("warn", "attachment upload failed for $outboxFile/$name: ${e.message}") }
-                    catch (_: Exception) {}
+                    uploadFailed(client, outboxFile, name, e)
                     return  // the connection is probably down; stop for this cycle
                 }
             }
             if (store.localAttachRefs(outboxFile).isEmpty()) UploadProgress.clear(outboxFile)
         }
+
+        // Files added in the Files tab that no message is waiting on.
+        for (name in store.pendingUploads()) {
+            val file = File(store.attachments, name)
+            if (!file.exists()) { store.setPendingUpload(name, false); continue }  // deleted here
+            try {
+                uploadOne(client, android.net.Uri.fromFile(file), name, null)
+            } catch (e: Exception) {
+                uploadFailed(client, null, name, e)
+                return
+            }
+        }
+    }
+
+    /**
+     * Upload one file and return its server path.  Progress shows under
+     * [outboxFile] if given and against the file in the Files tab.  A file
+     * that lives in Files stays there, renamed to whatever the server filed
+     * it as (it may add -2, or match an identical file already there).
+     */
+    private suspend fun uploadOne(
+        client: RmailClient, uri: android.net.Uri, name: String, outboxFile: String?
+    ): String {
+        val fileKey = "file:$name"
+        val size = openSize(uri)
+        val chunksDir = File(context.cacheDir, "upload-chunks/$name-${uri.toString().hashCode()}")
+        val serverPath = context.contentResolver.openInputStream(uri).use { stream ->
+            RmailClient.uploadFileCompressed(
+                client, name, stream, size, context.cacheDir, chunksDir
+            ) { phase, done, total ->
+                val verb = if (phase == RmailClient.Companion.UploadPhase.ZIPPING)
+                    "zipping" else "uploading"
+                val line = "$verb $name… ${mb(done)} / ${mb(total)} MB"
+                if (outboxFile != null) UploadProgress.set(outboxFile, line)
+                UploadProgress.set(fileKey, "$verb… ${mb(done)} / ${mb(total)} MB")
+            }
+        } ?: throw java.io.IOException("server did not accept the upload")
+        UploadProgress.clear(fileKey)
+
+        if (uri.scheme == "file") {
+            val local = File(uri.path ?: "")
+            if (local.parentFile == store.attachments) {
+                store.setPendingUpload(local.name, false)
+                val serverName = File(serverPath).name
+                if (serverName != local.name) {
+                    val target = File(store.attachments, serverName)
+                    // An existing file of that name is the server's identical copy.
+                    if (target.exists()) local.delete() else local.renameTo(target)
+                }
+            } else if (local.path.startsWith(store.pendingAttachments.path)) {
+                local.delete()
+                local.parentFile?.takeIf { it != store.pendingAttachments }?.delete()
+            }
+        }
+        return serverPath
+    }
+
+    private fun uploadFailed(client: RmailClient, outboxFile: String?, name: String, e: Exception) {
+        val why = e.message ?: e.javaClass.simpleName
+        if (outboxFile != null) {
+            UploadProgress.set(outboxFile, "upload of $name failed ($why) — will retry", error = true)
+        }
+        UploadProgress.set("file:$name", "upload failed ($why) — will retry", error = true)
+        try { client.remoteLog("warn", "upload failed for ${outboxFile ?: "Files"}/$name: $why") }
+        catch (_: Exception) {}
     }
 
     private fun mb(bytes: Long) = "%.1f".format(bytes / (1024.0 * 1024.0))
