@@ -655,3 +655,13 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Connect with a wrong port → "Couldn't reach…"; wrong token → "didn't accept this token"; token without own=true → "not as one of your own devices"; "Save anyway" appears after a failure
 - [ ] New mailbox: port field is blank
 
+### Picker: Camera + remembered app — 2026-09-22
+
+- [x] "Add from" shows Gallery, Camera, File and "Long press to change default app" (seen on device)
+- [x] First Gallery tap shows Android's chooser; the pick is remembered and the next tap opens that app directly (seen on device)
+- [x] Camera opens the camera app; cancelling adds nothing and queues no upload (seen on device)
+- [ ] Taking a photo adds it to Files (from + / Upload) or to the message (from Write)
+- [ ] Long press on a source shows the chooser again and the new pick replaces the old
+- [ ] Uninstalling the remembered app brings the chooser back
+- [x] Files action bars (Delete / Forward / Save) sit above the list; the first file stays visible (seen on device)
+

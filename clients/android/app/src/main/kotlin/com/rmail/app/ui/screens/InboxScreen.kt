@@ -650,21 +650,12 @@ fun InboxScreen(
                     MessageList(outboxFiles, "Outbox is empty", uploads) { onOpenOutbox(it) }
                 }
                 Panel.FILES -> {
-                    // Box overlay: action bars float on top of the list
-                    Box(Modifier.fillMaxSize()) {
-                        AttachmentList(
-                            vm = vm,
-                            attachments = attachments,
-                            selectionMode = filesMode != FilesMode.NORMAL,
-                            selectedFiles = selectedFiles,
-                            onDeleteServer = { filenames -> filenames.forEach { vm.deleteAttachmentFromServer(it) } },
-                            onDeleteDevice = { filenames -> filenames.forEach { vm.deleteAttachmentFromDevice(it) } },
-                            onForward = { /* handled by bar below */ }
-                        )
-                        // Overlay action bars at top
+                    // Action bars sit above the list, not on top of it:
+                    // floating, they hid the first file.
+                    Column(Modifier.fillMaxSize()) {
                         if (filesMode == FilesMode.DELETE && selectedFiles.isNotEmpty()) {
                             val teal = ButtonColors[Panel.WRITE]!!
-                            Row(Modifier.fillMaxWidth().align(Alignment.TopCenter)) {
+                            Row(Modifier.fillMaxWidth()) {
                                 Surface(color = teal, modifier = Modifier.weight(1f).clickable {
                                     val valid = selectedFiles.filter { fn ->
                                         attachments.find { it.filename == fn }?.onServer == true
@@ -707,7 +698,7 @@ fun InboxScreen(
                             // into the gallery / Downloads.  Server-only files
                             // are downloaded first.
                             Surface(color = Color(0xFF2E7D32),
-                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).clickable {
+                                modifier = Modifier.fillMaxWidth().clickable {
                                     vm.saveToDevice(selectedFiles.toList()) { files -> saveAsQueue = files }
                                     selectedFiles.clear(); filesMode = FilesMode.NORMAL
                                 }) {
@@ -720,7 +711,7 @@ fun InboxScreen(
                         }
                         if (filesMode == FilesMode.FORWARD && selectedFiles.isNotEmpty()) {
                             Surface(color = Color(0xFF7B1FA2),
-                                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).clickable {
+                                modifier = Modifier.fillMaxWidth().clickable {
                                     draftRecipients = listOf("")
                                     draftAttachments.clear()
                                     draftSubject = ""
@@ -760,6 +751,15 @@ fun InboxScreen(
                                 }
                             }
                         }
+                        AttachmentList(
+                            vm = vm,
+                            attachments = attachments,
+                            selectionMode = filesMode != FilesMode.NORMAL,
+                            selectedFiles = selectedFiles,
+                            onDeleteServer = { filenames -> filenames.forEach { vm.deleteAttachmentFromServer(it) } },
+                            onDeleteDevice = { filenames -> filenames.forEach { vm.deleteAttachmentFromDevice(it) } },
+                            onForward = { /* handled by the bar above */ }
+                        )
                     }
                 }
                 Panel.CONTACTS -> if (showContactEditor) {

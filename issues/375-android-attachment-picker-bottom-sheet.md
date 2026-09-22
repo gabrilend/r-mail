@@ -134,3 +134,11 @@ Android's own chooser asks *which* gallery or file app to use.  So:
   opens on Recent (newest first).  Sort order itself still cannot be set.
 - The Photo Picker route was not used: it is not an app the user can
   choose between.  Folder attach (`OpenDocumentTree`) is unchanged.
+
+**Later the same day:** a third source, **Camera** (`ACTION_IMAGE_CAPTURE`
+into a FileProvider file under `files/camera/`, no CAMERA permission).  The
+app picked for each source is remembered: the chooser reports it through
+`EXTRA_CHOSEN_COMPONENT` and later taps launch it directly; long-pressing a
+source asks again ("Long press to change default app").  A remembered app
+that has been uninstalled is forgotten.
+
