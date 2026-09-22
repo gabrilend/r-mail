@@ -11,12 +11,14 @@ put a pin in it and leave it as future concerns."
   file.  Incoming mail is shown under that local name: the sender is
   identified by which contact's token decrypts the message, never by a
   name the sender supplies.
-- The one place a peer's own name travels is the LAN discovery packet
-  ("RMAIL-DISCOVER <name> <port> <lan-ip>" / "RMAIL-HERE <name>
-  <lan-ip>").  Since #393 the receiver files the found address under its
-  local contact name and only logs the peer's own name:
-  "kuvalu-mail (calls itself kuvalu) is at 192.168.1.100".
-- Nothing tells the owner when those two names differ.
+- No message or packet between mailboxes carries the sender's own name.
+  The LAN discovery packets used to, and #393 removed it (owner,
+  2026-09-22: "I'm gonna update all the machines running rmail posthaste
+  so don't worry about backwards compatibility").  The one remaining place
+  a mailbox states its own name is the plaintext health check, which
+  answers anyone who connects.
+- So nothing can currently tell the owner that a contact names itself
+  differently.
 
 ## Intended Behavior
 
@@ -40,15 +42,11 @@ sent in the message."
 
 To be designed.  Questions to settle first:
 
-1. Where does the peer's own name come from once discovery stops carrying
-   it?  Options: keep it in the discovery packet; add it to the address
-   announcement, which is already sent to every contact; or ask for it in
-   the existing health check, which already answers with the name.
-2. Should the name be dropped from the discovery packet?  Older daemons
-   parse three fields out of it, so dropping it breaks discovery with any
-   contact that has not upgraded.  Sending a placeholder in that slot keeps
-   old daemons working.
-3. How is the owner told, and how do they accept the rename (a consent-form
+1. Where would the peer's own name come from?  Options: add it to the
+   address announcement, which is already sent to every contact and is
+   encrypted with the shared token; or read it from the health check, which
+   is plaintext and unauthenticated, so anyone could answer it.
+2. How is the owner told, and how do they accept the rename (a consent-form
    style inbox note, like attachments use)?
 
 ## Related

@@ -8,9 +8,9 @@
 # and the receiver tells who sent it by which contact's password opens it.
 # The address it learns has to be filed under that contact's local name,
 # because that is the name every later lookup uses.  It used to be filed
-# under the name written inside the packet — the sender's name for itself —
+# under a name written inside the packet — the sender's name for itself —
 # so whenever the two names differed, the search found the other mailbox and
-# then forgot it (#393).
+# then forgot it (#393).  The packet no longer carries a name at all.
 #
 # This script starts two throwaway mailboxes in RAM, each naming the other
 # differently from how the other names itself, and checks each log says the
@@ -95,17 +95,25 @@ ALPHA_PID=$!
 BRAVO_PID=$!
 
 echo "each side files the other under its own name for it"
-if wait_for "$WORK/alpha.log" "bravo-to-alpha (calls itself bravo-calls-itself) is at"; then
+if wait_for "$WORK/alpha.log" "LAN discovery: bravo-to-alpha is at"; then
     ok "alpha filed the address under 'bravo-to-alpha'"
 else
     note_fail "alpha did not file bravo's address under its contact name"
     info "$(grep 'LAN discovery' "$WORK/alpha.log" | tail -3)"
 fi
-if wait_for "$WORK/bravo.log" "alpha-to-bravo (calls itself alpha-calls-itself) is at"; then
+if wait_for "$WORK/bravo.log" "LAN discovery: alpha-to-bravo is at"; then
     ok "bravo filed the address under 'alpha-to-bravo'"
 else
     note_fail "bravo did not file alpha's address under its contact name"
     info "$(grep 'LAN discovery' "$WORK/bravo.log" | tail -3)"
+fi
+
+# Each mailbox's own name lives only in its own config.  If it turned up in
+# the other side's log, it travelled in a packet.
+if grep -q "bravo-calls-itself" "$WORK/alpha.log" || grep -q "alpha-calls-itself" "$WORK/bravo.log"; then
+    note_fail "a mailbox's own name reached the other side"
+else
+    ok "neither mailbox's own name reached the other side"
 fi
 
 kill "$ALPHA_PID" "$BRAVO_PID"

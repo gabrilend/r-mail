@@ -193,3 +193,28 @@ treats failure as "leave the op queued and change nothing".
 
 Not addressed here: #371 (log coalescing) is much less urgent now, as
 predicted, since backoff removes most of the repeat volume.
+
+### Follow-up 2026-09-22: a mailbox with no contacts keeps one timer
+
+Per-contact timers made a sync cycle due only when some contact was due.
+A mailbox with no contacts therefore never came due: it synced only when
+a file-change notice got through, and not at all at startup.  An outbox
+file written while the daemon was down, or one whose change notice was
+discarded by the end-of-cycle drain (for example a periodic hook
+rewriting its own outbox message during a sync), sat untouched.
+
+Owner (2026-09-22): "I think we should set the timer to dynamically
+update according to the floor / ceiling rules we have for other contacts.
+If there's no contacts in the file, we just have one timer going. If
+there's even one single other contact, then we still have one timer
+going. If there's two, then two timers, etc."
+
+Built: `ctimer.refresh_self` keeps a timer for the mailbox itself (key
+`ctimer.SELF`, a string no contact name can match) exactly while the
+contacts file names no one but the mailbox.  It is created due at
+startup, and after every cycle it moves on by the floor, the same rule as
+a contact with nothing queued.  It never backs off, because nothing in it
+can fail to reach anyone.  Adding the first contact drops it; removing the
+last one brings it back.  Covered by the self-delivery case of
+`scripts/test-mailbox-selection.sh` (a message waiting in the outbox of a
+contact-less mailbox at startup).

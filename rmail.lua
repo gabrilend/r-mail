@@ -882,11 +882,34 @@ local ctimer = {
     STEP    = 360,    -- additive growth per failed cycle
     JITTER  = 30,     -- +/- this much on every due time
 
+    -- Key of the one timer a mailbox with no contacts keeps (see
+    -- ctimer.refresh_self).  It starts with a byte no contact name can
+    -- hold -- names are letters, digits, - and _ -- so it cannot collide.
+    SELF    = "\0self",
+
     timers    = {},
     skipped   = {},   -- contacts whose ops we withheld this cycle
     attempted = {},   -- contacts we actually tried this cycle
     outcome   = {},   -- name -> did we reach them at all this cycle
 }
+
+-- A mailbox with no contacts still has an outbox to look at: messages to
+-- itself, and changes whose file-change notice was drained at the end of a
+-- cycle.  Per-contact timers give such a mailbox nothing that can come due,
+-- so it used to sync only when a file-change notice happened to get
+-- through.  It keeps one timer of its own instead, on the same floor as a
+-- contact with nothing queued.  The moment it has a contact, that
+-- contact's timer does the job and this one is dropped: one timer with no
+-- contacts or one, then one per contact.
+function ctimer.refresh_self(contacts, my_name)
+    for name in pairs(contacts) do
+        if name ~= my_name then
+            ctimer.timers[ctimer.SELF] = nil
+            return
+        end
+    end
+    ctimer.get(ctimer.SELF)  -- created due now if it did not exist
+end
 
 function ctimer.jittered(interval)
     -- random_below draws from /dev/urandom, so this is not the fixed-seed
@@ -6068,7 +6091,10 @@ local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
     local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
     for name, c in pairs(contacts) do
         if resolve_contact_host(c.ip) == my_public_ip and c.token and c.port then
-            local payload = "RMAIL-DISCOVER " .. my_name .. " " .. my_port .. " " .. my_lan_ip
+            -- #393: no name in the packet.  The receiver knows who sent it
+            -- from which contact's token opens it, and files the address
+            -- under its own name for that contact.
+            local payload = "RMAIL-DISCOVER " .. my_port .. " " .. my_lan_ip
             local key = derive_key(c.token)
             local encrypted = encrypt_packet(key, payload)
             if encrypted then
@@ -6097,19 +6123,18 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
             local key = derive_key(c.token)
             local plaintext = decrypt_packet(key, data)
             if plaintext then
-                local disc_name, disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%S+)%s+(%d+)%s+(%S+)")
+                local disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%d+)%s+(%S+)$")
                 -- #393: the token that decrypted this packet is what says
                 -- who sent it, so the address is filed under OUR name for
-                -- that contact -- the name every lookup uses.  The name
-                -- inside the packet is the sender's own label for itself,
-                -- chosen on their machine; it only goes into the log.
-                if disc_name and disc_lan_ip then
+                -- that contact -- the name every lookup uses.  The packet
+                -- carries no name of its own: a name chosen on the sender's
+                -- machine would only disagree with ours.
+                if disc_port and disc_lan_ip then
                     lan_peers[name] = disc_lan_ip
-                    log("LAN discovery: %s (calls itself %s) is at %s (received request)",
-                        name, disc_name, disc_lan_ip)
+                    log("LAN discovery: %s is at %s (received request)", name, disc_lan_ip)
                     local my_lan_ip = nat.get_local_ip()
                     if not my_lan_ip then return end
-                    local resp_payload = "RMAIL-HERE " .. my_name .. " " .. my_lan_ip
+                    local resp_payload = "RMAIL-HERE " .. my_lan_ip
                     local resp_encrypted = encrypt_packet(derive_key(c.token), resp_payload)
                     if resp_encrypted then
                         local udp = socket.udp()
@@ -6118,11 +6143,10 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
                     end
                     return
                 end
-                local here_name, here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)%s+(%S+)")
-                if here_name and here_lan_ip then
+                local here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)$")
+                if here_lan_ip then
                     lan_peers[name] = here_lan_ip  -- #393: see the request branch
-                    log("LAN discovery: %s (calls itself %s) is at %s (received response)",
-                        name, here_name, here_lan_ip)
+                    log("LAN discovery: %s is at %s (received response)", name, here_lan_ip)
                     return
                 end
             end
@@ -6152,7 +6176,7 @@ local function do_on_connection_timeout(rt, host, target_port)
         if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) and c.token then
             if rt.lan.discovery_sent[name] then return end
             rt.lan.discovery_sent[name] = true
-            local payload = "RMAIL-DISCOVER " .. rt.my_name .. " " .. rt.port .. " " .. my_lan_ip
+            local payload = "RMAIL-DISCOVER " .. rt.port .. " " .. my_lan_ip  -- #393: no name
             local key = derive_key(c.token)
             local encrypted = encrypt_packet(key, payload)
             if encrypted then
@@ -6453,6 +6477,15 @@ local function run_sync_cycle(rt)
         then
             ctimer.get(name).next_due = now + ctimer.jittered(ctimer.FLOOR)
         end
+    end
+
+    -- The contacts file may have gained or lost its last contact during
+    -- this cycle; keep the mailbox's own timer in step, then move it on by
+    -- the same floor as a contact with nothing queued.  Nothing here can
+    -- fail to reach anyone, so it never backs off.
+    ctimer.refresh_self(load_contacts(), rt.my_name)
+    if ctimer.timers[ctimer.SELF] then
+        ctimer.timers[ctimer.SELF].next_due = now + ctimer.jittered(ctimer.FLOOR)
     end
 
     -- One summary log for contacts whose every op failed this cycle
@@ -6756,6 +6789,8 @@ local function init_runtime()
     for name in pairs(load_contacts()) do
         if name ~= rt.my_name then ctimer.get(name) end
     end
+    -- With no contacts, the mailbox's own timer stands in (also due now).
+    ctimer.refresh_self(load_contacts(), rt.my_name)
 
     -- Arm the daily re-check (#379).  Redrawn on boot rather than persisted:
     -- simpler, and it means a restart loop cannot pin the probe to one time
@@ -6924,10 +6959,10 @@ local function main()
         -- #377: sleep until the *earliest* contact comes due, not until one
         -- global interval elapses.  A backed-off contact no longer drags the
         -- others' cadence with it, and a chatty one no longer pins everyone
-        -- to the floor.  nil means no contacts are known yet, in which case
-        -- there is nothing to poll and a minute is a fine idle wait.
+        -- to the floor.  A mailbox with no contacts keeps its own timer
+        -- (ctimer.refresh_self), so nil only happens before startup has
+        -- seeded any timer; a minute is a fine wait for that instant.
         local time_to_sync = ctimer.time_to_due(now_s) or 60
-        if not rt.synced_once then time_to_sync = 0 end  -- see the first-pass sync below
         local sleep_for    = time_to_sync
         if rt.next_addr_check then
             sleep_for = math.min(sleep_for, math.max(0, rt.next_addr_check - now_s))
@@ -7039,13 +7074,7 @@ local function main()
         end
 
         local any_due = (ctimer.time_to_due(now) or math.huge) <= 0
-        -- The first pass always syncs.  Per-contact timers (#377) only make
-        -- a cycle due when there is a contact to be due, and an outbox file
-        -- written while the daemon was down raises no inotify event -- so a
-        -- mailbox with no contacts (a self-only mailbox running the periodic
-        -- pattern) never looked at its outbox until something touched it.
-        if outbox_changed or contacts_changed or any_due or not rt.synced_once then
-            rt.synced_once = true
+        if outbox_changed or contacts_changed or any_due then
             for raw_sock, info in pairs(clients) do
                 if now - info.last_activity > 30 then
                     pcall(function() raw_sock:close() end)
