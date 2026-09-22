@@ -1,4 +1,10 @@
-# #377 — Install script: every mailbox generates the same service name
+# #381 — Install script: every mailbox generates the same service name
+
+> Filed as #377 and renumbered to #381.  Another machine had already
+> published its own #377 (per-contact sync timers) before this one was
+> pushed, so this is the copy that moved — the same way the
+> capability-URL issue moved from #376 to #380.  Commits and comments
+> written before the rename say #377; they mean this file.
 
 ## Summary
 
@@ -45,12 +51,46 @@ several logs and offers a choice, keeping the single-log fast path when
 only one exists.  The `.logs` symlink is gone: it named one log, and
 there is no longer one log.
 
-**What is still true.**  The daemon continues to accept a mailbox
-directory as its argument and continues to resolve a config from it
-through two stacked fallbacks, the second of which reimplements the
-installer's path-to-slug transform in a second place.  Steps 11 and 12
-below are unstarted.  Step 14 is unstarted: a recipient matching both
-the configured identity and a real contact still self-delivers silently.
+**The daemon half is done too.**  The daemon takes a config file and
+nothing else.  Both config-resolution fallbacks are gone, including the
+one that rebuilt the installer's path-to-slug transform in a second
+place.  A directory argument stops with an error naming the config
+form, which is what a service file written before this change now does
+on its next restart.
+
+A `mail = ...` line that is relative resolves against the directory
+holding the config file rather than the working directory.  That is
+what replaces the directory form for the portable drive: its config
+sits inside its mailbox and says `mail = .`, so the pair still needs
+nothing but its own location to work from whatever mount point a host
+picks, and the launcher hands the daemon the config path.
+
+A recipient naming both the configured identity and a real contact is
+refused.  The daemon logs both readings and writes an `// AMBIGUOUS
+RECIPIENT` note into the outbox file beside the `to:` line, and the
+message stays put until one of the two names is changed.
+
+**A message-destroying bug turned up underneath step 14, and is
+fixed.**  The cleanup pass at the end of an outbox sync deletes any
+outbox file whose recipient list has emptied, on the reasoning that
+every recipient was delivered to and struck off.  A file whose `to:`
+line named nobody resolvable arrives at that pass looking identical,
+and was deleted — body and all — in the same cycle that wrote the
+marker explaining the problem into it.
+
+This was not introduced by the ambiguity refusal; it was already the
+behaviour for an unknown contact, and had been for as long as the
+marker has existed.  Addressing a message to a name not in your
+contacts file wrote you a helpful note and then deleted the message
+you had written, within seconds, with no way back.  The refusal in
+step 14 would have inherited it exactly.
+
+The cleanup pass now distinguishes three ways a recipient list can be
+empty: everyone was delivered to (delete), work is queued this cycle
+(leave it for the retry), or nobody in the `to:` line could be
+resolved (leave it, with the marker in it).  The two marker sites
+share one insertion routine, which also fixes a `to:` line on the last
+line of a file getting the marker glued onto its end.
 
 **Verified on this machine, and the workaround found there is worth
 recording.**  `/etc/sv` holds five relevant service directories:
@@ -104,10 +144,15 @@ questions.
 8. Port collision check — done.
 9. Log viewer handles several logs — done; `.logs` dropped.
 10. Fix the `--config` flag in the docs — done, in the template.
-11. Reject the mailbox-directory argument — **not started**.
-12. Update the USB-drive launcher — **not started**.
+11. Reject the mailbox-directory argument — done.
+12. Update the USB-drive launcher — done, via a relative `mail`.
 13. Reject a duplicate identity name — done.
-14. Daemon refuses an ambiguous recipient — **not started**.
+14. Daemon refuses an ambiguous recipient — done.
+15. Keep an unresolvable recipient's message — done.
+
+Every step has an implementation.  What is not done is the two open
+questions at the bottom, and the two `kuvalu` mailboxes on this machine
+that the second of them blocks.
 
 ## Intended behavior
 
@@ -295,18 +340,58 @@ Two further implementation steps:
     with the contact losing quietly; that should be an error naming both
     interpretations.
 
-## Open questions
+**Refusing a recipient must not destroy the message.**  Found while
+building step 14, and it has to be in place before step 14 can be, or
+the refusal is worse than what it replaces.
 
-- This machine currently has two mailboxes both named `kuvalu`, created
-  before the uniqueness rule above existed.  Renaming one changes how
-  its existing contacts' messages resolve, so the migration is not just
-  editing a config field — it needs working through before either
-  mailbox is renamed.
-- The plaintext health-check response hands the identity name to any
-  unauthenticated caller (see the separate concern below).  Should that
-  endpoint answer with the real name, a fixed placeholder, or nothing at
-  all?  It is documented in the README as the way to verify an install,
-  so changing it changes that procedure too.
+The end of an outbox sync sweeps away any outbox file whose recipient
+list is empty.  That is right when the list emptied because every
+recipient was delivered to and struck off — the message is finished
+with, and leaving it would resend it.  But a file whose `to:` line
+resolved to nobody never had an entry in that list to begin with, and
+is indistinguishable at the sweep.  It was deleted in the same sync
+cycle that wrote the explanatory marker into it.
+
+This already applied to an unknown contact, so a message addressed to
+a name not in the contacts file was silently destroyed seconds after
+being written.  The ambiguity refusal would have behaved the same way.
+
+15. **Hold outbox files with an unresolvable recipient back from the
+    cleanup sweep**, the way files with queued work are already held
+    back.  Both marker sites — unknown contact and ambiguous recipient
+    — mark the file as held.  The two sites should share one marker
+    routine rather than one copying the other.
+
+## Answered questions
+
+**The two `kuvalu` mailboxes.**  `kuvalu` is the name of this computer,
+and it stays with the mailbox at `/home/ritz/mail` on port 8025.  The
+mailbox at `/home/ritz/notes/rmail` on port 8026 becomes `kuvalu-notes`.
+
+The migration turned out to cost nothing, which the question had
+assumed it would not.  Neither mailbox has a contact named `kuvalu`,
+neither lists the other as a contact at all, and the notes mailbox has
+an empty contacts file and empty inbox and outbox state.  So no
+existing message's resolution changes, and the shared name had never
+had an opportunity to swallow anything.  The rename is one line in
+`~/.config/rmail/config-home-ritz-notes-rmail`, and takes effect when
+that mailbox's service is restarted.
+
+The name a contact sees is unaffected either way: contacts address you
+by whatever name they wrote in their own contacts file, and the
+identity field is only ever compared locally.
+
+**The health check keeps answering with the real name.**  Two mailboxes
+on one machine differ by port, and the name in the reply is what tells
+you which of them answered on a given port — the diagnostic this issue's
+whole subject matter makes worth having.  The name is not a secret and
+the config comment now says so.
+
+Worth recording against a future reading of that endpoint: it does not
+exercise decryption.  The daemon reads the first four bytes of a
+connection and takes `GET ` as a health check, replying before any key
+is involved.  It proves the port is open and a daemon is alive, and
+nothing about whether a contact's token works.
 
 ## Separate concern found while investigating
 
@@ -323,13 +408,36 @@ The LAN discovery broadcast also carries the name, but encrypts it with
 the destination contact's shared token first, so that path matches the
 documented claim.
 
-Fixing the comment is a small change to the config template written to
-every install.  Deciding what the health check should answer with is
-the open question above.
+The comment is fixed, in both the installer's config template and the
+portable drive's.  Both now say the name is not carried in the mail you
+send but is not a secret either, and name the health check as the way
+it gets out.  Deciding what the health check should answer with is the
+open question above, and is untouched.
+
+## Verification
+
+`scripts/test-mailbox-selection.sh` covers what this issue changed in
+the daemon.  It builds throwaway mailboxes in RAM and starts the real
+daemon against each, checking that: an empty argument, a mailbox
+directory, and a config with no `mail` line are each refused; a config
+planted at the old slug path is not found from a directory argument;
+an absolute `mail` is served as written and a relative one resolves
+against the config's directory; an ambiguous recipient is logged,
+marked in the outbox file, not self-delivered, and not deleted; plain
+self-delivery still works when the name is not also a contact; and a
+message to an unknown contact survives the cleanup sweep with its
+marker.
+
+It needs a working network — the daemon looks its own public IP up
+over DNS during startup, before it reaches its first outbox sync.
 
 ## Status
 
-Open.  The installer no longer produces one mailbox per machine, which
-was the reported symptom.  Steps 11, 12 and 14 remain, and both open
-questions above are unanswered — the second of which has to be decided
-before the two `kuvalu` mailboxes on this machine can be reconciled.
+In progress.  Every implementation step has been carried out, the
+daemon's half is verified by the test above, and both open questions
+are answered.
+
+What remains is on the machine rather than in the code: the notes
+mailbox's config now says `kuvalu-notes`, and its service has to be
+restarted before the running daemon knows that.  Until then the two
+daemons are still both answering to `kuvalu`.
