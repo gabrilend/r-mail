@@ -565,6 +565,35 @@ local function is_ipv4(addr)
 end
 
 -- True if the address looks like a hostname (anything that isn't a raw IP).
+-- Is this a private/non-routable IPv4 address?
+--
+-- The previous inline test was `^192%.168%.` or `^10%.` or `^172%.`, and that
+-- last one is wrong: only 172.16.0.0/12 is private, so it claimed the whole
+-- of 172.0.0.0/8 -- 172.1.x.x and 172.200.x.x are ordinary public addresses
+-- and were being treated as LAN peers.  It also missed two ranges that matter
+-- here: 169.254/16 (link-local, what you get when DHCP fails) and 100.64/10
+-- (CGNAT), which is what a great many mobile carriers hand out -- precisely
+-- the network the phone is on when it is not at home.
+--
+-- Getting this right matters more now than it did: the address announcement
+-- decides from this whether an address is ours-on-the-LAN or ours-on-the-
+-- internet, and a misclassification sends a contact an address they can
+-- never reach.
+local function is_private_ipv4(addr)
+    if not addr then return false end
+    local a, b = addr:match("^(%d+)%.(%d+)%.%d+%.%d+$")
+    if not a then return false end
+    a, b = tonumber(a), tonumber(b)
+    if a > 255 or b > 255 then return false end
+    if a == 10 then return true end                        -- 10.0.0.0/8
+    if a == 127 then return true end                       -- loopback
+    if a == 192 and b == 168 then return true end          -- 192.168.0.0/16
+    if a == 172 and b >= 16 and b <= 31 then return true end   -- 172.16.0.0/12
+    if a == 169 and b == 254 then return true end          -- link-local
+    if a == 100 and b >= 64 and b <= 127 then return true end  -- CGNAT
+    return false
+end
+
 local function is_hostname(addr)
     return addr ~= nil and addr ~= "" and not is_ipv4(addr) and not is_ipv6(addr)
 end
@@ -5485,8 +5514,7 @@ local function handle_request(rt, client)
             -- Cache peer LAN IP on first request only
             local peer_ip = client:getpeername()
             if peer_ip and contact_name and not rt.lan.peers[contact_name] then
-                local is_private = peer_ip:match("^192%.168%.") or
-                                   peer_ip:match("^10%.") or peer_ip:match("^172%.")
+                local is_private = is_private_ipv4(peer_ip)
                 if is_private then
                     local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
                     if cc[contact_name] and cc[contact_name].ip == my_public then
