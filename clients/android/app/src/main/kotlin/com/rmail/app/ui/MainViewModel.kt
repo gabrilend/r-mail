@@ -12,6 +12,7 @@ import com.rmail.app.data.MailboxConfig
 import com.rmail.app.data.MailboxRegistry
 import com.rmail.app.data.Settings
 import com.rmail.app.net.RmailClient
+import com.rmail.app.sync.SyncBackoff
 import com.rmail.app.sync.SyncManager
 import com.rmail.app.sync.SyncResult
 import com.rmail.app.sync.SyncWorker
@@ -142,7 +143,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Mailbox selection ───────────────────────────────────────────────────
 
     private var pollingJob: Job? = null
-    private val FOREGROUND_SYNC_INTERVAL_MS = 10_000L
+
+    // Polling cadence is no longer a fixed interval (#377 on the daemon side).
+    // The old 10s timer was a testing value that was never reverted: chatty
+    // against a server with nothing to say, and no slower at all against one
+    // that is unreachable, so a phone off-network retried every 10s forever.
+    //
+    // SyncBackoff uses the daemon's values -- floor 30s, +360s per failure,
+    // 2h ceiling, +/-30s jitter -- because both sides are solving the same
+    // problem. It governs polling only: a local write still syncs at once via
+    // triggerSync(), so backoff never delays what the user just typed.
+    private val backoff = SyncBackoff()
     private var lastSyncTime = 0L
 
     fun selectMailbox(id: String) {
@@ -176,12 +187,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startForegroundPolling() {
         pollingJob?.cancel()
+        // A freshly selected mailbox is due immediately; selectMailbox has
+        // already fired one sync, and this makes the *next* one follow the
+        // backoff rather than an arbitrary offset from selection.
+        backoff.resetNow()
         pollingJob = viewModelScope.launch {
             while (true) {
-                delay(1_000)
-                val elapsed = System.currentTimeMillis() - lastSyncTime
-                if (elapsed >= FOREGROUND_SYNC_INTERVAL_MS &&
-                    _syncStatus.value != SyncStatus.SYNCING) {
+                // Sleep until the next poll is actually due instead of waking
+                // every second to ask. Capped at 1s granularity so a cancelled
+                // job and a resetNow() from a local write are both noticed
+                // promptly rather than after a possible two-hour sleep.
+                val wait = backoff.timeUntilDue().coerceIn(1_000L, 30_000L)
+                delay(wait)
+                if (backoff.isDue() && _syncStatus.value != SyncStatus.SYNCING) {
                     triggerSync()
                 }
             }
@@ -211,6 +229,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _outboxFiles.value = s.listOutbox()
     }
 
+    /**
+     * Sync now. Called on every local change (compose, delete, contact edit)
+     * as well as by the poll loop, so user-initiated work never waits on
+     * backoff -- the backoff governs idle polling only.
+     */
     fun triggerSync() {
         val config = activeConfig ?: return
         val s = store ?: return
@@ -221,6 +244,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val manager = SyncManager(getApplication(), config, s, serverLanIp)
             when (val result = manager.sync()) {
                 is SyncResult.Success, is SyncResult.NewMessages -> {
+                    // Reachable: straight back to the floor. New mail resets
+                    // rather than merely succeeding -- traffic is evidence the
+                    // conversation is live, so poll eagerly for the reply
+                    // instead of waiting out a jittered floor.
+                    if (result is SyncResult.NewMessages) backoff.resetNow()
+                    else backoff.onSuccess()
                     _syncStatus.value = SyncStatus.IDLE
                     _syncError.value = null
                     refreshLocal()
@@ -245,8 +274,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 is SyncResult.Error -> {
+                    backoff.onFailure()
                     _syncStatus.value = SyncStatus.ERROR
-                    _syncError.value = result.message
+                    // Surfacing the retry distance matters here: with backoff,
+                    // "will retry" can now mean two hours, and an error box
+                    // that does not say so reads as "broken" rather than
+                    // "waiting".
+                    _syncError.value =
+                        "${result.message} (retrying in ${backoff.intervalSeconds() / 60}m)"
                 }
             }
         }

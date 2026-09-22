@@ -86,12 +86,26 @@ class SyncManager(
                 }
             }
 
+            // #386: every transfer below is durable the instant the server
+            // acknowledges it, so the state recording it is committed right
+            // then rather than batched into one write at the end of the
+            // function. The old all-or-nothing commit meant any later failure
+            // -- a contacts push, a download, a read timeout -- discarded the
+            // record of work that had definitively succeeded, and the next
+            // sync re-sent all of it. That produced 65 uploads for 44 files
+            // in a single observed drain.
+            //
+            // The rule: state describing "what the server already has" is
+            // written when the server says so, not when the cycle happens to
+            // reach its end.
+
             // Download new inbox files (preserve the server's authoring mtime)
             resp.fetchInbox.forEach { (id, entry) ->
                 val (data, mtimeMs) = client.downloadFileWithMtime("inbox", entry.filename)
                 store.writeInbox(entry.filename, data, mtimeMs)
                 newState.inbox[id] = entry
                 newCount++
+                store.writeSyncState(newState.toImmutable())
             }
 
             // Download new outbox files (created on desktop)
@@ -99,6 +113,7 @@ class SyncManager(
                 val (data, mtimeMs) = client.downloadFileWithMtime("outbox", filename)
                 store.writeOutbox(filename, data.toString(Charsets.UTF_8), mtimeMs)
                 newState.outbox.add(filename)
+                store.writeSyncState(newState.toImmutable())
             }
 
             // Upload new outbox files created on the phone (send the local
@@ -109,6 +124,9 @@ class SyncManager(
                 val mtimeSecs = File(store.outbox, filename).lastModified().let { if (it > 0) it / 1000 else null }
                 client.uploadOutboxFile(filename, content, mtimeSecs)
                 newState.outbox.add(filename)
+                // The upload is on the server now. If the next one throws,
+                // this one must not be sent again.
+                store.writeSyncState(newState.toImmutable())
             }
 
             // Remove outbox files the server says are done.
@@ -117,6 +135,7 @@ class SyncManager(
                 if (filename !in newOutboxSet) {
                     store.deleteOutbox(filename)
                     newState.outbox.remove(filename)
+                    store.writeSyncState(newState.toImmutable())
                 }
             }
 
@@ -131,6 +150,7 @@ class SyncManager(
                     if (localContacts.isNotBlank()) {
                         client.postContacts(localContacts)
                         newState.contactsHash = currentHash
+                        store.writeSyncState(newState.toImmutable())
                     }
                 } else {
                     // No local changes — accept server's version (already in the response)
@@ -141,6 +161,10 @@ class SyncManager(
 
             // ── 4. Persist updated state ───────────────────────────────────
 
+            // Final commit. Each step above already committed its own result
+            // (#386), so this catches only the bookkeeping that has no
+            // transfer of its own -- the removeInbox deletions and the
+            // accepted-from-server contacts hash.
             store.writeSyncState(newState.toImmutable())
 
             // ── 5. Notify if new messages arrived ─────────────────────────
