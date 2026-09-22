@@ -505,6 +505,56 @@ class RmailClient(
 
     data class AddressInfo(val ip: String, val port: Int, val name: String, val lanIp: String, val ipv6: String)
 
+    /** Outcome of [testConnection], each with a sentence a person can act on. */
+    sealed class ConnectionTest(val message: String) {
+        class Ok(val name: String) : ConnectionTest("Connected")
+        class Unreachable(why: String) : ConnectionTest(why)
+        object TokenRejected : ConnectionTest(
+            "Something answered on that port, but it didn't accept this token. " +
+            "Check the token matches the one in the server's contacts file, and " +
+            "that this is the port rmail listens on.")
+        object NotOwnDevice : ConnectionTest(
+            "The server knows this token, but not as one of your own devices. " +
+            "In the server's contacts file, add a line: <name>.own = true")
+        class Other(why: String) : ConnectionTest(why)
+    }
+
+    /**
+     * Setup's connection check.  Two steps, so the answer says which part is
+     * wrong: first a bare TCP connect (address, port, forwarding, daemon
+     * running), then an authenticated request (token, own-device flag).  A
+     * daemon that cannot decrypt a request closes without answering, so a
+     * connection that opens and then fails means the token was refused.
+     */
+    fun testConnection(): ConnectionTest {
+        try {
+            Socket().use { it.connect(java.net.InetSocketAddress(host, port), 5_000) }
+        } catch (e: java.net.UnknownHostException) {
+            return ConnectionTest.Unreachable("\"$host\" isn't a known address or hostname.")
+        } catch (e: Exception) {
+            return ConnectionTest.Unreachable(
+                "Couldn't reach $host on port $port. Check the address and port, that the " +
+                "rmail daemon is running, and — if you're away from home — that your router " +
+                "forwards port $port to it.")
+        }
+        return try {
+            val (status, body) = get("/api/myaddress")
+            when (status) {
+                200 -> ConnectionTest.Ok(
+                    JSONObject(body.toString(Charsets.UTF_8)).optString("name", ""))
+                403 -> ConnectionTest.NotOwnDevice
+                else -> ConnectionTest.Other("The server answered with an error (HTTP $status).")
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            ConnectionTest.Other("Connected, but the server didn't answer. Is rmail what's " +
+                "listening on port $port?")
+        } catch (e: Exception) {
+            ConnectionTest.TokenRejected
+        } finally {
+            close()
+        }
+    }
+
     /**
      * GET /api/myaddress — returns the daemon's public IP, port, name, and LAN IP
      */

@@ -248,6 +248,23 @@ fun InboxScreen(
     }
 
     LaunchedEffect(Unit) { vm.refreshLocal() }
+
+    // New-mail notifications need permission on Android 13+.  Asked here --
+    // once a mailbox exists and the user is looking at it -- rather than at
+    // first launch, and on every visit while it is missing; Android itself
+    // stops showing the prompt after the user has declined twice.
+    val notifPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     // Re-read contacts from disk when switching to contacts panel (picks up sync changes)
     LaunchedEffect(currentPanel) {
         if (currentPanel == Panel.CONTACTS && !contactsModified) {

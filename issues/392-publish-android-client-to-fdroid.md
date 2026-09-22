@@ -53,19 +53,21 @@ the server.
   saying what rmail is, what you need, and where to get it (install.sh, a
   portable drive -- #339, #361, #385 -- later a router, #390), before any
   field asks for an address.
-- **B8. Pairing is a config-file edit.**  The help text is a raw snippet
+- **B8. Pairing is a config-file edit.**  (A QR code is possible from a
+  headless daemon: `qrencode -t ANSIUTF8` draws one in the terminal.)  The help text is a raw snippet
   to paste on the server (`myphone.token = "<your-token>"`,
   `myphone.own = true`).  "Device token" is jargon, in a password field
   wrapped in literal quote marks.  Wanted: the daemon prints (or shows as a
   QR code) everything the phone needs -- address, port, token -- and the
   phone takes it in one step.
-- **B9. Wrong default port.**  The app pre-fills 8025; install.sh picks a
+- ~~**B9. Wrong default port.**~~ *Fixed 2026-09-22: the field starts blank.*  The app pre-fills 8025; install.sh picks a
   random port in 50000-65000.  The pre-fill is wrong for almost everyone.
-- **B10. "Detect port" scans.**  It tries every port on one host, and its
+- **B10. "Detect port" scans.**  (Not against F-Droid's rules -- scanners
+  are listed there -- but a bad first impression and noisy on networks.)  It tries every port on one host, and its
   LAN fallback about 3.8 million connections.  Slow, and indistinguishable
   from a port scan to anything watching the network.  Replace it with B8's
   pairing, or LAN discovery the daemon answers.
-- **B11. "Connect" does not connect.**  It saves and moves on; a wrong
+- ~~**B11. "Connect" does not connect.**~~ *Fixed 2026-09-22: Connect tests TCP reachability, then the token and own-device flag, and says which is wrong; "Save anyway" keeps the settings if the server is just off.*  It saves and moves on; a wrong
   token or address shows up later as a red sync-error banner.  Test the
   connection and say what is wrong, in words, before leaving Setup.
 - **B12. Router talk.**  "Home router IP", auto-filled with whatever
@@ -76,7 +78,7 @@ the server.
   or cancel.  After the first setup, the navigation to the inbox uses
   `popUpTo("mailboxList")`, which is not on the back stack yet, so Back may
   return to Setup (unverified on a device).
-- **B14. Notifications never appear on Android 13+.**  POST_NOTIFICATIONS
+- ~~**B14. Notifications never appear on Android 13+.**~~ *Fixed 2026-09-22: requested when the inbox opens, while missing.  Not seen on a device yet (the test phone is Android 12, which needs no permission).*  POST_NOTIFICATIONS
   is declared but never requested, so the first new message is silent.
   Ask at a sensible moment (after setup, not on launch).
 - **B15. Error messages.**  The sync banner shows internal wording ("wrong
@@ -95,7 +97,7 @@ the server.
 
 ## Data safety
 
-- **B19. Secrets in backups.**  `android:allowBackup="true"` sends the
+- ~~**B19. Secrets in backups.**~~ *Fixed 2026-09-22: allowBackup=false, plus data-extraction rules excluding everything from cloud backup and device transfer.  No token was ever in git (all six checked against full history).*  `android:allowBackup="true"` sends the
   stored tokens -- the encryption secrets -- to Android device and cloud
   backup.  Set it to false or add backup rules that exclude
   `mailboxes.json`.

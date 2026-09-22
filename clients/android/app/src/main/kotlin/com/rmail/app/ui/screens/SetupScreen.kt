@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rmail.app.crypto.Crypto
 import com.rmail.app.data.MailboxConfig
+import com.rmail.app.net.RmailClient
 import com.rmail.app.ui.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -46,7 +47,10 @@ fun SetupScreen(
 ) {
     val context = LocalContext.current
     var host by remember { mutableStateOf(editConfig?.host ?: "") }
-    var port by remember { mutableStateOf(editConfig?.port?.toString() ?: "8025") }
+    // Blank for a new mailbox: every daemon picks its own port, so any
+    // number filled in here would be a guess, and usually a wrong one.
+    var port by remember { mutableStateOf(editConfig?.port?.toString() ?: "") }
+    var testFailed by remember { mutableStateOf(false) }
     var token by remember { mutableStateOf(editConfig?.token ?: "") }
     var connecting by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -250,17 +254,7 @@ fun SetupScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Button(
-                onClick = {
-                    val portInt = port.toIntOrNull()
-                    if (host.isBlank()) { errorMessage = "Server address is required"; return@Button }
-                    if (portInt == null) { errorMessage = "Enter a valid port number"; return@Button }
-                    if (token.isBlank()) { errorMessage = "Device token is required"; return@Button }
-
-                    connecting = true
-                    errorMessage = null
-
-                    val config = (if (editConfig != null) {
+            fun buildConfig(portInt: Int) = (if (editConfig != null) {
                         editConfig.copy(
                             // Setup edits the primary address; any others
                             // added in Settings are kept behind it.
@@ -276,20 +270,59 @@ fun SetupScreen(
                         )
                     }).withAddressesSorted()
 
-                    if (editConfig != null) vm.updateMailbox(config)
-                    else vm.addMailbox(config)
+            fun save(config: MailboxConfig) {
+                if (editConfig != null) vm.updateMailbox(config) else vm.addMailbox(config)
+                onSetupComplete(config.id)
+            }
 
-                    connecting = false
-                    onSetupComplete(config.id)
+            Button(
+                onClick = {
+                    val portInt = port.toIntOrNull()
+                    if (host.isBlank()) { errorMessage = "Server address is required"; return@Button }
+                    if (portInt == null || portInt !in 1..65535) {
+                        errorMessage = "Enter the port your rmail daemon listens on"; return@Button
+                    }
+                    if (token.isBlank()) { errorMessage = "Device token is required"; return@Button }
+
+                    connecting = true
+                    errorMessage = null
+                    testFailed = false
+                    val config = buildConfig(portInt)
+                    // Test before saving, so a wrong address or token is
+                    // found here, in words, rather than later as a red
+                    // sync-error banner.
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            RmailClient(host.trim(), portInt, token.trim()).testConnection()
+                        }
+                        connecting = false
+                        if (result is RmailClient.ConnectionTest.Ok) {
+                            save(if (config.name.isBlank() && result.name.isNotBlank())
+                                config.copy(name = result.name) else config)
+                        } else {
+                            errorMessage = result.message
+                            testFailed = true
+                        }
+                    }
                 },
                 enabled = !connecting && !scanning,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (connecting) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Testing connection…")
                 } else {
                     Text("Connect")
                 }
+            }
+            // The server may simply be off right now; let the user keep the
+            // settings anyway, knowingly.
+            if (testFailed) {
+                TextButton(
+                    onClick = { port.toIntOrNull()?.let { save(buildConfig(it)) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Save anyway") }
             }
         }
     }
