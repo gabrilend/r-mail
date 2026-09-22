@@ -11,20 +11,51 @@
 #
 #   /run.sh            # starts rmail with this drive's mailbox/config
 #   /README.md         # plug-and-run instructions + router-port reminder
-#   /source-code/      # full rmail source (same as #361, plus libs/)
 #   /mailbox-0/
 #       config         # real file (not a symlink — mount point differs per host)
 #       inbox/
 #       outbox/
 #       attachments/
+#       hooks/         # this mailbox's own hook scripts, edited in place
 #       .state/
 #       contacts       # starts empty
+#       source-code/   # the program, trimmed — see below
 #
-# Libs are copied from the source tree's libs/ directory, so the dev
-# machine must have run scripts/install.sh at least once before this
-# generator is useful.  If the host the drive is later plugged into has
-# a different glibc/arch, run.sh will detect the mismatch and rebuild
-# into libs/ on first launch (see "Rebuild on host mismatch" below).
+# A mailbox on a machine holds no program: one git checkout serves every
+# mailbox there, and the service file says which mailbox each daemon is
+# for.  This is the exception, and the reason is the medium rather than
+# the mailbox — there is no checkout on the far end of a USB cable, so
+# the drive brings one (#382).
+#
+# What travels is an allowlist, not the whole tree minus exclusions:
+#
+#   rmail.lua, run-rmail.sh, libs/     the daemon and its libraries
+#   deps/lua/                          the interpreter — required, not optional
+#   rmail_crypto.c, rmail_inotify.c    the source behind the two .so files
+#   BUILD-NOTES.txt                    the commands that compiled them
+#   LICENSE                            ships with the binaries
+#
+# Not the Android client, the docs, the issues, or the development
+# transcripts.  A drive is somebody's mailbox made portable, not a way
+# of handing the project to a new person, and the transcripts in
+# particular have no business travelling.  Subtracting from the whole
+# tree meant the drive silently gained whatever the project gained next;
+# an allowlist means a new directory has to be asked for.
+#
+# The interpreter is required because the alternative is asking the host
+# for one, and a host's Lua may be a different version than these
+# libraries were built against — which fails as an undefined symbol from
+# inside require rather than as a sentence anybody can act on.
+#
+# What a drive still asks of a host is a CPU it was built for.  That is
+# not fixable by bundling: an x86-64 binary does not run on ARM.  So
+# run.sh checks on launch and stops with an explanation, where it used to
+# quietly spend a few minutes recompiling on somebody else's machine.
+#
+# install.sh used to travel, solely to do that recompiling, and it also
+# stood in as the build instructions the licence wants alongside shipped
+# binaries.  BUILD-NOTES.txt covers the second job in fifteen lines, and
+# the first job is one nobody wanted done.
 #
 # Usage:
 #   scripts/make-mailbox-drive.sh --name NAME --port PORT \
@@ -73,10 +104,13 @@ Auto-detection looks for a mounted filesystem whose mount-point basename
 matches FLASH_LABEL (currently "RMAIL").  If zero or multiple drives
 match, --dest is required.
 
-The source tree's libs/ directory must exist (run scripts/install.sh
-once locally before using this generator).  Libs are copied onto the
-drive so the mailbox works out of the box; if the target host has an
-incompatible glibc/arch, run.sh will rebuild on first launch.
+This checkout must already have both libs/ and a locally compiled Lua
+under deps/lua — run scripts/install.sh once, choosing to compile Lua,
+before using this generator.  Both are copied onto the drive, which
+then runs without asking the host for an interpreter or a library.
+
+A drive is tied to the CPU architecture it was built on.  Plugged into
+a machine of a different kind, run.sh says so and stops.
 HELP
 }
 
@@ -175,40 +209,22 @@ if [ ! -d "$ROOT/libs" ] || [ -z "$(ls -A "$ROOT/libs" 2>/dev/null)" ]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# rsync source (including libs/ this time — the drive needs a working rmail).
-
-info "populating $DEST/source-code/ from $ROOT"
-
-RSYNC_FLAGS="-a --delete --human-readable"
-if $DRY_RUN; then
-    RSYNC_FLAGS="$RSYNC_FLAGS --dry-run --itemize-changes"
+# The bundled interpreter is required, not preferred.  A drive carrying
+# libraries but no Lua is asking the host for one, and a host that has no
+# Lua — or one too old, or built against a different Lua version than
+# these libraries were — is exactly the situation a portable drive exists
+# to survive.  Refuse to make half a drive.
+if [ ! -x "$ROOT/deps/lua/bin/lua" ]; then
+    err "no bundled Lua at $ROOT/deps/lua/bin/lua"
+    err "  a portable drive carries its own interpreter, so this checkout"
+    err "  needs one compiled before it can make a drive."
+    err "  re-run scripts/install.sh and choose to compile Lua locally."
+    exit 1
 fi
 
-RSYNC_EXCLUDES="
---exclude=.git/
---exclude=.gitignore
---exclude=.build-tmp/
---exclude=.logs/
---exclude=.claude/
---exclude=.vscode/
---exclude=.idea/
---exclude=.DS_Store
---exclude=*.swp
---exclude=*.swo
---exclude=__pycache__/
---exclude=mailbox-*/
---exclude=**/build/
---exclude=.gradle/
---exclude=*.apk
---exclude=*.aab
-"
-
-mkdir -p "$DEST/source-code"
-# shellcheck disable=SC2086
-rsync $RSYNC_FLAGS $RSYNC_EXCLUDES "$ROOT/" "$DEST/source-code/"
-
 if $DRY_RUN; then
+    info "would create the mailbox at $MAILBOX_DIR"
+    info "would copy the trimmed program into $MAILBOX_DIR/source-code/"
     ok "dry run complete — nothing written."
     exit 0
 fi
@@ -217,66 +233,235 @@ fi
 # Create mailbox directory tree.
 
 info "creating mailbox at $MAILBOX_DIR"
-mkdir -p "$MAILBOX_DIR/inbox" "$MAILBOX_DIR/outbox" "$MAILBOX_DIR/attachments" "$MAILBOX_DIR/.state" "$MAILBOX_DIR/scripts"
+mkdir -p "$MAILBOX_DIR/inbox" "$MAILBOX_DIR/outbox" "$MAILBOX_DIR/attachments" "$MAILBOX_DIR/.state" "$MAILBOX_DIR/hooks"
 : > "$MAILBOX_DIR/contacts"    # empty contacts file
 
-# Copy the default hook scripts into the mailbox's own scripts/ dir.
-# Config references them as ./scripts/<name>.sh (relative paths).  run.sh
-# does `cd "$MAILBOX_DIR"` before exec'ing the daemon so relative paths in
-# config resolve to this mailbox regardless of where the drive is
-# mounted.  Users can edit these scripts in place on the drive — the
-# customisations travel with the mailbox.
+# Copy the default hook scripts into the mailbox's own hooks/ dir.
+# Config references them as ./hooks/<name>.sh.  The daemon resolves a
+# relative hook path against the directory holding the config file, and
+# the config sits inside the mailbox, so these land on this mailbox's own
+# copies at whatever mount point the host picks.  Users edit them in place
+# on the drive and the customisations travel with the mailbox.
 if [ -d "$ROOT/scripts/hooks" ]; then
     for _h in "$ROOT/scripts/hooks"/*.sh; do
         [ -f "$_h" ] || continue
-        cp "$_h" "$MAILBOX_DIR/scripts/"
-        chmod +x "$MAILBOX_DIR/scripts/$(basename "$_h")"
+        cp "$_h" "$MAILBOX_DIR/hooks/"
+        chmod +x "$MAILBOX_DIR/hooks/$(basename "$_h")"
     done
 fi
 
 # ---------------------------------------------------------------------------
+# Copy the program into the mailbox.
+#
+# This is the one kind of mailbox that carries its own program.  A mailbox
+# on a machine runs the daemon out of the git checkout, named by its
+# service file; a mailbox on removable media has no checkout at the far
+# end, so it brings one.
+#
+# An allowlist rather than the whole tree with exclusions.  Copying
+# everything and subtracting meant the drive quietly gained whatever was
+# added to the project next — at one point the entire Android client and
+# the development transcripts.  Listing what a daemon needs in order to
+# run and to be rebuilt is a short list, and a new directory in the
+# project does not join it by default.
+#
+SRC_DIR="$MAILBOX_DIR/source-code"
+info "copying the program into $SRC_DIR"
+mkdir -p "$SRC_DIR"
+
+for _f in rmail.lua run-rmail.sh rmail_crypto.c rmail_inotify.c LICENSE; do
+    if [ -f "$ROOT/$_f" ]; then
+        cp "$ROOT/$_f" "$SRC_DIR/$_f"
+    else
+        err "missing from the checkout: $_f"
+        exit 1
+    fi
+done
+chmod +x "$SRC_DIR/run-rmail.sh"
+
+cp -a "$ROOT/libs" "$SRC_DIR/libs"
+
+# Relink the crypto module so it carries its own OpenSSL.
+#
+# The checkout's copy borrows libcrypto from the machine it was built on
+# — on a normal install that is correct and costs nothing.  On a drive it
+# is a dependency on a stranger: OpenSSL 3 and OpenSSL 1.1 export
+# different symbols, so a drive built against one and plugged into a host
+# with the other fails at load.  That is not an exotic case; it is the
+# difference between a current distribution and a long-term-support one.
+#
+# Only the archive's referenced parts get pulled in, but OpenSSL 3 routes
+# even AES-GCM through its provider machinery, so "referenced" turns out
+# to be most of the library.  It costs about 6.7 MB.  A flash drive has
+# it; a host that cannot load the module does not.
+_libcrypto_a=""
+for _d in /usr/lib /usr/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu "$ROOT/deps/openssl/lib" "$ROOT/deps/openssl/lib64"; do
+    [ -n "$_d" ] || continue
+    if [ -f "$_d/libcrypto.a" ]; then _libcrypto_a="$_d/libcrypto.a"; break; fi
+done
+
+if [ -z "$_libcrypto_a" ]; then
+    err "no static libcrypto.a found"
+    err "  a drive carries its own OpenSSL rather than borrowing the host's,"
+    err "  so the static archive is needed to build it.  Install your"
+    err "  distribution's OpenSSL development package and try again."
+    exit 1
+fi
+
+info "linking a self-contained crypto module against $_libcrypto_a"
+if ! cc -shared -fPIC -O2 -Wall \
+        -I"$ROOT/deps/lua/include" \
+        -o "$SRC_DIR/libs/rmail_crypto.so" \
+        "$ROOT/rmail_crypto.c" \
+        "$_libcrypto_a" -lpthread 2>/dev/null; then
+    err "could not build a self-contained crypto module"
+    err "  needs a C compiler and OpenSSL headers on this machine."
+    exit 1
+fi
+
+if ldd "$SRC_DIR/libs/rmail_crypto.so" 2>/dev/null | grep -q libcrypto; then
+    err "the crypto module still wants libcrypto from a host"
+    err "  the static link did not take; this drive would not be portable."
+    exit 1
+fi
+ok "crypto module carries its own OpenSSL ($(du -h "$SRC_DIR/libs/rmail_crypto.so" | cut -f1))"
+
+
+# The interpreter, and it is not optional.  A drive that relies on the host
+# having a usable Lua is a drive that works on the hosts you tried and not
+# on the one you needed.  Bundling it means the only thing the drive asks
+# of a host is a CPU it was built for.
+mkdir -p "$SRC_DIR/deps"
+cp -a "$ROOT/deps/lua" "$SRC_DIR/deps/lua"
+
+# The interpreter's build-time pieces do not travel.  liblua.a exists to
+# compile modules against and luac compiles Lua to bytecode; neither is
+# touched at runtime, and together they are most of what deps/lua weighs.
+# The headers stay, because BUILD-NOTES.txt tells the reader they can
+# rebuild the compiled parts and that should be true of what is in their
+# hand.
+rm -f "$SRC_DIR/deps/lua/bin/luac" "$SRC_DIR/deps/lua/lib/liblua.a"
+rm -rf "$SRC_DIR/deps/lua/man" "$SRC_DIR/deps/lua/share"
+
+# The recipe for the two compiled libraries.  They are shipped as binaries,
+# and the licence this project is under says that anyone given a binary can
+# ask for the source it came from — where "source" includes the commands
+# that did the compiling, not only the .c files beside them.
+#
+# This used to be satisfied by putting the whole installer on the drive,
+# which was a two-thousand-line answer to a two-line question.
+cat > "$SRC_DIR/BUILD-NOTES.txt" <<'BUILDNOTES'
+How the compiled parts of this drive were built
+===============================================
+
+Two of the files here are compiled from C, and this is how.  You need a C
+compiler, OpenSSL's headers, and the Lua headers from deps/lua/include.
+
+  cc -shared -fPIC -O2 -Wall -I deps/lua/include \
+     -o libs/rmail_crypto.so rmail_crypto.c -lcrypto
+
+  cc -shared -fPIC -O2 -Wall -I deps/lua/include \
+     -o libs/rmail_inotify.so rmail_inotify.c
+
+The interpreter in deps/lua is stock Lua, built with its own makefile and
+no local changes:
+
+  make linux          # deliberately not linux-readline — see below
+  make install INSTALL_TOP=<somewhere>/deps/lua
+
+It is built without readline on purpose.  readline is only used by Lua's
+interactive prompt, which nothing here runs, and linking it would add
+libreadline and libncursesw to what this drive needs from a host.  As
+built, it needs libc and libm and nothing else.
+
+The luasocket libraries under libs/socket and libs/mime are stock
+luasocket.  The full project, including the build script that assembles
+all of this, is at https://github.com/gabrilend/r-mail
+BUILDNOTES
+
+# Prove the drive works before handing it over.
+#
+# run.sh runs this same check on every launch and, when it fails, tells
+# the user the drive was built for a different kind of machine.  That
+# sentence is only honest if the drive was known to work somewhere, so
+# the somewhere is here, now, on the machine that just built it.
+# Otherwise a drive assembled from a broken checkout would travel and
+# then blame the host it arrived at.
+if ! LUA_PATH="$SRC_DIR/libs/?.lua;;" LUA_CPATH="$SRC_DIR/libs/?.so;;" \
+     "$SRC_DIR/deps/lua/bin/lua" \
+     -e 'require "socket.core"; require "rmail_crypto"; require "rmail_inotify"' \
+     >/dev/null 2>&1; then
+    err "the copied interpreter cannot load the copied libraries"
+    err "  this drive would not run anywhere, including here, so it is"
+    err "  not worth carrying.  Re-run scripts/install.sh --force in the"
+    err "  checkout to rebuild them, then make the drive again."
+    exit 1
+fi
+ok "checked: the drive's own Lua loads the drive's own libraries"
+
+# A Lua built before the no-readline change carries two dependencies it
+# has no use for, and they are the two a spare or unusual host is most
+# likely to be missing.  The drive still works everywhere that has them,
+# so this is worth saying rather than refusing over — but it is worth
+# saying, because otherwise every drive made from this checkout keeps
+# inheriting it silently.
+if command -v ldd >/dev/null 2>&1; then
+    if ldd "$SRC_DIR/deps/lua/bin/lua" 2>/dev/null | grep -q "readline\|ncurses"; then
+        warn "this checkout's Lua was built with readline, so the drive needs"
+        warn "  libreadline and libncursesw from any host it is plugged into."
+        warn "  Nothing here uses Lua's interactive prompt, which is all"
+        warn "  readline is for.  Rebuilding drops them:"
+        warn "      scripts/install.sh --force"
+        warn "  then make the drive again."
+    else
+        ok "its Lua needs only libc and libm from a host"
+    fi
+fi
+
+ok "program: $SRC_DIR ($(du -sh "$SRC_DIR" | cut -f1))"
+
+# ---------------------------------------------------------------------------
 # Write the mailbox config.  Design notes:
 #
-#   • No `mail = ...` — the daemon is launched in "directory form" (arg =
-#     mailbox path), which ignores this field.  Hard-coding a
-#     mount-point-dependent path here would break across hosts.
+#   • Nothing naming the mailbox.  The daemon serves the directory its
+#     config sits in, and this config sits in the mailbox, so the
+#     mailbox is right on every host and at every mount point without
+#     anybody writing a path down.  This is why a drive works at all:
+#     there is no mount point recorded to go stale.
 #   • No `libs = ...` — rmail.lua automatically searches
-#     <script_dir>/libs/, which resolves to $DRIVE/source-code/libs
+#     <script_dir>/libs/, which resolves to the mailbox's own source-code/libs
 #     regardless of mount point.
-#   • `notify_ip_change = false` — a portable drive's IP changes every
-#     time it's plugged into a new host; auto-notifying contacts on
-#     every move would be noisy and leak host-hopping behaviour.  Flip
-#     to true if the drive mostly lives on one machine.
-#   • Hooks use `./scripts/<name>.sh` relative paths.  run.sh cd's into
-#     the mailbox before exec'ing the daemon, so these resolve to the
-#     scripts/ directory inside this mailbox on any host.
+#   • No `notify_ip_change = ...` — off is the default everywhere now,
+#     for the reason drives always needed it off: a mailbox that moves
+#     would announce its new address to every contact on arrival.  This
+#     used to be the drive's own special case and no longer is.
+#   • Hooks use `./hooks/<name>.sh` relative paths, which the daemon
+#     resolves against the directory holding this config — the mailbox
+#     itself — so they reach this mailbox's own copies on any host.
 
 cat > "$MAILBOX_DIR/config" <<CONFIG
 # rmail configuration — portable mailbox drive
 # generated by scripts/make-mailbox-drive.sh
 
-# local identity (never transmitted)
+# local identity.  Not carried in the mail you send — each contact sees you
+# by the name they gave you in their own contacts file — but not a secret
+# either: the plaintext health check answers with it to any caller.
 name = $NAME
 
 # listening port — make sure the host's router forwards this to the host
 port = $PORT
 
-# portable drives move between hosts; each host has a different public
-# IP, so IP-change notifications would fire on every replug.  Flip this
-# to true if the drive mostly lives on one machine.
-notify_ip_change = false
-
-# Hook scripts live in ./scripts/ inside this mailbox.  Paths are
-# relative to the mailbox dir because run.sh cd's into it before
-# starting the daemon, so they survive the drive being moved between
-# hosts (no absolute mount-point path in config).  Edit the scripts
-# in place to customise; set a line to "" to disable that hook.
-on_receive_raw = ./scripts/on_receive_raw.sh
-on_receive     = ./scripts/on_receive.sh
-on_package     = ./scripts/on_package.sh
-on_send        = ./scripts/on_send.sh
-on_delete      = ./scripts/on_delete.sh
-on_update      = ./scripts/on_update.sh
+# Hook scripts live in ./hooks/ inside this mailbox.  The paths are
+# relative to this config file, which sits in the mailbox, so they
+# survive the drive being moved between hosts with no mount-point path
+# written down anywhere.  Edit the scripts in place to customise; set a
+# line to "" to disable that hook.
+on_receive_raw = ./hooks/on_receive_raw.sh
+on_receive     = ./hooks/on_receive.sh
+on_package     = ./hooks/on_package.sh
+on_send        = ./hooks/on_send.sh
+on_delete      = ./hooks/on_delete.sh
+on_update      = ./hooks/on_update.sh
 CONFIG
 ok "wrote config: $MAILBOX_DIR/config"
 
@@ -294,66 +479,68 @@ cat > "$DEST/run.sh" <<RUN
 set -e
 DRIVE="\$(cd "\$(dirname "\$0")" && pwd)"
 MAILBOX_DIR="\$DRIVE/$MAILBOX_NAME"
-SRC="\$DRIVE/source-code"
+SRC="\$MAILBOX_DIR/source-code"
 
 if [ ! -d "\$MAILBOX_DIR" ]; then
     echo "error: no mailbox at \$MAILBOX_DIR" >&2
     exit 1
 fi
 
-# Pick the Lua the same way run-rmail.sh does, then check whether the
-# prebuilt libs on this drive actually load under that Lua.  A Lua-version
-# or glibc/arch mismatch shows up as "undefined symbol" or "incompatible
-# Lua version" from require — in that case, rebuild libs for this host.
-_lua=""
-if [ -x "\$SRC/deps/lua/bin/lua" ]; then
-    _lua="\$SRC/deps/lua/bin/lua"
-else
-    for _l in lua5.4 luajit lua5.3 lua5.2 lua5.1 lua; do
-        if command -v "\$_l" >/dev/null 2>&1; then _lua=\$(command -v "\$_l"); break; fi
-    done
-fi
-
-_libs_ok=1
-if [ -z "\$_lua" ]; then
-    echo "error: no lua interpreter found (install lua5.4 or similar)" >&2
+# The drive's own interpreter, and only that one.
+#
+# Falling back to the host's lua was the old behaviour and it is a bad
+# trade: a host's lua may be a different version than the libraries here
+# were built against, and the failure that produces is an "undefined
+# symbol" from deep inside require, not a sentence anybody can act on.
+# The drive carries an interpreter precisely so that the host's does not
+# get a vote.
+_lua="\$SRC/deps/lua/bin/lua"
+if [ ! -x "\$_lua" ]; then
+    echo "error: this drive has no interpreter at \$_lua" >&2
+    echo "  a portable drive is supposed to carry one; this drive is" >&2
+    echo "  incomplete and needs regenerating with make-mailbox-drive.sh" >&2
     exit 1
 fi
-if [ ! -d "\$SRC/libs" ] || [ -z "\$(ls -A "\$SRC/libs" 2>/dev/null)" ]; then
-    _libs_ok=0
-else
-    # Probe: can this Lua load the key C modules from the drive's libs?
-    if ! LUA_PATH="\$SRC/libs/?.lua;;" LUA_CPATH="\$SRC/libs/?.so;;" \\
-         "\$_lua" -e 'require "socket.core"; require "rmail_crypto"' >/dev/null 2>&1; then
-        echo "rmail libs on drive are not compatible with this host's Lua —" >&2
-        echo "rebuilding (one-time, a few minutes)." >&2
-        _libs_ok=0
-    fi
-fi
 
-if [ "\$_libs_ok" = 0 ]; then
-    # Re-use the drive's own config values so install.sh's prompts are
-    # satisfied with valid data.  install.sh will write a side-effect
-    # config file under \$HOME/.config/rmail/ on the host — harmless; the
-    # drive's own config at \$MAILBOX_DIR/config is what the daemon actually uses
-    # at launch (directory form passes through to the mailbox config).
-    _name=\$(awk -F'[ \\t]*=[ \\t]*' '/^[[:space:]]*name[[:space:]]*=/ {print \$2; exit}' "\$MAILBOX_DIR/config")
-    _port=\$(awk -F'[ \\t]*=[ \\t]*' '/^[[:space:]]*port[[:space:]]*=/ {print \$2; exit}' "\$MAILBOX_DIR/config")
-    : "\${_name:=portable}"
-    : "\${_port:=54321}"
-    ( cd "\$SRC" && ./scripts/install.sh --silent --yes --force \\
-        --mail-dir="\$MAILBOX_DIR" --name="\$_name" --port="\$_port" \\
-        --no-setup-service ) || {
-        echo "rebuild failed — see output above." >&2
-        exit 1
-    }
+# Everything the daemon needs is on the drive, so anything that fails to
+# load here is a mismatch between the drive and this host rather than
+# something missing.  Say so and stop.
+#
+# Rebuilding in place is what used to happen instead — a few minutes of
+# compiling, triggered automatically, on a machine somebody had just
+# plugged a drive into.  That is a fallback dressed as a convenience: it
+# hides the fact that the drive was built for a different machine, and it
+# writes to a drive that may well be somebody else's.
+if ! LUA_PATH="\$SRC/libs/?.lua;;" LUA_CPATH="\$SRC/libs/?.so;;" \\
+     "\$_lua" -e 'require "socket.core"; require "rmail_crypto"' >/dev/null 2>&1; then
+    echo "error: this drive was built for a different kind of machine." >&2
+    echo "" >&2
+    echo "  Its interpreter and libraries will not run here.  Almost always" >&2
+    echo "  this is a different CPU architecture — a drive built on an" >&2
+    echo "  x86-64 machine cannot run on an ARM one, and the other way" >&2
+    echo "  round.  Nothing is damaged and no mail has been touched." >&2
+    echo "" >&2
+    echo "  This drive:  \$(file -b "\$_lua" 2>/dev/null | cut -d, -f1-2)" >&2
+    echo "  This host:   \$(uname -m)" >&2
+    echo "" >&2
+    echo "  To use this mailbox here, regenerate the drive on a machine of" >&2
+    echo "  this kind, or copy the mailbox onto a host that has rmail." >&2
+    exit 1
 fi
 
 # cd into the mailbox so relative hook paths in config (e.g.
-# ./scripts/on_receive.sh) resolve correctly regardless of mount point.
+# ./hooks/on_receive.sh) resolve correctly regardless of mount point.
 # The daemon doesn't chdir during its run, so CWD stays stable.
+#
+# The daemon is handed the config file, not the mailbox directory.  It
+# takes no other form: naming the mailbox and letting the daemon hunt
+# for a matching config is how one machine's two mailboxes ended up
+# sharing a single service.  The mailbox served is wherever that config
+# turns out to be sitting, so this drive needs nothing but its own
+# location to know which mailbox it is — and that location is worked
+# out fresh from this script's path on every launch.
 cd "\$MAILBOX_DIR"
-exec "\$SRC/run-rmail.sh" "\$MAILBOX_DIR"
+exec "\$SRC/run-rmail.sh" "\$MAILBOX_DIR/config"
 RUN
 chmod +x "$DEST/run.sh"
 
@@ -389,33 +576,48 @@ Logs go to stdout; Ctrl-C to stop.  For a long-running daemon, use
 \`nohup ./run.sh > mail.log 2>&1 &\` or set it up as a systemd user
 service pointing at \`./run.sh\`.
 
-## Rebuild on host mismatch
+## What this drive needs from a host
 
-The drive ships with libs prebuilt on whatever machine generated it.
-Those libs won't work if this host has a materially different glibc or
-architecture.  \`run.sh\` checks for that case on launch and kicks off
-\`scripts/install.sh\` once to rebuild, caching the result back into
-\`source-code/libs/\` on the drive.  First launch on a new architecture
-takes a few minutes; subsequent launches are instant.
+Almost nothing.  It carries its own Lua interpreter and its own
+libraries, and uses them in preference to anything installed on the
+host, so it does not care whether the machine has rmail, or Lua, or
+anything else.  The interpreter is built without readline, so all it
+wants from the system is the C library and the maths library — which
+every Linux has.
+
+The one thing it cannot bring is a CPU.  A drive built on an x86-64
+machine will not run on an ARM one, or the other way round.  \`run.sh\`
+checks this on launch and stops with an explanation naming both, rather
+than failing somewhere confusing.  Nothing is damaged and no mail is
+touched; the mailbox is plain files and is readable anywhere.
+
+Earlier versions recompiled themselves in that situation, which took a
+few minutes and wrote to the drive on a machine somebody had only just
+plugged it into.  It now says what is wrong and leaves the decision to
+you.
 
 ## Troubleshooting
 
-* **"no lua interpreter found"** — see step 2 above.
+* **"this drive was built for a different kind of machine"** — see the
+  section above.  The drive is fine; this host is the wrong shape for it.
+* **"this drive has no interpreter"** — the drive was not generated
+  completely.  Make it again with \`scripts/make-mailbox-drive.sh\`.
 * **"address already in use"** — another process on this host is
   already using port \`$PORT\`.  Stop it or pick a different port (edit
   \`$MAILBOX_NAME/config\` on the drive).
 * **Contacts can't reach you** — double-check the router forwards
-  \`$PORT\` to this host's current LAN IP.  The drive's source tree
-  includes \`source-code/scripts/validate-router-settings.sh\` which
-  can help diagnose.
+  \`$PORT\` to this host's current LAN IP.  The connectivity checker is
+  not on the drive; it lives in the git checkout this drive was made
+  from, as \`scripts/validate-router-settings.sh\`.
 
 ## Customising hooks
 
-Hook scripts live in \`$MAILBOX_NAME/scripts/\` inside the mailbox.
+Hook scripts live in \`$MAILBOX_NAME/hooks/\` inside the mailbox.
 Edit them in place — the customisations are part of the mailbox and
 travel with the drive.  The config references them with relative
-paths (\`./scripts/on_receive.sh\` etc.) which resolve correctly
-because \`run.sh\` cd's into the mailbox before launching the daemon.
+paths (\`./hooks/on_receive.sh\` etc.), which the daemon resolves
+against the directory the config sits in, so they follow the mailbox
+to whatever mount point a host gives it.
 Set a hook line in the config to \`""\` to disable that hook entirely.
 
 ## What's on the drive?
@@ -423,13 +625,25 @@ Set a hook line in the config to \`""\` to disable that hook entirely.
 * \`run.sh\` — launcher.  Resolves paths from its own location so the
   mount point doesn't matter.
 * \`$MAILBOX_NAME/\` — the mailbox itself.  Inbox, outbox, contacts,
-  attachments, state, and hook scripts all live here.
-* \`$MAILBOX_NAME/scripts/\` — the mailbox's hook scripts.  Edit in
+  attachments, state, hooks and the program all live here.
+* \`$MAILBOX_NAME/hooks/\` — the mailbox's hook scripts.  Edit in
   place to customise; they're referenced with relative paths from
   the mailbox config so they stay portable.
-* \`source-code/\` — full rmail source plus prebuilt libs.  Don't
-  usually need to touch this; \`run.sh\` manages it automatically.
+* \`$MAILBOX_NAME/source-code/\` — the daemon, its own Lua interpreter,
+  its libraries, the C sources behind the compiled ones, and
+  \`BUILD-NOTES.txt\` saying how those were built.  \`run.sh\` manages
+  this; you shouldn't need to go in.
 * \`README.md\` — this file.
+
+## What this drive is not
+
+It carries enough rmail to run this mailbox, and no more.  It is not a
+copy of the project: no Android client, no documentation beyond this
+file, no issue history.  A drive is your mailbox made portable, not a
+way of handing rmail to somebody new.
+
+For any of that — including the Android app, which is built from source
+and sideloaded — go to the git checkout the drive was made from.
 README
 
 # ---------------------------------------------------------------------------
@@ -441,8 +655,8 @@ ok "mailbox drive ready at $DEST (total size: ${_bytes:-unknown})"
 info "drive contents:"
 info "    $DEST/run.sh"
 info "    $DEST/README.md"
-info "    $DEST/source-code/"
-info "    $DEST/$MAILBOX_NAME/  (config, inbox, outbox, attachments, contacts, scripts)"
+info "    $DEST/$MAILBOX_NAME/source-code/  (the daemon and its libraries)"
+info "    $DEST/$MAILBOX_NAME/  (config, inbox, outbox, attachments, contacts, hooks)"
 echo ""
 info "identity: $NAME"
 info "port:     $PORT"

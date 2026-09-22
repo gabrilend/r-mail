@@ -1,7 +1,7 @@
 # rmail Scripting Tutorial
 
 Hooks let you run a script in response to message events. Configure them in
-`~/.config/rmail/config`:
+your mailbox's `config` file:
 
 ```
 on_receive_raw = /path/to/script.sh
@@ -93,7 +93,7 @@ hook gets: one `notify-send` call.
 
 ```sh
 #!/bin/sh
-# ~/.config/rmail/hooks/notify.sh
+# ~/mail/hooks/notify.sh
 from="$1"
 subject="$2"
 # $3 is the inbox file path, not needed here
@@ -102,7 +102,7 @@ notify-send "rmail" "New message from ${from}: ${subject}"
 ```
 
 ```
-on_receive = ~/.config/rmail/hooks/notify.sh
+on_receive = ~/mail/hooks/notify.sh
 ```
 
 ### Wrap incoming messages to 80 columns
@@ -111,7 +111,7 @@ Uses `on_receive_raw` — transforms the body before it hits disk.
 
 ```sh
 #!/bin/sh
-# ~/.config/rmail/hooks/wrap.sh
+# ~/mail/hooks/wrap.sh
 from="$1"
 subject="$2"
 body="$3"
@@ -120,7 +120,7 @@ printf '%s' "$body" | fold -s -w 80
 ```
 
 ```
-on_receive_raw = ~/.config/rmail/hooks/wrap.sh
+on_receive_raw = ~/mail/hooks/wrap.sh
 ```
 
 `fold -s` breaks on word boundaries. The wrapped text goes to stdout, which
@@ -133,7 +133,7 @@ Uses `on_send` to add a footer only when sending to a particular person.
 
 ```sh
 #!/bin/sh
-# ~/.config/rmail/hooks/disclaimer.sh
+# ~/mail/hooks/disclaimer.sh
 recipient="$1"
 subject="$2"
 body="$3"
@@ -146,7 +146,7 @@ fi
 ```
 
 ```
-on_send = ~/.config/rmail/hooks/disclaimer.sh
+on_send = ~/mail/hooks/disclaimer.sh
 ```
 
 If the script prints nothing for a given recipient, the body is sent unchanged.
@@ -158,9 +158,9 @@ Use `helpers/rfield.sh` to read arbitrary contact fields — see the
 Here's a quick example in `on_send`:
 
 Pass the contacts file path explicitly — it's the `contacts` file
-inside whichever mailbox this hook belongs to.  For a standard install
-that's `<mail-dir>/contacts` (the same `mail = ...` value from your
-config file):
+inside whichever mailbox this hook belongs to.  Your hooks live in
+that mailbox's `hooks/` directory, so the contacts file is its
+neighbour one level up: `/home/you/mail/contacts`.
 
 ```sh
 #!/bin/sh
@@ -228,7 +228,7 @@ end
 ```
 
 ```
-on_receive = /home/you/.config/rmail/hooks/log.lua
+on_receive = /home/you/mail/hooks/log.lua
 ```
 
 #### Wrap incoming messages to 80 columns (Lua version)
@@ -308,7 +308,7 @@ int main(int argc, char *argv[]) {
 ```
 
 ```
-on_receive_raw = /home/you/.config/rmail/hooks/wrap
+on_receive_raw = /home/you/mail/hooks/wrap
 ```
 
 **Receiving data:** `argv[1]`, `argv[2]`, `argv[3]` correspond to the positions
@@ -380,7 +380,7 @@ contacts entry needed.  (Self-delivery is a separate code path from
 contact delivery; `own = true` in a contacts entry is unrelated — that
 flag marks thin-client contacts that can call `/api/*` endpoints.)
 
-**Step 2.** Hook script at `/home/you/.config/rmail/hooks/heartbeat.sh`:
+**Step 2.** Hook script at `/home/you/mail/hooks/heartbeat.sh`:
 
 ```sh
 #!/bin/sh
@@ -422,10 +422,10 @@ subject=$(basename "$inbox_path")
 printf 'to: %s\n%s' "$sender" "$new_body" > ~/mail/outbox/"$subject"
 ```
 
-**Step 3.** Wire it up in `~/.config/rmail/config`:
+**Step 3.** Wire it up in your mailbox's `config` file:
 
 ```
-on_update = /home/you/.config/rmail/hooks/heartbeat.sh
+on_update = /home/you/mail/hooks/heartbeat.sh
 ```
 
 Every sync cycle the daemon sees the outbox body changed (the hook
@@ -472,9 +472,9 @@ creating new outbox messages addressed to other contacts.
 - For compiled languages, point the config at the **binary**, not the source.
   For C:
   ```sh
-  cc -O2 -o ~/.config/rmail/hooks/wrap ~/.config/rmail/hooks/wrap.c
+  cc -O2 -o ~/mail/hooks/wrap ~/mail/hooks/wrap.c
   ```
-  Then in config: `on_receive_raw = ~/.config/rmail/hooks/wrap`. Recompile
+  Then in config: `on_receive_raw = ~/mail/hooks/wrap`. Recompile
   after editing the source.
 - Message bodies are capped at 128 KB. Larger content must be sent as an
   attachment — this keeps `$3` in `on_receive_raw` and `on_send` a manageable

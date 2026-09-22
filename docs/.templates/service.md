@@ -6,9 +6,31 @@ until you start it again. Setting it up as a service means it starts automatical
 and stays running in the background.
 
 `install.sh` detects your init system and offers to set this up automatically.
-The manual formats are below. Replace `/path/to/lua` with either
-`deps/lua/bin/lua` (local) or your system lua (`which lua`), and
-`/path/to/rmail` with the directory you cloned the code into, not the location of your mailbox.
+The manual formats are below. Three things in them need replacing:
+
+**`/path/to/lua`** — your system lua (`which lua`), or the one the installer
+compiled, at `deps/lua/bin/lua` inside the checkout.
+
+**`/path/to/rmail`** — the directory you cloned the code into. One checkout
+serves every mailbox on the machine; there is no per-mailbox copy of the
+daemon. Which mailbox a given daemon serves is decided entirely by its
+second argument.
+
+**`/path/to/mailbox`** — the mailbox this service serves. `config` inside it
+is what the daemon is handed, and the mailbox served is the directory that
+file sits in. The argument is not optional: a daemon started without it stops
+with a usage message, because a machine can hold several mailboxes and there
+is nothing sensible to assume.
+
+A mailbox holds its own config and its own hook scripts, but not the program.
+The exception is a mailbox on removable media, which carries a trimmed copy
+under `source-code/` because there is no checkout at the far end of a USB
+cable — see the portable-drive generator.
+
+**`SERVICE-NAME`** — the mailbox path with its slashes turned into dashes and
+`rmail-` in front, so `/home/ritz/mail` gives `rmail-home-ritz-mail`. Every
+file a service owns is named after it, so two mailboxes on one machine never
+write to each other's log or pidfile.
 
 ## Logging
 
@@ -25,11 +47,14 @@ To view logs in real-time:
 
 ```sh
 ./scripts/view-logs.sh
-# or directly:
-tail -f /tmp/rmail.log
+# or directly, naming the service whose log you want:
+tail -f /tmp/rmail-home-ritz-mail.log
 ```
 
-A hidden symlink `.logs` in the project root also points to the log file.
+`view-logs.sh` lists the logs it finds and asks which one, skipping the
+question when there is only one. There is no `.logs` symlink in the project
+root any more: it named a single log file, and with one service per mailbox
+there is no single log to name.
 
 ---
 
@@ -54,7 +79,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua
+ExecStart=/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config
 Restart=on-failure
 RestartSec=5
 
@@ -81,7 +106,7 @@ After=network.target
 [Service]
 Type=simple
 User=YOURUSER
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua
+ExecStart=/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config
 Restart=on-failure
 RestartSec=5
 
@@ -103,7 +128,7 @@ journalctl -u rmail -f
 # /etc/sv/rmail/run
 #!/bin/sh
 export HOME=/home/YOURUSER
-exec chpst -u YOURUSER /path/to/lua /path/to/rmail/rmail.lua >>/tmp/rmail.log 2>&1
+exec chpst -u YOURUSER /path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config >>/tmp/SERVICE-NAME.log 2>&1
 ```
 
 ```sh
@@ -113,7 +138,7 @@ sudo chmod +x /etc/sv/rmail/run
 sudo ln -s /etc/sv/rmail /var/service/
 ```
 
-Logs: `tail -f /tmp/rmail.log` or `./scripts/view-logs.sh`
+Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 
 ---
 
@@ -125,12 +150,12 @@ Logs: `tail -f /tmp/rmail.log` or `./scripts/view-logs.sh`
 
 description="rmail messaging daemon"
 command="/path/to/lua"
-command_args="/path/to/rmail/rmail.lua"
+command_args="/path/to/rmail/rmail.lua /path/to/mailbox/config"
 command_user="YOURUSER"
 command_background=true
-pidfile="/run/rmail.pid"
-output_log="/tmp/rmail.log"
-error_log="/tmp/rmail.log"
+pidfile="/run/SERVICE-NAME.pid"
+output_log="/tmp/SERVICE-NAME.log"
+error_log="/tmp/SERVICE-NAME.log"
 ```
 
 ```sh
@@ -140,7 +165,7 @@ sudo rc-update add rmail default
 sudo rc-service rmail start
 ```
 
-Logs: `tail -f /tmp/rmail.log` or `./scripts/view-logs.sh`
+Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 
 ---
 
@@ -168,7 +193,7 @@ in {
       Type = "simple";
       User = "youruser";
       Group = "users";
-      ExecStart = "/path/to/lua /path/to/rmail/rmail.lua /path/to/mail";
+      ExecStart = "/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -212,18 +237,26 @@ notifications from scripts, one for file synchronisation between devices.
 whole procedure. The installer derives everything that has to differ from the
 mailbox path you give it:
 
-| What | Derived as | Example for `/home/ritz/notes/rmail` |
+| What | Where | Example for `/home/ritz/notes/rmail` |
 |---|---|---|
-| config file | `config-` plus the path slug | `~/.config/rmail/config-home-ritz-notes-rmail` |
-| service name | `rmail-` plus the path slug | `rmail-home-ritz-notes-rmail` |
+| config file | inside the mailbox | `~/notes/rmail/config` |
+| hook scripts | inside the mailbox | `~/notes/rmail/hooks/` |
+| the daemon | the one checkout, shared | `/path/to/rmail/rmail.lua` |
+| service name | `rmail-` plus the mailbox path, slashes to dashes | `rmail-home-ritz-notes-rmail` |
 | log file | the service name | `/tmp/rmail-home-ritz-notes-rmail.log` |
 | generated unit | the service name | `rmail-home-ritz-notes-rmail.service` |
 
-Pass `--service-name=NAME` if you want something shorter than the derived name.
+Everything a mailbox needs is inside it, so nothing has to be derived to keep
+two mailboxes apart — two directories are already two directories. The service
+name is the exception, and only because service names genuinely do share one
+namespace per machine. Pass `--service-name=NAME` if you want something
+shorter than the derived one.
 
-Before writing anything, the installer reports the mailboxes already set up on
-the machine, and refuses to proceed if the service name it is about to use
-already belongs to a different mailbox.
+Before writing anything, the installer reports whether the service name it is
+about to use already belongs to a different mailbox, and refuses if so. It
+does not look at your other mailboxes to do this, and it does not look at them
+for anything else either — a mailbox knowing about its neighbours is what the
+old shared config directory forced, and it is gone.
 
 ### What each instance needs, and what the installer does about it
 
@@ -237,10 +270,16 @@ already belongs to a different mailbox.
 3. **Its own identity name** — enforced as an error, not a warning. This one
    matters more than it looks. The daemon decides whether a message is for
    itself by comparing the recipient against its own identity, *before* any
-   contacts lookup. Two mailboxes sharing an identity means mail addressed
-   from one to the other is written into the sender's own inbox, logged as
-   delivered, and marked satisfied. Nothing arrives, and nothing reports an
-   error.
+   contacts lookup, so a name that is both your identity and a contact means
+   two different things at once.
+
+   The daemon now refuses that rather than picking. A `to:` line naming
+   something that is both gets an `// AMBIGUOUS RECIPIENT` note written into
+   the outbox file beside it, and the message stays where you left it,
+   undelivered, until you rename one of the two. Before that refusal existed,
+   the identity reading simply won: the message went into the sender's own
+   inbox, was logged as delivered and marked satisfied, the contact never
+   heard anything, and nothing reported an error.
 
 4. **Its own mail directory** — `inbox/`, `outbox/`, `contacts` and `.state/`
    are all relative to the `mail` setting in its config.
@@ -250,8 +289,8 @@ already belongs to a different mailbox.
 The daemon takes one positional argument: the path to a config file.
 
 ```sh
-lua rmail.lua ~/.config/rmail/config-home-ritz-mail
-lua rmail.lua ~/.config/rmail/config-home-ritz-notes-rmail
+lua /path/to/rmail/rmail.lua ~/mail/config
+lua /path/to/rmail/rmail.lua ~/notes/rmail/config
 ```
 
 There is no `--config` flag. Earlier versions of this document showed one, and

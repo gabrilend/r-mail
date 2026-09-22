@@ -200,16 +200,22 @@ any string and use it on both sides.)
 
 ### Step 4 — start both daemons
 
+A daemon is told which mailbox to serve by being handed that mailbox's
+config file — the `config` symlink the installer left inside each of
+the two mailboxes.  Handing it the mailbox directory instead is an
+error, because one machine can hold several mailboxes and the daemon
+does not guess between them.
+
 You'll want two terminal windows side by side.  In **terminal 1**:
 
 ```sh
-./run-rmail.sh $HOME/rmail-test/alice
+./run-rmail.sh $HOME/rmail-test/alice/config
 ```
 
 In **terminal 2**:
 
 ```sh
-./run-rmail.sh $HOME/rmail-test/bob
+./run-rmail.sh $HOME/rmail-test/bob/config
 ```
 
 Each terminal now shows alice's or bob's daemon output.  Leave them
@@ -629,7 +635,7 @@ alice.token = "shared-secret-for-alice-and-carol"
 In a **third** terminal, start carol's daemon:
 
 ```sh
-./run-rmail.sh $HOME/rmail-test/carol
+./run-rmail.sh $HOME/rmail-test/carol/config
 ```
 
 You now have three daemons running in three terminals.  Keep carol

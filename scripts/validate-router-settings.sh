@@ -5,11 +5,29 @@
 # the port to be open in your firewall; if it isn't, the result will be
 # misleading (timeout looks the same as no hairpin NAT support).
 #
-# Usage: scripts/check-connectivity.sh
+# A mailbox holds its own config and its own port, so this has to be told
+# which mailbox to check.  It used to read ~/.config/rmail/config, a path
+# that stopped being written when configs moved into their mailboxes, and
+# before that had already stopped being right when a machine could hold
+# more than one of them.
+#
+# Usage:
+#   scripts/validate-router-settings.sh ~/mail
+#   scripts/validate-router-settings.sh ~/mail/config
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG="${HOME}/.config/rmail/config"
+
+CONFIG="${1:-}"
+CONFIG=$(echo "$CONFIG" | sed "s|^~|$HOME|")
+if [ -d "$CONFIG" ]; then
+    CONFIG="${CONFIG%/}/config"
+fi
+if [ -z "$CONFIG" ]; then
+    printf "  \033[31m--\033[0m   which mailbox? pass its directory or its config file\n" >&2
+    printf "       e.g. %s ~/mail\n" "$0" >&2
+    exit 1
+fi
 
 ok()   { printf "  \033[32mok\033[0m   %s\n" "$*"; }
 warn() { printf "  \033[33m!!\033[0m   %s\n" "$*"; }

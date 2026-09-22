@@ -175,7 +175,7 @@ stops sending. Partial chunks are cleaned up on both sides.
 | `attachment_pending_dir`  | `/tmp`                  | where in-progress chunks are stored  |
 | `attachment_chunk_size`   | `5242880` (5 MB)        | bytes per chunk                      |
 
-These are set in `~/.config/rmail/config`. The config file has a comment above
+These are set in your mailbox's `config` file. The config file has a comment above
 each key explaining it.
 
 ### Message body size limit

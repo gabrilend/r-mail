@@ -5,30 +5,31 @@
 -- Configuration
 -- ============================================================
 
--- Resolve the mailbox directory and config file from the single command-line
--- argument.  arg[1] can be either:
---   • a directory        — the mailbox; config is found via a symlink inside
---                          it or a ~/.config/rmail/config-<slug> file
---   • a config file path — config loaded directly; mail = ... inside the
---                          config specifies the mailbox
--- The file form is preferred (the config is the source of truth) but the
--- directory form remains so old service files keep working.
+-- The daemon serves exactly one mailbox, named by exactly one config
+-- file, handed to it as the single command-line argument.
+--
+-- The mailbox is the directory that config file sits in.  It is not
+-- named anywhere; it is where the file is.  A config at
+-- /home/you/mail/config serves /home/you/mail, and there is no way to
+-- write down anything else.
+--
+-- This replaced a `mail = ...` line that said which directory to use.
+-- Once a config always lives inside the mailbox it describes, that line
+-- can only do one of two things: agree with where it already is, which
+-- is nothing, or disagree with it, which is a bug somebody now has to
+-- be told about.  A fact you cannot state wrongly needs no checking and
+-- no error message.  See issues/382.
+--
+-- The line before that was worse: the argument was the mailbox, and the
+-- daemon went looking for a config by rebuilding the installer's
+-- path-to-slug transform in a second place.  The two had to agree
+-- forever or a daemon quietly opened a config nobody named — and on a
+-- machine with two mailboxes, served the wrong one without saying so.
+-- See issues/381.
 local ARG = arg and arg[1]
-if not ARG or ARG == "" then
-    io.stderr:write("usage: rmail.lua <mailbox-directory | config-file>\n")
-    io.stderr:write("  e.g. lua rmail.lua ~/mail\n")
-    io.stderr:write("       lua rmail.lua ~/.config/rmail/config-home-you-mail\n")
-    os.exit(1)
-end
-ARG = ARG:gsub("^~", os.getenv("HOME") or "/tmp")
-ARG = ARG:gsub("/+$", "")
+local CONFIG_PATH, MAIL_ARG
 
-local function is_dir(path)
-    local f = io.open(path .. "/.", "r")
-    if f then f:close(); return true end
-    return false
-end
-
+-- {{{ parse_config_file
 local function parse_config_file(path)
     local f = io.open(path, "r")
     if not f then return nil end
@@ -49,46 +50,53 @@ local function parse_config_file(path)
     f:close()
     return cfg
 end
+-- }}}
 
-local function find_config_path(mail_dir)
-    -- 1. Symlink/file at <mailbox>/config (survives renames)
-    local symlink_path = mail_dir .. "/config"
-    local f = io.open(symlink_path, "r")
-    if f then f:close(); return symlink_path end
-    -- 2. Derived path: ~/.config/rmail/config-<mail-dir-with-slashes-as-dashes>
-    local slug = mail_dir:gsub("^/", ""):gsub("/", "-")
-    local derived = (os.getenv("HOME") or "/tmp") .. "/.config/rmail/config-" .. slug
-    f = io.open(derived, "r")
-    if f then f:close(); return derived end
-    return nil
-end
-
-local CONFIG_PATH, MAIL_ARG
-if is_dir(ARG) then
-    MAIL_ARG = ARG
-    CONFIG_PATH = find_config_path(MAIL_ARG)
-    if not CONFIG_PATH then
-        io.stderr:write("error: no config file found\n")
-        io.stderr:write("  looked for: " .. MAIL_ARG .. "/config (symlink)\n")
-        local slug = MAIL_ARG:gsub("^/", ""):gsub("/", "-")
-        io.stderr:write("  looked for: ~/.config/rmail/config-" .. slug .. "\n")
-        io.stderr:write("  run scripts/install.sh to create one\n")
+do
+    -- {{{ usage
+    local function usage(problem)
+        if problem then io.stderr:write("error: " .. problem .. "\n") end
+        io.stderr:write("usage: rmail.lua <config-file>\n")
+        io.stderr:write("  e.g. lua rmail.lua ~/mail/config\n")
+        io.stderr:write("  the mailbox served is the directory that file sits in\n")
         os.exit(1)
     end
-else
-    -- Treat the argument as a config file path directly
+    -- }}}
+
+    -- {{{ is_dir
+    local function is_dir(path)
+        local f = io.open(path .. "/.", "r")
+        if f then f:close(); return true end
+        return false
+    end
+    -- }}}
+
+    if not ARG or ARG == "" then usage() end
+    ARG = ARG:gsub("^~", os.getenv("HOME") or "/tmp")
+
+    -- A directory argument used to be accepted and is not any more.
+    -- Service files written before that change land here on their next
+    -- restart, which is the intended outcome: stopping loudly beats the
+    -- silent wrong-mailbox delivery the directory form produced once a
+    -- machine had more than one mailbox.
+    if is_dir(ARG) then
+        io.stderr:write("error: " .. ARG .. " is a directory\n")
+        io.stderr:write("  the mailbox-directory argument was removed; pass the config file\n")
+        io.stderr:write("  which for this one would be: " .. ARG .. "/config\n")
+        os.exit(1)
+    end
+
     CONFIG_PATH = ARG
-    local probe = parse_config_file(CONFIG_PATH)
-    if not probe then
-        io.stderr:write("error: cannot open config file: " .. CONFIG_PATH .. "\n")
-        os.exit(1)
+    if not parse_config_file(CONFIG_PATH) then
+        usage("cannot open config file: " .. CONFIG_PATH)
     end
-    if not probe.mail or probe.mail == "" then
-        io.stderr:write("error: config " .. CONFIG_PATH .. " has no `mail = ...` line\n")
-        io.stderr:write("  add the mailbox path, or launch with the mailbox dir as the argument\n")
-        os.exit(1)
-    end
-    MAIL_ARG = probe.mail:gsub("^~", os.getenv("HOME") or "/tmp"):gsub("/+$", "")
+
+    -- The mailbox is the config's own directory.  A bare filename means
+    -- the working directory, which is the one case where the answer is
+    -- not written down in the argument; it is still the directory the
+    -- file is in, which is the rule.
+    MAIL_ARG = CONFIG_PATH:match("^(.*)/[^/]*$") or "."
+    MAIL_ARG = MAIL_ARG:gsub("(.)/+$", "%1")
 end
 
 local function load_config() return parse_config_file(CONFIG_PATH) or {} end
@@ -113,7 +121,13 @@ local cfg = {
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
     allow_peer_addr   = config.allow_peer_address_requests ~= false,
     libs              = config.libs,
-    notify_ip_change  = config.notify_ip_change ~= false,
+    -- Off unless the config asks for it.  Every mailbox can move now
+    -- that a mailbox carries its own config, hooks and program, and a
+    -- mailbox that moves would otherwise announce its new address to
+    -- every contact the moment it arrived somewhere.  The portable
+    -- drive had this turned off as a special case for exactly that
+    -- reason; making it the default retires the special case.  See #382.
+    notify_ip_change  = config.notify_ip_change == true,
     auto_port_forward = config.auto_port_forward == true,
 }
 
@@ -128,13 +142,31 @@ local function _hook_or_nil(v)
     return v
 end
 
+-- A hook path that is not absolute is taken from the directory holding
+-- the config file — the same rule `mail` follows, and for the same
+-- reason.  A mailbox carries its own hooks now, so the config says
+-- `./hooks/on_receive.sh` and that has to mean this mailbox's copy no
+-- matter who started the daemon or what working directory they left it
+-- in.  Resolving against the working directory would hand that answer to
+-- the service manager, and a hand-started daemon and a supervised one
+-- would run different scripts from the same config.  See #382.
+local CONFIG_DIR_PATH = CONFIG_PATH:match("^(.*)/[^/]*$") or "."
+
+local function _hook_path(v)
+    local p = _hook_or_nil(v)
+    if not p then return nil end
+    p = p:gsub("^~", os.getenv("HOME") or "/tmp")
+    if p:sub(1, 1) == "/" then return p end
+    return (CONFIG_DIR_PATH .. "/" .. p:gsub("^%./", ""))
+end
+
 local hooks = {
-    on_receive_raw = _hook_or_nil(config.on_receive_raw),
-    on_receive     = _hook_or_nil(config.on_receive),
-    on_package     = _hook_or_nil(config.on_package),
-    on_send        = _hook_or_nil(config.on_send),
-    on_delete      = _hook_or_nil(config.on_delete),
-    on_update      = _hook_or_nil(config.on_update),
+    on_receive_raw = _hook_path(config.on_receive_raw),
+    on_receive     = _hook_path(config.on_receive),
+    on_package     = _hook_path(config.on_package),
+    on_send        = _hook_path(config.on_send),
+    on_delete      = _hook_path(config.on_delete),
+    on_update      = _hook_path(config.on_update),
 }
 
 -- Aliases for frequently-used paths (reduces table lookups in hot paths)
@@ -241,7 +273,39 @@ local function file_exists(path)
     return false
 end
 
-local inotify = require("rmail_inotify")
+-- The outbox watcher, whichever one this kernel has.
+--
+-- inotify is Linux's; kqueue is what macOS and the BSDs have instead.
+-- The two modules expose the same four functions and the same constant
+-- names, so everything below this line is written once and does not
+-- know which it got.  Which one is in use gets logged at startup,
+-- because "the outbox is not syncing promptly" is a question whose
+-- first answer is which watcher was loaded.
+--
+-- This is platform dispatch, not a fallback: there is exactly one right
+-- answer per kernel and no second choice if it fails.  A machine with
+-- neither stops here rather than quietly polling, because a daemon that
+-- looks like it is working and is a timer-tick behind is worse than one
+-- that says what is missing.  See #384.
+local inotify, WATCHER_KIND
+do
+    local ok_in, mod_in = pcall(require, "rmail_inotify")
+    if ok_in then
+        inotify, WATCHER_KIND = mod_in, "inotify"
+    else
+        local ok_kq, mod_kq = pcall(require, "rmail_kqueue")
+        if ok_kq then
+            inotify, WATCHER_KIND = mod_kq, "kqueue"
+        else
+            io.stderr:write("error: no outbox watcher available\n")
+            io.stderr:write("  tried rmail_inotify (Linux) and rmail_kqueue (macOS/BSD)\n")
+            io.stderr:write("  inotify said: " .. tostring(mod_in) .. "\n")
+            io.stderr:write("  kqueue said:  " .. tostring(mod_kq) .. "\n")
+            io.stderr:write("  run scripts/install.sh to build one\n")
+            os.exit(1)
+        end
+    end
+end
 
 local function inotify_wrap(fd)
     return setmetatable({}, {
@@ -543,6 +607,52 @@ end
 local function log(fmt, ...)
     io.stderr:write(os.date("%Y-%m-%d %H:%M:%S ") .. string.format(fmt, ...) .. "\n")
     io.stderr:flush()
+end
+
+-- ---- The daemon reporting its own problems as mail (#382) ---------------
+--
+-- A log line is not a delivery mechanism.  Nobody reads a service log to
+-- find out why their mail stopped, and on a machine with one service per
+-- mailbox there is a separate log per mailbox to not read.  The mailbox
+-- itself is where somebody is already looking, so that is where the
+-- daemon says things.
+--
+-- Which folder depends on which direction broke, because that is what
+-- the folders already mean.  A problem on the way in — a port that will
+-- not bind, a caller that could not be decrypted — is news that arrives,
+-- so it goes in the inbox.  A problem on the way out — a contact nobody
+-- can reach, a router announcing itself insecurely — concerns mail
+-- leaving, so it goes in the outbox, where the existing router-security
+-- warning already writes itself.
+--
+-- Rewritten rather than appended: one file per distinct problem, holding
+-- the current state of that problem.  A daemon restarting in a loop
+-- would otherwise fill the inbox with the same sentence.  The subject
+-- line is the filename, so `problem_id` has to read as one.
+
+local function report_problem(direction, problem_id, body)
+    local folder = (direction == "outbound") and OUTBOX or INBOX
+    local target = folder .. "/" .. problem_id
+    local stamped = body
+    if stamped:sub(-1) ~= "\n" then stamped = stamped .. "\n" end
+    stamped = stamped .. "\n-- " ..
+        os.date("%Y-%m-%d %H:%M:%S") ..
+        ", written by the rmail daemon itself.  Delete this file once the\n" ..
+        "problem is fixed; the daemon writes it again if it is not.\n"
+    write_file(target, stamped)
+    return target
+end
+
+-- The counterpart: a problem that has gone away should stop shouting.
+-- Only removes what this daemon wrote, by name.
+local function clear_problem(direction, problem_id)
+    local folder = (direction == "outbound") and OUTBOX or INBOX
+    local target = folder .. "/" .. problem_id
+    local f = io.open(target, "r")
+    if not f then return false end
+    f:close()
+    os.remove(target)
+    return true
 end
 
 -- ---- Per-cycle reachability tracking (#324) -----------------------------
@@ -2412,6 +2522,39 @@ local function mark_missing_attachment(outbox_path, filepath, outbox_name)
 end
 
 
+-- {{{ mark_recipient_problem
+-- Insert a `// <LABEL>: <recipient>` note below the `to:` line naming
+-- that recipient, so the person who wrote the message finds out in the
+-- file they wrote why it went nowhere.  The log line alone is not a
+-- delivery mechanism — nobody reads a service log to find out their
+-- mail did not send.
+--
+-- Idempotent: the marker existing anywhere in the file means the note
+-- has already been made.  Callers decide whether to log, because the
+-- two conditions that use this differ in how often they want saying.
+local function mark_recipient_problem(outbox_path, recipient, label, reason)
+    local text = read_file(outbox_path)
+    if not text then return end
+    local marker = "// " .. label .. ": " .. recipient
+    if text:find(marker, 1, true) then return end
+
+    local target = "to: " .. recipient
+    local pos = text:lower():find(target:lower(), 1, true)
+    if not pos then return end
+
+    -- A `to:` line that is the last line of the file has no newline
+    -- after it, and gluing the marker onto its end would make the
+    -- recipient name unparseable on the next cycle.
+    local eol = text:find("\n", pos) or #text
+    local prefix = text:sub(1, eol)
+    if prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end
+    write_file(outbox_path,
+        prefix .. marker .. " \xe2\x80\x94 " .. reason .. "\n" ..
+        text:sub(eol + 1))
+end
+-- }}}
+
+
 local function encode_attachments(filepaths)
     local result = {}
     for _, filepath in ipairs(filepaths) do
@@ -3322,6 +3465,17 @@ local function sync_outbox(my_name)
     local att_state_changed = false
     local did_work = false
 
+    -- Outbox files holding a `to:` line this cycle could not turn into a
+    -- recipient: an unknown contact, or a name that means two things.
+    -- The cleanup pass at the end of this function deletes any outbox
+    -- file whose recipient list has emptied, on the reasoning that every
+    -- recipient was delivered to and struck off.  A file that never had
+    -- a resolvable recipient reaches that pass looking identical, and
+    -- was being deleted — marker, body and all — seconds after the
+    -- marker explaining the problem was written into it.  Held here so
+    -- the cleanup pass can tell the two apart.
+    local outbox_files_with_unresolved_recipients = {}
+
     -- clean up completed transfers: remove attach: lines from outbox files
     for att_id, transfer in pairs(att_state) do
         if transfer.status == "complete" then
@@ -3408,7 +3562,27 @@ local function sync_outbox(my_name)
                     local rname = entry.name
                     if not state[name].recipients[rname] then
                         -- new recipient: deliver message body only
-                        if rname == my_name then
+                        if rname == my_name and contacts[rname] then
+                            -- The name means two things at once: it is
+                            -- this daemon's own identity, and it is a
+                            -- contact with an address of its own.  The
+                            -- identity test below would win, because it
+                            -- runs first — the message would land in our
+                            -- own inbox and the contact would lose
+                            -- silently, with the tracking entry stamped
+                            -- as self so that renaming later would not
+                            -- undo it.  Refuse instead, and name both
+                            -- readings: only the person who wrote the
+                            -- `to:` line knows which one they meant.
+                            log("ambiguous recipient '%s' in %s: matches " ..
+                                "this mailbox's own identity and a contact",
+                                rname, name)
+                            mark_recipient_problem(OUTBOX .. "/" .. name,
+                                rname, "AMBIGUOUS RECIPIENT",
+                                "both your own identity name and a contact " ..
+                                "\xe2\x80\x94 rename one of them")
+                            outbox_files_with_unresolved_recipients[name] = true
+                        elseif rname == my_name then
                             -- self-delivery: write directly to own inbox
                             local inbox_state = load_state("inbox.json")
                             local msg_id = uuid()
@@ -3460,20 +3634,10 @@ local function sync_outbox(my_name)
                         else
                             log("unknown contact '%s' in %s", rname, name)
                             -- Mark unknown contact in the outbox file so user can see and fix it
-                            local outbox_path = OUTBOX .. "/" .. name
-                            local text = read_file(outbox_path)
-                            local marker = "// UNKNOWN CONTACT: " .. rname
-                            if text and not text:find(marker, 1, true) then
-                                local target = "to: " .. rname
-                                local pos = text:lower():find(target:lower(), 1, true)
-                                if pos then
-                                    local eol = text:find("\n", pos) or #text
-                                    text = text:sub(1, eol) ..
-                                        marker .. " \xe2\x80\x94 not in your contacts file\n" ..
-                                        text:sub(eol + 1)
-                                    write_file(outbox_path, text)
-                                end
-                            end
+                            mark_recipient_problem(OUTBOX .. "/" .. name,
+                                rname, "UNKNOWN CONTACT",
+                                "not in your contacts file")
+                            outbox_files_with_unresolved_recipients[name] = true
                         end
                     elseif contacts[rname] then
                         -- existing recipient: check for new attach: lines not yet in progress
@@ -3899,9 +4063,19 @@ local function sync_outbox(my_name)
         end
     end
 
-    -- clean up files with no recipients left (skip files that had ops this cycle to allow retry)
+    -- Clean up files with no recipients left.  Three ways a file can
+    -- reach this pass with an empty recipient list, and only the first
+    -- means the message is finished with:
+    --   • every recipient was delivered to and struck off — delete
+    --   • work is queued for it this cycle — leave it, so the retry has
+    --     something to retry
+    --   • its `to:` line named nobody we could resolve — leave it, with
+    --     the marker explaining why still in it for the person who
+    --     wrote it to find
     for name in pairs(current) do
-        if state[name] and not next(state[name].recipients) and not files_with_ops[name] then
+        if state[name] and not next(state[name].recipients)
+           and not files_with_ops[name]
+           and not outbox_files_with_unresolved_recipients[name] then
             os.remove(OUTBOX .. "/" .. name)
             log("cleaned up %s: no recipients left", name)
             state[name] = nil
@@ -5119,6 +5293,30 @@ local function init_runtime()
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n"); os.exit(1)
     end
+
+    -- The port used to fall back to 8025 when the config did not name
+    -- one.  Nothing generates 8025 — the installer picks a random port
+    -- between 50000 and 65000 — so the fallback could only ever fire on
+    -- a config that was unreadable or had the key misspelled, and what
+    -- it did then was put the daemon on a port that belongs to somebody
+    -- else's mailbox.  Two daemons, one port, and the second one dies
+    -- inside socket.bind with nothing explaining why.  See #382.
+    local configured_port = tonumber(config.port)
+    if not configured_port then
+        if config.port == nil then
+            io.stderr:write("error: 'port' is not set in " .. CONFIG_PATH .. "\n")
+        else
+            io.stderr:write("error: 'port' in " .. CONFIG_PATH ..
+                " is not a number: " .. tostring(config.port) .. "\n")
+        end
+        io.stderr:write("  every mailbox listens on its own port; there is no default\n")
+        os.exit(1)
+    end
+    if configured_port < 1 or configured_port > 65535 then
+        io.stderr:write("error: 'port' in " .. CONFIG_PATH ..
+            " is outside 1-65535: " .. tostring(configured_port) .. "\n")
+        os.exit(1)
+    end
     if not tools.zip then
         io.stderr:write("error: 'zip' not found\n       run: scripts/install.sh\n"); os.exit(1)
     end
@@ -5129,7 +5327,7 @@ local function init_runtime()
 
     local rt = {
         my_name      = config.name,
-        port         = tonumber(config.port or 8025),
+        port         = configured_port,
         nat_mapping  = nil,
         interval     = 10,   -- TODO: increase for production
         min_interval = 10,
@@ -5145,27 +5343,63 @@ local function init_runtime()
 
     -- Watch outbox and contacts for changes — triggers immediate sync via inotify
     rt.outbox_inotify_fd, rt.outbox_inotify_sock = start_dir_watcher(OUTBOX)
-    log("outbox inotify watcher active (fd %d)", rt.outbox_inotify_fd)
+    log("outbox watcher active via %s (fd %d)", WATCHER_KIND, rt.outbox_inotify_fd)
     rt.contacts_inotify_fd, rt.contacts_inotify_sock = start_file_watcher(CONTACTS)
-    log("contacts inotify watcher active (fd %d)", rt.contacts_inotify_fd)
+    log("contacts watcher active via %s (fd %d)", WATCHER_KIND, rt.contacts_inotify_fd)
 
-    pcall(nat.cleanup_old_mapping)
-    pcall(nat.security_check, rt.my_name)
-
-    if cfg.auto_port_forward then
-        log("attempting automatic port forwarding...")
-        local ok_nat, result = pcall(nat.create_mapping, rt.port)
-        if ok_nat and result and result.protocol then
-            rt.nat_mapping = result
-            log("port %d mapped via %s", rt.port, result.protocol)
-        else
-            log("warning: auto port forward failed, port %d may not be reachable", rt.port)
-        end
+    -- Claim the port before doing anything optional with the network.
+    --
+    -- The router probing below — the UPnP and NAT-PMP checks, and the
+    -- port-forward request after them — talks to hardware that may not
+    -- answer, and takes about eight seconds on a router that ignores
+    -- it.  It used to run first, so a mailbox whose port was already
+    -- taken spent those eight seconds interrogating a router about a
+    -- port it was then going to fail to claim, before anybody was told.
+    --
+    -- Binding first also puts the two in the right order on their own
+    -- terms: asking a router to forward a port to you is only sensible
+    -- once you hold it.
+    --
+    -- Bind IPv4.  This is the moment a port collision actually becomes
+    -- real: the installer can only see what was listening when it ran,
+    -- and a mailbox that was not running then is invisible to it.  So
+    -- the daemon is the thing that finds out, and it has to say so
+    -- somewhere the operator will look rather than dying inside a
+    -- library call.  Nothing can arrive while this is broken, which
+    -- makes it inbound news.
+    --
+    -- The notice is named for the problem, not for the port.  Naming it
+    -- for the port looked tidier and was wrong: fixing a collision means
+    -- changing the port, so the notice would be orphaned under the old
+    -- number and never withdrawn, leaving a permanent complaint about a
+    -- problem that was solved.
+    local bound, bind_err = socket.bind("0.0.0.0", rt.port)
+    if not bound then
+        local note = report_problem("inbound", "CANNOT-LISTEN",
+            string.format(
+                "This mailbox could not start listening on port %d.\n\n" ..
+                "The system said: %s\n\n" ..
+                "Almost always this means something else already holds that\n" ..
+                "port — often another rmail mailbox on this machine, since\n" ..
+                "each one needs its own.  Two things to check:\n\n" ..
+                "  ss -tlnp | grep %d     what is holding it now\n" ..
+                "  port = %d              in %s\n\n" ..
+                "Change the port in this mailbox's own config and start it\n" ..
+                "again.  No mail has been lost; none can arrive until this\n" ..
+                "mailbox is listening.",
+                rt.port, tostring(bind_err), rt.port, rt.port, CONFIG_PATH))
+        log("cannot listen on port %d: %s", rt.port, tostring(bind_err))
+        log("wrote the details to %s", note)
+        os.exit(1)
     end
-
-    -- Bind IPv4
-    rt.server = assert(socket.bind("0.0.0.0", rt.port))
+    rt.server = bound
     rt.server:settimeout(0)
+
+    -- Listening now, so any earlier complaint about not listening is stale
+    -- whatever port it was about.
+    if clear_problem("inbound", "CANNOT-LISTEN") then
+        log("cleared the earlier notice about not being able to listen")
+    end
 
     -- Bind IPv6 (optional — not all systems have it)
     rt.server6 = nil
@@ -5191,6 +5425,22 @@ local function init_runtime()
     rt.lan.udp:settimeout(0)
 
     log("listening on :%d (TCP%s + UDP)", rt.port, rt.server6 and "+IPv6" or "")
+
+    -- Router work, now that the port is actually ours.  Slow on a router
+    -- that does not answer, and nothing above depends on it.
+    pcall(nat.cleanup_old_mapping)
+    pcall(nat.security_check, rt.my_name)
+
+    if cfg.auto_port_forward then
+        log("attempting automatic port forwarding...")
+        local ok_nat, result = pcall(nat.create_mapping, rt.port)
+        if ok_nat and result and result.protocol then
+            rt.nat_mapping = result
+            log("port %d mapped via %s", rt.port, result.protocol)
+        else
+            log("warning: auto port forward failed, port %d may not be reachable", rt.port)
+        end
+    end
 
     pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(detect_ipv6_change, rt.my_name, rt.port)

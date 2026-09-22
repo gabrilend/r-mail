@@ -236,7 +236,7 @@ you can route rmail traffic through **Tor** using `torsocks`:
 
 ```sh
 # In your service file, wrap the rmail command:
-ExecStart=torsocks lua /path/to/rmail.lua /path/to/mailbox
+ExecStart=torsocks lua /path/to/rmail.lua /path/to/config-file
 ```
 
 This hides your IP from the contacts you communicate with (they see a Tor exit

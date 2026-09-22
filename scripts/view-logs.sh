@@ -12,7 +12,7 @@
 # With several, they are listed and one is chosen — the alternative,
 # following all of them at once, produces interleaved lines with nothing
 # saying which daemon wrote which, which is the problem that having one
-# log per service exists to solve.  (Re #377.)
+# log per service exists to solve.  (Re #381.)
 #
 # A log named simply /tmp/rmail.log is from before services were named per
 # mailbox.  It is still listed, because a daemon installed then is still

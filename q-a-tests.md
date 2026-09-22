@@ -435,10 +435,60 @@ jump around.
 - [ ] Config filename is `~/.config/rmail/config-<slug>` where slug is the mail path with `/` → `-` (intentional, not a bug) (#344)
 
 ### Service files point at the config, not the mailbox
+Most of this section is covered by `scripts/test-mailbox-selection.sh`;
+the first item is not, because it inspects what the installer generates.
 - [ ] Generated systemd/runit/openrc/NixOS service files pass the config path (not the mail dir) to rmail.lua
 - [ ] `rmail.lua <config-file>` starts the daemon using `mail = …` from the config
-- [ ] `rmail.lua <mail-dir>` still works (backwards compat for existing service files)
+- [ ] `rmail.lua <mail-dir>` is refused with a usage error naming the config form (#381)
+- [ ] A config planted at the old `~/.config/rmail/config-<slug>` path is not found from a directory argument (#381)
+- [ ] A relative `mail = .` resolves against the config file's own directory, not the working directory (#381)
 - [ ] Error surfaced when config path is passed but the config has no `mail` line
+
+### The mailbox holds its own config, hooks and program (#382)
+The daemon-side rows are covered by `scripts/test-mailbox-selection.sh`.
+The installer and migration rows are not — they need a real run.
+- [ ] A fresh install writes the config to `<mailbox>/config` as a real file, not a symlink, and creates no `~/.config/rmail/` (#382)
+- [ ] The mailbox served is the directory the config sits in; there is no `mail =` key in a newly generated config (#382)
+- [ ] A leftover `mail =` line from the old layout is ignored rather than obeyed, even when it names a different directory (#382)
+- [ ] A fresh install puts the six hook scripts in `<mailbox>/hooks/` and the config references them as `./hooks/<name>.sh` (#382)
+- [ ] Editing one mailbox's hook does not change another mailbox's behaviour, and does not modify the checkout (#382)
+- [ ] Relative hook paths resolve against the config's directory, not the working directory — verify by starting a daemon from an unrelated directory and confirming the hook fires (#382)
+- [ ] Re-running the installer on an existing mailbox leaves edited hooks alone and reports how many it kept (#382)
+- [ ] A fresh install puts NO program copy in the mailbox — no `program-files/`, and the service runs the checkout's `rmail.lua` (#382)
+- [ ] Generated service files for all five init systems run the checkout's `rmail.lua` with the mailbox's config as the argument (#382)
+- [ ] A mailbox keeps working after the checkout it was installed from is renamed or deleted (#382)
+- [ ] The installer no longer reads other mailboxes' configs for anything — verify with a second install while the first mailbox is unreadable (#382)
+- [ ] The port prompt warns when something is already listening on the chosen port, including a non-rmail program (#382)
+- [ ] With neither `ss` nor `netstat` installed, the port check says it could not run rather than passing silently (#382)
+- [ ] IP-change notices default to off in a newly generated config (#382)
+- [ ] `migrate-mailbox-layout.sh --dry-run` reports every change and writes nothing (#382)
+- [ ] Migration is idempotent: a second run keeps existing hooks, removes nothing twice, and refreshes only the program files (#382)
+- [ ] Migration leaves inbox, outbox, contacts, attachments and `.state/` untouched — compare file counts before and after (#382)
+- [ ] Migration warns when the old `mail =` line names a directory other than the mailbox being migrated (#382)
+- [ ] A portable drive generated after this change has the same mailbox layout as an installed one, with hooks in `hooks/` (#382)
+- [ ] The generated drive config contains no mount-point path anywhere, and the drive runs from a different mount point than it was made on (#382)
+- [ ] `validate-router-settings.sh` and `generate-docs.sh` both take a mailbox and neither reads `~/.config/rmail/` (#382)
+- [ ] Generated configs contain no shell-substitution damage — grep a fresh config for backtick artefacts, since the heredoc that writes it expands them (#382)
+- [ ] A generated drive carries only the allowlist: daemon, launcher, `deps/lua`, `libs/`, the two `.c` files, `BUILD-NOTES.txt`, `LICENSE`. No `install.sh`, no `scripts/hooks/`, no Android client, no docs, no transcripts (#382)
+- [ ] `make-mailbox-drive.sh` refuses to build a drive when the checkout has no compiled Lua at `deps/lua/bin/lua` (#382)
+- [ ] The generator verifies before finishing that the copied Lua loads the copied libraries, and refuses if not (#382)
+- [ ] The generator warns when the bundled Lua links readline, naming `install.sh --force` as the fix (#382)
+- [ ] After a Lua rebuild, `ldd deps/lua/bin/lua` shows only libc and libm — no readline, no ncurses (#382)
+- [ ] A running drive daemon uses the drive's own interpreter — check with `pgrep -af rmail.lua` that the path is `<mailbox>/source-code/deps/lua/bin/lua`, not a system lua (#382)
+- [ ] A drive whose libraries cannot load stops with the architecture message, naming both the drive's and the host's, and does NOT try to recompile (#382)
+- [ ] `BUILD-NOTES.txt` names the two `cc` commands and the `make linux` that built what ships (#382)
+- [ ] A drive's `rmail_crypto.so` needs no `libcrypto` from the host — `ldd` shows libc only (#382)
+- [ ] The generator refuses to build a drive when no `libcrypto.a` can be found (#382)
+- [ ] A drive daemon logs "AES-256-GCM encryption enabled" and completes a send, proving the static crypto works and not merely links (#382)
+- [ ] A drive carries no `liblua.a`, no `luac`, and no Lua man pages — none are used at runtime (#382)
+
+### Recipients the daemon cannot resolve
+Also covered by `scripts/test-mailbox-selection.sh`.
+- [ ] A `to:` name that is both your own identity and a contact is refused, logged naming both readings, and marked `// AMBIGUOUS RECIPIENT` in the outbox file (#381)
+- [ ] That message stays in the outbox undelivered, and nothing appears in your own inbox (#381)
+- [ ] A `to:` name that is your own identity and *not* a contact still self-delivers to your inbox (#381)
+- [ ] A message to an unknown contact keeps its `// UNKNOWN CONTACT` marker and is not deleted by the outbox cleanup sweep (#381)
+- [ ] A `to:` line that is the last line of a file, with no trailing newline, gets its marker on a line of its own (#381)
 
 ### Dependencies
 - [ ] Installer prompts before installing project-local luasocket (#342)

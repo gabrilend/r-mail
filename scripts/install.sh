@@ -21,7 +21,7 @@
 #
 #   PHASE 1 — Configuration (prompts run first, before any compilation)
 #     • Ask for mail directory, your name, and the port to listen on.
-#     • Write ~/.config/rmail/config-<mail-slug> with those values.
+#     • Write <mailbox>/config with those values.
 #     • Symlink <mail-dir>/config → the config file for easy access.
 #
 #   PHASE 2 — Build toolchain
@@ -620,9 +620,6 @@ echo ""
 echo "Setting up your rmail identity..."
 echo "  (Press Enter to keep the default shown in [brackets])"
 
-CONFIG_DIR="${HOME}/.config/rmail"
-mkdir -p "$CONFIG_DIR"
-
 gen_random_port() {
     while true; do
         RAW=$(od -An -tu2 -N2 /dev/urandom | tr -d ' ')
@@ -634,69 +631,54 @@ gen_random_port() {
     done
 }
 
-# Check for any existing config to pre-fill from (try the old location too)
-_find_existing_config() {
-    # try old-style config first for migration
-    if [ -f "${HOME}/.config/rmail/config" ]; then
-        echo "${HOME}/.config/rmail/config"
-        return
-    fi
-    # try any config-* file in the config dir
-    for f in "$CONFIG_DIR"/config-*; do
-        if [ -f "$f" ]; then echo "$f"; return; fi
-    done
-}
-EXISTING_CONFIG=$(_find_existing_config)
-
-# Mail directory default — prefer a stored value from an existing config,
-# fall back to ~/mail.  This makes re-running install.sh show the current
-# mailbox path in the [brackets] instead of resetting to the default.
-DEFAULT_MAIL="${HOME}/mail"
-if [ -n "$EXISTING_CONFIG" ]; then
-    _existing_mail=$(read_config_value "$EXISTING_CONFIG" "mail")
-    [ -n "${_existing_mail:-}" ] && DEFAULT_MAIL="$_existing_mail"
-fi
-
-RMAIL_MAIL=$(ask_value mail_dir "Mail directory" "$DEFAULT_MAIL") || exit 1
+# The mailbox path is asked for first, because everything else about this
+# install is stored inside the mailbox and so cannot be looked up until we
+# know where it is.  There is no registry of mailboxes to consult for a
+# better default and deliberately so — see #382 — which means a re-run for
+# an existing mailbox needs its path typed, or passed with --mail-dir.
+RMAIL_MAIL=$(ask_value mail_dir "Mail directory" "${HOME}/mail") || exit 1
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed 's|/*$||')  # strip trailing slashes
 MAIL_DIR="$RMAIL_MAIL"
 
-# Derive config filename from mail path: /home/ritz/mail -> config-home-ritz-mail.
-# The dash-separated slug is intentional: one config file per mailbox, all
-# parked under ~/.config/rmail/, distinguishable by the original path
-# reflected in the filename.  (Re #344: slashes-to-dashes is this slug, not
-# a path-mangling bug in the config content.)
-CONFIG_SLUG=$(echo "$RMAIL_MAIL" | sed 's|^/||; s|/|-|g')
-CONFIG_FILE="$CONFIG_DIR/config-$CONFIG_SLUG"
+# A mailbox holds its own config, under a fixed name, with nothing in the
+# name that has to be derived from anything.  The previous layout parked
+# every config in one shared directory and so had to build a unique
+# filename out of the mailbox path — slashes turned into dashes.  That slug
+# got reimplemented inside the daemon, the two copies drifted apart, and
+# #381 is the record of what that cost.  Here the directory the file sits
+# in *is* the identifying information, which is a thing the filesystem is
+# already willing to guarantee.
+CONFIG_FILE="$MAIL_DIR/config"
+
+# An existing config at that path is the only source of defaults for this
+# mailbox.  No other mailbox is consulted, now or anywhere below.
+if [ -f "$CONFIG_FILE" ]; then
+    _existing_name=$(read_config_value "$CONFIG_FILE" "name")
+    _existing_port=$(read_config_value "$CONFIG_FILE" "port")
+fi
 
 # ============================================================
 # EXISTING-INSTALL SCAN — what is already on this machine
 # ============================================================
-# Runs before a single file is written, because everything downstream of
-# here — the service name, the port, the identity — has to be checked
-# against what is already installed, and the installer cannot warn about
-# something it never read.  (Re #377.)
+# Runs before a single file is written, because the service name this
+# install is about to use has to be checked against what is already
+# installed, and the installer cannot warn about something it never read.
 #
-# Two things are looked for.  Sibling config files, which are the record
-# of other mailboxes set up on this machine; and installed service files,
-# which are the record of which of those are actually being served.  The
-# service locations of all five init systems are checked regardless of
-# which one is running here, because a machine that changed init systems
-# can still have the old unit lying around.
+# What is deliberately *not* looked at any more: other mailboxes.  The
+# installer used to read every sibling config to check the port and the
+# identity name.  That required each mailbox to know where the others
+# lived, which stopped being possible — and stopped being desirable —
+# when configs moved inside their own mailboxes.  See #382.
+#
+# The service locations of all five init systems are checked regardless
+# of which one is running here, because a machine that changed init
+# systems can still have the old unit lying around.
 
-SIBLING_CONFIGS=""
 PRE_SLUG_SERVICE=""
 
 scan_existing_installs() {
     _scan_f=""
-    for _scan_f in "$CONFIG_DIR"/config-*; do
-        [ -f "$_scan_f" ] || continue
-        [ "$_scan_f" = "$CONFIG_FILE" ] && continue
-        SIBLING_CONFIGS="$SIBLING_CONFIGS$_scan_f
-"
-    done
-
     # A service named exactly "rmail" is the layout from before this was
     # fixed.  It is reported rather than renamed: moving a supervised
     # service directory stops the daemon, and that belongs to the operator
@@ -726,32 +708,37 @@ service_exists() {
     return 1
 }
 
-# sibling_claims KEY VALUE — prints the config file of another mailbox
-# whose KEY is VALUE, or nothing.  This is how the port and identity
-# uniqueness checks are answered: by reading the other mailboxes rather
-# than by keeping a registry that could fall out of step with them.
-sibling_claims() {
-    _sc_key="$1"; _sc_want="$2"
-    printf '%s' "$SIBLING_CONFIGS" | while IFS= read -r _sc_f; do
-        [ -n "$_sc_f" ] || continue
-        if [ "$(read_config_value "$_sc_f" "$_sc_key")" = "$_sc_want" ]; then
-            printf '%s' "$_sc_f"
-            break
-        fi
-    done
+# port_holder PORT — prints what is listening on PORT, or nothing.
+#
+# This replaced reading other mailboxes' configs, and the trade is worth
+# stating.  It sees *more*: any program holding the port, where the old
+# check only knew about rmail and would happily hand you a port some
+# unrelated service had already taken.  It sees *less*: a mailbox that
+# exists but is not running right now holds nothing and is invisible.
+#
+# That second half is why this is a warning and not a refusal.  The
+# installer can only ever report what is true at the moment it runs; the
+# daemon is the thing that finds out for certain, at bind time, and it
+# now says so in the mailbox when it fails.
+PORT_CHECK_AVAILABLE=1
+if command -v ss >/dev/null 2>&1; then
+    _port_lister="ss -ltnH"
+elif command -v netstat >/dev/null 2>&1; then
+    _port_lister="netstat -ltn"
+else
+    PORT_CHECK_AVAILABLE=0
+fi
+
+port_holder() {
+    [ "$PORT_CHECK_AVAILABLE" = 1 ] || return 1
+    _ph_want="$1"
+    # Match ":PORT" at the end of the local-address column, so 8025 does
+    # not match 18025 or a peer address that happens to contain it.
+    $_port_lister 2>/dev/null |
+        awk -v p=":$_ph_want" '$4 ~ p"$" || $5 ~ p"$" { print; exit }'
 }
 
 scan_existing_installs
-
-if [ -n "$SIBLING_CONFIGS" ]; then
-    echo ""
-    info "Other rmail mailboxes already set up on this machine:"
-    printf '%s' "$SIBLING_CONFIGS" | while IFS= read -r _rep_f; do
-        [ -n "$_rep_f" ] || continue
-        echo "    $(read_config_value "$_rep_f" "mail")  (identity: $(read_config_value "$_rep_f" "name"), port: $(read_config_value "$_rep_f" "port"))"
-    done
-    info "This install adds to those rather than replacing them."
-fi
 
 if [ -n "$PRE_SLUG_SERVICE" ]; then
     echo ""
@@ -764,16 +751,6 @@ if [ -n "$PRE_SLUG_SERVICE" ]; then
     warn "  service is a decision worth making deliberately."
 fi
 
-# If migrating from old config, use it as the source for defaults
-if [ -n "$EXISTING_CONFIG" ] && [ "$EXISTING_CONFIG" != "$CONFIG_FILE" ]; then
-    # Pre-fill from existing config
-    _existing_name=$(read_config_value "$EXISTING_CONFIG" "name")
-    _existing_port=$(read_config_value "$EXISTING_CONFIG" "port")
-elif [ -f "$CONFIG_FILE" ]; then
-    _existing_name=$(read_config_value "$CONFIG_FILE" "name")
-    _existing_port=$(read_config_value "$CONFIG_FILE" "port")
-fi
-
 DEFAULT_NAME=$(whoami)
 DEFAULT_PORT=$(gen_random_port)
 [ -n "${_existing_name:-}" ] && DEFAULT_NAME="$_existing_name"
@@ -781,29 +758,26 @@ DEFAULT_PORT=$(gen_random_port)
 
 # prompt for name
 #
-# Uniqueness across mailboxes is enforced here as an error rather than a
-# warning, and the reason is worth knowing: the daemon decides whether a
-# message is for itself by comparing the recipient against its own
-# identity, and that comparison runs before any contacts lookup.  Two
-# mailboxes sharing an identity means mail addressed from one to the
-# other gets written into the sender's own inbox, logged as delivered,
-# and marked satisfied.  No error, no retry, nothing arrives.
+# This used to be checked against every other mailbox's config and
+# refused on a clash.  It is not checked at all now, and that is a
+# deliberate swap rather than a loss.
+#
+# The danger was never two configs holding the same string.  It was a
+# `to:` line that resolves two ways at once — as this mailbox's own
+# identity, and as a contact — because the daemon tests identity first
+# and would deliver to itself while the contact lost in silence.  Two
+# mailboxes can share a name forever without meeting that condition, and
+# a single mailbox can walk into it with no sibling anywhere, by adding a
+# contact named after itself.
+#
+# The daemon now refuses exactly that condition when it arises, naming
+# both readings (#381).  Checking the real thing at the moment it matters
+# beats checking a proxy for it at install time, and it does not require
+# one mailbox to go reading another's files.
 while true; do
-    RMAIL_NAME=$(ask_value name "Your own name (used locally, not transmitted)" "$DEFAULT_NAME") || exit 1
+    RMAIL_NAME=$(ask_value name "Your own name (used locally)" "$DEFAULT_NAME") || exit 1
     if ! echo "$RMAIL_NAME" | grep -qE '^[a-zA-Z0-9_-]+$'; then
         warn "Name must contain only letters, numbers, hyphens, and underscores."
-        continue
-    fi
-    _name_taken_by=$(sibling_claims name "$RMAIL_NAME")
-    if [ -n "$_name_taken_by" ]; then
-        warn "The identity '$RMAIL_NAME' already belongs to the mailbox at"
-        warn "  $(read_config_value "$_name_taken_by" "mail")"
-        warn "Two mailboxes with one identity cannot send mail to each other —"
-        warn "  it is delivered to the sender instead, silently. Pick another."
-        if $SILENT; then
-            err "--silent: cannot re-prompt for a unique identity"
-            exit 1
-        fi
         continue
     fi
     break
@@ -811,21 +785,33 @@ done
 
 # prompt for port
 #
-# Checked against every other mailbox for the ordinary reason: two daemons
-# handed the same port means the second one fails to bind at startup, long
-# after the install that caused it has scrolled away.
+# Checked against what the system says is listening, not against other
+# mailboxes' configs.  Two daemons handed one port means the second fails
+# to bind, long after the install that caused it has scrolled away — and
+# it does not matter whether the thing already holding the port is rmail.
+#
+# A mailbox that is installed but stopped holds nothing and cannot be
+# seen from here, so this warns and offers another number rather than
+# refusing.  The daemon is where a collision becomes certain, and it
+# writes the explanation into the mailbox when it happens.
 while true; do
     RMAIL_PORT=$(ask_value port "Port to listen on" "$DEFAULT_PORT") || exit 1
     if ! echo "$RMAIL_PORT" | grep -qE '^[0-9]+$' || [ "$RMAIL_PORT" -lt 1 ] || [ "$RMAIL_PORT" -gt 65535 ]; then
         warn "Port must be a number between 1 and 65535."
         continue
     fi
-    _port_taken_by=$(sibling_claims port "$RMAIL_PORT")
-    if [ -n "$_port_taken_by" ]; then
-        warn "Port $RMAIL_PORT is already used by the mailbox at"
-        warn "  $(read_config_value "$_port_taken_by" "mail")"
+    if [ "$PORT_CHECK_AVAILABLE" = 0 ]; then
+        warn "Neither 'ss' nor 'netstat' is installed, so this port could not be"
+        warn "  checked against what is already listening. If $RMAIL_PORT turns out"
+        warn "  to be taken, the daemon will say so in this mailbox's inbox."
+        break
+    fi
+    _port_held_by=$(port_holder "$RMAIL_PORT")
+    if [ -n "$_port_held_by" ]; then
+        warn "Something is already listening on port $RMAIL_PORT:"
+        warn "  $_port_held_by"
         if $SILENT; then
-            err "--silent: port $RMAIL_PORT collides with an existing mailbox"
+            err "--silent: port $RMAIL_PORT is in use on this machine"
             exit 1
         fi
         DEFAULT_PORT=$(gen_random_port)
@@ -836,15 +822,23 @@ while true; do
 done
 
 # ---- Service name ----------------------------------------------------------
-# Derived from the same mailbox slug that names the config file, so that
+# Derived from the mailbox path with the slashes turned into dashes, so a
+# mailbox at /home/ritz/mail gets a service called rmail-home-ritz-mail and
 # uniqueness is inherited from the filesystem rather than from the operator
-# remembering to pick a different name.  A mailbox at /home/ritz/mail gets a
-# service called rmail-home-ritz-mail.
+# remembering to pick a different name.
 #
-# This is the whole fix for #377.  Before it, every install generated a
+# This is the whole fix for #381.  Before it, every install generated a
 # service called "rmail", and installing a second mailbox silently replaced
 # the first one's service instead of adding to it.
-DEFAULT_SERVICE="rmail-$CONFIG_SLUG"
+#
+# The config filename used to be built from this same slug, and is not any
+# more: a config lives in its own mailbox now, where the directory does the
+# distinguishing (#382).  A service name still needs it, because service
+# names genuinely do share one namespace per machine — /etc/sv, or
+# /etc/systemd/system — and nothing else is available to tell two of them
+# apart.  This is the one place the slug still earns its keep.
+SERVICE_SLUG=$(echo "$MAIL_DIR" | sed 's|^/||; s|/|-|g')
+DEFAULT_SERVICE="rmail-$SERVICE_SLUG"
 while true; do
     RMAIL_SERVICE=$(ask_value_or_default service_name "Service name for this mailbox" "$DEFAULT_SERVICE") || exit 1
     if echo "$RMAIL_SERVICE" | grep -qE '^[a-zA-Z0-9_-]+$'; then
@@ -859,6 +853,12 @@ done
 # file saying which of them wrote any given line.
 RMAIL_SERVICE_LOG="/tmp/$RMAIL_SERVICE.log"
 
+# The mailbox tree comes first now, because the config is written inside
+# it.  It used to be created afterwards, which was fine while the config
+# lived in a directory of its own somewhere else.
+mkdir -p "$MAIL_DIR/inbox" "$MAIL_DIR/outbox" "$MAIL_DIR/attachments" \
+         "$MAIL_DIR/.state" "$MAIL_DIR/hooks"
+
 # Write or update config file
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Creating config file..."
@@ -869,19 +869,28 @@ if [ ! -f "$CONFIG_FILE" ]; then
 # ---- identity ----
 
 # your own name — used locally so the daemon can tell "me" from "everyone else"
-# in your contacts file.  Never transmitted; each contact sees you by whatever
-# name they assigned you in their own contacts file.
+# in your contacts file.  Your contacts do not see it in the mail you send
+# them: each of them sees you by whatever name they assigned you in their own
+# contacts file.
+#
+# It is not a secret, though.  The daemon answers the plaintext health check
+# documented in README.md with this name, without asking who is calling, so
+# anyone who can reach your port can read it.
+#
+# The daemon tests a recipient against this name before it looks in your
+# contacts, so do not give a contact the same name as this.  A \`to:\` line
+# that means both at once is refused rather than guessed at, and the message
+# waits in your outbox with a note explaining why.
 name = $RMAIL_NAME
 
 # port rmail listens on for incoming messages
 port = $RMAIL_PORT
 
-# mailbox directory — where inbox/, outbox/, contacts, and .state/ live.
-# The daemon is currently launched with this path as a command-line
-# argument (see the service file); this field records it so install.sh
-# can pre-fill the prompt on re-run and so external tools have a single
-# source of truth.
-mail = $MAIL_DIR
+# There is no setting here naming which mailbox this is.  The mailbox is
+# the directory this file sits in — inbox/, outbox/, contacts and .state/
+# are its neighbours — and the daemon works that out from the path it is
+# handed on its command line.  A setting could only repeat that or
+# contradict it, so there is not one.
 
 # extra lua module path — searched before the bundled libs/ directory.
 # use this if you installed luasocket/luasec/dkjson somewhere non-standard.
@@ -890,9 +899,15 @@ mail = $MAIL_DIR
 # ---- networking ----
 
 # on startup, rmail checks your public IP using multiple services.
-# if a change is detected and confirmed, all contacts are notified
-# and their contacts file is updated automatically.
-notify_ip_change = true
+# with this on, a confirmed change is announced to every contact and
+# their contacts file is updated automatically.
+#
+# off by default, because a mailbox carries its own config, hooks and
+# program and can therefore be picked up and run somewhere else — and a
+# mailbox that has moved would otherwise tell everyone it knows the
+# moment it arrives.  Turn it on for a mailbox that lives on one machine
+# and whose address you want kept current without asking.
+notify_ip_change = false
 
 # ---- NAT / port forwarding ----
 
@@ -904,10 +919,19 @@ notify_ip_change = true
 # auto_port_forward = false
 
 # ---- hooks ----
-# Hooks run a script in response to message events.  Each one points at
-# a default orchestrator in scripts/hooks/ that passes data through
-# unchanged (no-op).  Edit the script — or replace the path with any
-# executable of your own — to customise behaviour.
+# Hooks run a script in response to message events.  Each one points at a
+# default orchestrator in this mailbox's own hooks/ directory that passes
+# data through unchanged (no-op).  Edit the script — or replace the path
+# with any executable of your own — to change what this mailbox does.
+#
+# The scripts are this mailbox's own copies.  They used to be shared: every
+# mailbox on a machine pointed at one set of files in the checkout, so
+# editing a hook to change one mailbox's behaviour silently changed every
+# mailbox's behaviour.  Yours are yours (#382).
+#
+# The paths are relative to this config file, which is to say relative to
+# the mailbox, so they keep working if the mailbox is moved or copied to
+# another machine.
 #
 # Argument reference and worked examples:
 #   $ROOT/docs/scripting-tutorial.md
@@ -915,48 +939,58 @@ notify_ip_change = true
 # To disable a hook entirely, set its value to the empty string:
 #   on_receive = ""
 
-on_receive_raw = $ROOT/scripts/hooks/on_receive_raw.sh
-on_receive     = $ROOT/scripts/hooks/on_receive.sh
-on_package     = $ROOT/scripts/hooks/on_package.sh
-on_send        = $ROOT/scripts/hooks/on_send.sh
-on_delete      = $ROOT/scripts/hooks/on_delete.sh
-on_update      = $ROOT/scripts/hooks/on_update.sh
+on_receive_raw = ./hooks/on_receive_raw.sh
+on_receive     = ./hooks/on_receive.sh
+on_package     = ./hooks/on_package.sh
+on_send        = ./hooks/on_send.sh
+on_delete      = ./hooks/on_delete.sh
+on_update      = ./hooks/on_update.sh
 CONFIG
     ok "created config: $CONFIG_FILE"
 else
     set_config_value "$CONFIG_FILE" "name" "$RMAIL_NAME"
     set_config_value "$CONFIG_FILE" "port" "$RMAIL_PORT"
-    set_config_value "$CONFIG_FILE" "mail" "$MAIL_DIR"
     ok "updated config: $CONFIG_FILE"
+    # A `mail` key from the old layout is left where it is rather than
+    # updated or removed.  The daemon ignores it now, and rewriting
+    # somebody's config to delete a line they did not ask about is worse
+    # than leaving a dead one.  migrate-mailbox-layout.sh is the thing
+    # that tidies it, because that is a migration and this is not.
+    if grep -q "^[[:space:]]*mail[[:space:]]*=" "$CONFIG_FILE"; then
+        info "  it still has a 'mail =' line from the old layout; harmless,"
+        info "  and ignored — the mailbox is this file's own directory now"
+    fi
 fi
 
-# Create mailbox directories and config symlink
-mkdir -p "$MAIL_DIR/inbox" "$MAIL_DIR/outbox" "$MAIL_DIR/attachments" "$MAIL_DIR/.state"
-# Inside the mailbox, always. This one is per-mailbox by construction and
-# is the fixed relative path the daemon and the helper scripts look for.
-ln -sf "$CONFIG_FILE" "$MAIL_DIR/config"
-
-# In the project root, only if nothing is there yet.
+# ---- This mailbox's own hook scripts ---------------------------------------
 #
-# There is one project root and there can be many mailboxes, so this link
-# cannot point at all of them. It used to be repointed on every install,
-# which meant the last mailbox installed silently became the one every
-# helper script and every piece of tooling reading that path would talk
-# to — including for someone who had set the first one up months earlier
-# and had no reason to think anything had moved.
+# Copied in rather than pointed at.  Every mailbox used to reference one
+# shared set of scripts in the checkout, which meant editing a hook to
+# change what one mailbox did changed what all of them did, with nothing
+# saying so.  A mailbox's behaviour belongs to that mailbox.
 #
-# So the first install claims it and later ones say what they found.
-# (Re #377.)
-if [ -e "$ROOT/config" ] || [ -L "$ROOT/config" ]; then
-    _root_config_target=$(readlink -f "$ROOT/config" 2>/dev/null || echo "")
-    if [ "$_root_config_target" != "$(readlink -f "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")" ]; then
-        info "Left $ROOT/config pointing at the mailbox it already named:"
-        info "  $(read_config_value "$_root_config_target" "mail" 2>/dev/null || echo "$_root_config_target")"
-        info "  Helper scripts run from the project root use that one. This"
-        info "  mailbox is reached by naming its config: $CONFIG_FILE"
+# Never overwritten once present: these are edited in place, and that
+# editing is the whole point of them.  A mailbox whose hooks have been
+# customised must survive a re-run of this installer untouched.
+if [ -d "$ROOT/scripts/hooks" ]; then
+    _hooks_added=0
+    _hooks_kept=0
+    for _h in "$ROOT/scripts/hooks"/*.sh; do
+        [ -f "$_h" ] || continue
+        _hook_dest="$MAIL_DIR/hooks/$(basename "$_h")"
+        if [ -f "$_hook_dest" ]; then
+            _hooks_kept=$((_hooks_kept + 1))
+        else
+            cp "$_h" "$_hook_dest"
+            chmod +x "$_hook_dest"
+            _hooks_added=$((_hooks_added + 1))
+        fi
+    done
+    if [ "$_hooks_kept" -gt 0 ]; then
+        ok "hooks: added $_hooks_added, left $_hooks_kept already there alone"
+    else
+        ok "hooks: wrote $_hooks_added into $MAIL_DIR/hooks/"
     fi
-else
-    ln -sf "$CONFIG_FILE" "$ROOT/config"
 fi
 
 echo ""
@@ -1117,15 +1151,21 @@ compile_lua() {
     tar xzf lua.tar.gz
     cd "lua-$LUA_VERSION"
     info "Compiling..."
-    LUA_MAJOR_MINOR=$(echo "$LUA_VERSION" | awk -F. '{print $1 "." $2}')
-    case "$LUA_MAJOR_MINOR" in
-        5.1|5.2)
-            make -s linux CC="$CC" 2>/dev/null
-            ;;
-        *)
-            make -s linux-readline CC="$CC" 2>/dev/null || make -s linux CC="$CC" 2>/dev/null
-            ;;
-    esac
+    # Built without readline, deliberately.  readline is only used by Lua's
+    # interactive prompt, and nothing here ever runs one: the daemon is
+    # started as `lua rmail.lua <config>` and exits when it exits.
+    #
+    # What it costs to link it anyway is portability.  A readline build
+    # depends on libreadline and libncursesw as well as libc and libm, and
+    # those two are the ones a minimal or unusual host is liable not to
+    # have — which matters because this interpreter gets copied onto
+    # portable drives and carried to hosts nobody has seen.  Two
+    # dependencies instead of four, both of them present everywhere.
+    #
+    # Fully static would be better still and is not possible: the daemon
+    # loads luasocket and rmail_crypto as shared objects at runtime, and a
+    # statically linked executable cannot dlopen anything.
+    make -s linux CC="$CC" 2>/dev/null
     make -s install INSTALL_TOP="$DEPS/lua" 2>/dev/null
     # Lua ships no standalone LICENSE file — its terms live in the manual
     # and repeated at the foot of the public header, so both are named.
@@ -1450,7 +1490,7 @@ echo ""
 warn "NOTE: UPnP and NAT-PMP are insecure protocols — any device on your LAN"
 warn "can open ports on your router without authentication. Installing these"
 warn "tools does NOT make your system vulnerable. You would only be at risk if"
-warn "you enable auto_port_forward in ~/.config/rmail/config, which is disabled"
+warn "you enable auto_port_forward in this mailbox's config, which is disabled"
 warn "by default. Manual port forwarding through your router is recommended."
 echo ""
 
@@ -1532,7 +1572,10 @@ _compile_zip() {
     echo "Compiling zip ${ZIP_VERSION}..."
     mkdir -p "$BUILD"
     cd "$BUILD"
-    ZIP_SRC="zip${ZIP_VERSION//./}"  # "30" for "3.0"
+    # POSIX sh has no ${var//x/y}.  This script runs under /bin/sh, which
+    # is dash on a good many systems, and there the expansion is a hard
+    # "Bad substitution" that stops the install mid-phase.
+    ZIP_SRC="zip$(echo "$ZIP_VERSION" | tr -d '.')"  # "30" for "3.0"
     if [ ! -f "${ZIP_SRC}.tar.gz" ]; then
         curl -fsSL "https://sourceforge.net/projects/infozip/files/Zip%203.x%20(latest)/3.0/${ZIP_SRC}.tar.gz/download" \
             -o "${ZIP_SRC}.tar.gz" || { err "failed to download zip source"; return 1; }
@@ -1550,7 +1593,7 @@ _compile_unzip() {
     echo "Compiling unzip ${UNZIP_VERSION}..."
     mkdir -p "$BUILD"
     cd "$BUILD"
-    UNZIP_SRC="unzip${UNZIP_VERSION//./}"  # "60" for "6.0"
+    UNZIP_SRC="unzip$(echo "$UNZIP_VERSION" | tr -d '.')"  # "60" for "6.0"
     if [ ! -f "${UNZIP_SRC}.tar.gz" ]; then
         curl -fsSL "https://sourceforge.net/projects/infozip/files/UnZip%206.x%20(latest)/UnZip%206.0/${UNZIP_SRC}.tar.gz/download" \
             -o "${UNZIP_SRC}.tar.gz" || { err "failed to download unzip source"; return 1; }
@@ -1663,7 +1706,6 @@ if [ -d "$BUILD" ]; then
     rm -rf "$BUILD"
 fi
 
-# (config and contacts setup moved to section 1, before dependency checks)
 # ============================================================
 # SERVICE SETUP — generate the init unit for this system (systemd, runit, …)
 # ============================================================
@@ -1720,7 +1762,7 @@ elif ask_yn setup_service "Set up rmail to run as a service?"; then
     #
     # There is deliberately no fallback to an automatically chosen
     # alternative name. Quietly picking a different one would reintroduce
-    # exactly the class of surprise this whole change is about. (Re #377.)
+    # exactly the class of surprise this whole change is about. (Re #381.)
     if _clash=$(service_exists "$RMAIL_SERVICE"); then
         if ! grep -q "$CONFIG_FILE" "$_clash" 2>/dev/null; then
             err "A service named '$RMAIL_SERVICE' is already installed at:"
@@ -1954,10 +1996,9 @@ generate_docs() {
 
     # Escape replacement values so paths containing `|`, `\`, or `&` don't
     # break the sed command or get interpreted as backreferences.  See #344.
-    local esc_shebang esc_root esc_cfg esc_mail
+    local esc_shebang esc_root esc_mail
     esc_shebang=$(sed_escape_replacement "$lua_shebang")
     esc_root=$(sed_escape_replacement "$ROOT")
-    esc_cfg=$(sed_escape_replacement "$CONFIG_DIR")
     esc_mail=$(sed_escape_replacement "$MAIL_DIR")
 
     for tmpl in "$templates_dir"/*.md; do
@@ -1967,7 +2008,6 @@ generate_docs() {
         sed \
             -e "s|/home/you/programs/email/deps/lua/bin/lua|$esc_shebang|g" \
             -e "s|/home/you/programs/email|$esc_root|g" \
-            -e "s|/home/you/.config/rmail|$esc_cfg|g" \
             -e "s|/home/you/mail|$esc_mail|g" \
             "$tmpl" > "$out_dir/$name"
     done

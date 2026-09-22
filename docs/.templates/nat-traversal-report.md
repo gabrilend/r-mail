@@ -319,7 +319,7 @@ Given all of the above, here's the design:
 ### auto_port_forward config option
 
 ```lua
-# in ~/.config/rmail/config
+# in your mailbox's config file
 auto_port_forward = false    -- default: OFF
 ```
 
@@ -329,7 +329,7 @@ When enabled, rmail will attempt automatic port forwarding at startup:
 2. If UPnP fails, try NAT-PMP (via `natpmpc`)
 3. If both fail, log a warning and continue without a mapping
 
-The mapping is created for the port specified in `~/.config/rmail/config` (`port`). It maps external port -> internal port (same number).
+The mapping is created for the port specified in your mailbox's `config` file (`port`). It maps external port -> internal port (same number).
 
 ### Mapping lifecycle
 

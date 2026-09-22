@@ -106,13 +106,25 @@ cd r-mail
 ./scripts/install.sh
 ```
 
-`install.sh` compiles all dependencies from source into `libs/`, and generates your config and contacts files. It will ask whether to compile Lua locally or use your system version.
+`install.sh` compiles all dependencies from source, then builds a mailbox
+holding its own config and its own copies of the hook scripts. It will ask
+whether to compile Lua locally or use your system version.
 
-To run manually:
+To run one manually:
 
 ```sh
-./run-rmail.sh
+./run-rmail.sh ~/mail/config
 ```
+
+One checkout runs every mailbox on the machine; a mailbox is mail, settings
+and hooks, not a copy of the program. The argument is required and it is what
+picks the mailbox: the one served is the directory that config file sits in.
+A machine can hold several, each on its own port, so there is nothing
+sensible to assume when it is left out.
+
+(A mailbox on a USB drive is the exception — it carries a trimmed copy of the
+program, because there is no checkout at the far end. See
+`scripts/make-mailbox-drive.sh`.)
 
 To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templates/service.md).
 
@@ -120,13 +132,18 @@ To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templ
 
 ### Config file
 
-`~/.config/rmail/config` controls your identity and settings:
+Your config controls your identity and settings, and lives inside the mailbox
+it serves — `~/mail/config` for a mailbox at `~/mail`. A second mailbox is a
+second directory with its own config in it, so nothing has to be named
+uniquely to keep them apart:
 
 ```
 name = yourname
 port = 8025
-mail = ~/mail
 ```
+
+There is no setting for which mailbox this is. The mailbox is the directory
+the file is sitting in, so the daemon already knows.
 
 The generated config file contains a comment above every available key explaining what it does.
 
@@ -260,7 +277,7 @@ If you cannot access your router's admin panel (shared housing, restrictive ISP,
 
 1. Run `./scripts/install.sh` — it offers to compile `upnpc` and `natpmpc` from source.
 
-2. Enable in `~/.config/rmail/config`:
+2. Enable in your mailbox's config file:
 
    ```
    auto_port_forward = true
@@ -308,7 +325,7 @@ On first startup it just saves the current IP without notifying anyone.
 
 ## Hooks
 
-Hooks let you run scripts in response to message events. Configure them in `~/.config/rmail/config`:
+Hooks let you run scripts in response to message events. Configure them in your mailbox's config file:
 
 | Hook            | `$1`       | `$2`       | `$3`               | stdout        |
 |-----------------|------------|------------|--------------------|---------------|
@@ -350,7 +367,7 @@ If the port isn't open or forwarded, the connection will either time out (packet
 
 **Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `deny` line and leave `accept` for their daemon to read.
 
-**Port already in use** — another instance may be running, or change `port` in `~/.config/rmail/config` to something not in use by another application.
+**Port already in use** — another instance may be running, or change `port` in that mailbox's config file to something not in use by another application.
 
 ## Docs
 

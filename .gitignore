@@ -12,7 +12,7 @@ config
 # after the service, and the service is named after the mailbox — so a
 # mailbox at ~/notes/rmail produces rmail-home-ritz-notes-rmail.service
 # rather than rmail.service. Listing exact names left every second mailbox's
-# generated files showing up as untracked noise. (Re #377.)
+# generated files showing up as untracked noise. (Re #381.)
 rmail*.nix
 rmail*.service
 rmail*-run

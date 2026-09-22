@@ -260,7 +260,7 @@ IP, run rmail through `torsocks`:
 
 ```
 # In your service file:
-ExecStart=torsocks lua /path/to/rmail.lua /path/to/mailbox
+ExecStart=torsocks lua /path/to/rmail.lua /path/to/config-file
 ```
 
 The hop count adds hundreds of milliseconds, sometimes more.  Your

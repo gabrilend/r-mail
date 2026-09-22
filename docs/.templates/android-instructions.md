@@ -148,7 +148,7 @@ Your port is in the rmail config file on the home computer. To find it, run
 this command (it searches for the line starting with "port" and prints it):
 
 ```sh
-grep '^port' ~/.config/rmail/config-*
+grep '^port' ~/mail/config
 ```
 
 Or look at the output from when you ran `scripts/install.sh` — it prints your
