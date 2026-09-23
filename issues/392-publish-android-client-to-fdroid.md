@@ -108,7 +108,7 @@ the server.
 
 - **#372 Loopback drops attachments.**  The first thing a new user does is
   send themselves a test message with a photo.  It must work.
-- **#311 NAT warning does not say who sent it.**  Confusing on first
+- **#398 NAT warning does not say who sent it.**  Confusing on first
   contact.
 - **#314 Third-party outbox security.**  Not a bug today; a rule any
   public build must keep (only the app's own UI writes the outbox).  Check

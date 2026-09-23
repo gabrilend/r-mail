@@ -82,7 +82,7 @@ Example:
 - Bob's inbox has two files... both named "status"?
 
 Current behavior: The second delivery would fail or overwrite, depending on
-how filename conflicts are handled (see issue #312).
+how filename conflicts are handled (see issue #399).
 
 Proposed refinement: Ensure each living message is tied to one sender
 specifically. Options:

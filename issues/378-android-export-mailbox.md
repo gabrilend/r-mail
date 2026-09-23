@@ -27,7 +27,7 @@ deliberately not doing that.**  Mail in shared storage is readable by
 any app the user grants storage access to, it survives uninstall, and
 the media scanner will index the `.txt` files.  For a project whose wire
 protocol is AES-GCM and which has open issues on traffic padding (#366)
-and decoy traffic (#314), plaintext mail sitting in `/sdcard/Documents`
+and decoy traffic (#401), plaintext mail sitting in `/sdcard/Documents`
 is a meaningful step down in posture.
 
 So: **storage stays private; export becomes an explicit, user-initiated
