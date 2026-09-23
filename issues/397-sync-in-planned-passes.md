@@ -2,7 +2,7 @@
 
 ## Status
 
-Open — designed with the owner 2026-09-23; the log move is built, the rest is not.  Two open questions
+Open — designed with the owner 2026-09-23; the log move is built, the rest is not.  One open question
 below.  Absorbs #396.
 
 ## Current Behavior
@@ -101,11 +101,30 @@ reachable work or produces something new, or the sync stops and says why.
   carrying the whole chain of calls that led to it (a traceback), not only
   its last line, so the log names the caller.  Owner: "Code errors should
   be noticed and fixed, we can design perfect software if we choose to."
+- **A code error during part 3 ends part 3 for that pass.**  The action
+  that threw, and every planned action not yet carried out, are marked as
+  errors; the pass then goes on to part 4 and part 5 as usual.  The next
+  pass of the same sync picks them up in its check and plans them again,
+  applying a correction to the one that threw when the check can find one.
+  Owner: "No it should abort the execute phase of the pass, move to the
+  error phase and mark all the incomplete tasks as errors. Then, on the
+  next pass, we'll pick them up and reschedule them, ideally with the
+  correction applied to the erroring task. Remember, pass != sync cycle.
+  We do multiple passes in a cycle."
+- **This cannot loop.**  If no correction is found, the next pass plans the
+  same list again (less whatever finished before the error), and when
+  nothing finished, that list is identical — which is the repeated-plan
+  stop above.  The sync ends with that error, and the next sync, at the
+  ordinary cadence, tries again.
+- *Decided against: skipping only the action that threw and running the
+  rest of the pass* (proposed 2026-09-23).  The owner chose to stop the
+  pass and hand everything unfinished to the next pass instead.
 - **Part 5 still runs after a code error.**  Timers move as normal, so a
   code error repeats at the ordinary cadence (every 30s or so), one log
   entry each time, and never spins the loop.  A code error is not a
   statement about a contact's reachability, so it does not back anyone
-  off either.
+  off either, and an action marked as an error only because it never ran
+  says nothing about its contact either.
 - *Decided against: letting a code error stop the timers so the loop runs
   away as an alarm.*  Proposed 2026-09-23 and briefly adopted, then
   reversed by the owner: "A log line would be just as useful, and wouldn't
@@ -170,9 +189,10 @@ sync at once.
    error on a repeated plan; leave refused contacts out for the rest of the
    sync.
 4. **Catch code errors with a traceback** (Lua's `xpcall` with
-   `debug.traceback`), log one entry, and go on to part 5.  How much a
-   code error takes down with it — the one action, or the rest of the
-   pass — is open question 2.
+   `debug.traceback`) around part 3 as a whole, not per action: log one
+   entry, mark the action that threw and every action not yet run as
+   errors, then go on to parts 4 and 5.  The next pass's check reads
+   those errors and replans them.
 5. **Stored failures file** in `/tmp/rmail-progress/`, read by every check.
 6. **World-failure report** through `report_problem` (outbound), one file
    per contact, with every attempt's detail; withdrawn on success.
@@ -205,12 +225,12 @@ sync at once.
    decided against.  #371 proposes collapsing repeated lines everywhere
    (for instance a contact that stays unreachable for a week), with
    options that keep every timestamp.
-2. **How much does a code error take down?**  Recommended: only the action
-   that threw — it is logged and skipped, every other planned action in
-   the pass still runs, then part 5.  The alternative stops the rest of the
-   pass (still running part 5), which is simpler but lets one broken record
-   hold up every contact's mail, as in September.
+
 Resolved:
+
+- **How much a code error takes down:** the rest of that pass's part 3;
+  everything unfinished is marked as an error and replanned by the next
+  pass (see Code errors versus world errors).
 
 - **The in-memory "last success" time on each contact's timer** (set on
   every success and inbound message, read nowhere, never saved).  Owner:

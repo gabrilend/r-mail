@@ -40,7 +40,13 @@ services (`kuvalu-mail` on 8025 for `~/mail`, `kuvalu-notes` on 8026 for
 
 ## Open, outside this repository (the owner's two mailboxes)
 
-These were asked for in the same conversation and are not built yet.
+These were asked for in the same conversation.  **Both built and tested
+2026-09-23:** (1) is `/home/ritz/scripts/ai-stuff/rmail-notice`, called from
+`~/.bashrc` line 25 in place of `view-random` (which it runs when the inbox
+is empty; hidden files are not counted).  (2) is in the notes mailbox's
+`hooks/on_receive.lua`: the outbox notice is named
+`note-name-taken-<note name>`; the design is recorded in
+`neocities-modernization/issues/10-068-*`.
 
 1. **Terminal notice.**  `~/.bashrc` line 25 runs `/home/ritz/words/view-random`.
    Replace it with a call to a script in `/home/ritz/scripts/ai-stuff/`
