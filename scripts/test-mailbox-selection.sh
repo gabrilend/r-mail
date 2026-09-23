@@ -60,6 +60,13 @@ fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
+# Each daemon keeps its log in the machine-wide RAM folder, named after its
+# mailbox path.  That folder is shared with the real mailboxes, so this
+# run's logs are cleared at the start (a previous run's must not be read as
+# this one's) and at the end (they must not be left beside the real ones).
+RAM_LOGS="/tmp/rmail-progress/log-tmp-rmail-tests-mailbox-selection-"
+rm -f "$RAM_LOGS"*
+
 # --------------------------------------------------------------------------
 # make_mailbox <dir> <name> <port> [extra-config-line]
 #
@@ -431,6 +438,8 @@ else
 fi
 
 # --------------------------------------------------------------------------
+
+rm -f "$RAM_LOGS"*
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

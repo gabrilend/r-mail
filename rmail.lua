@@ -119,12 +119,27 @@ local paths = {
 }
 paths.uploads = paths.attachments .. "/.uploads"
 
+-- The daemon's RAM-backed folder: status that churns and means nothing
+-- after a reboot (transfer progress, consent progress) and the daemon's
+-- own log file.  Shared by every mailbox on the machine, so everything in
+-- it carries the mailbox path in its name.  See the progress-file helpers
+-- (#328) for how the transfer files use it.
+local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
+
 -- The config parser leaves quotes on values, so `log_file = "/tmp/x.log"`
 -- arrives as a string with literal quote characters that would become part
 -- of the filename.  Strip them, treat an empty value as "no file copy",
 -- and expand a leading ~ the way the mailbox argument is expanded.
-local function _log_file(v, state_dir)
-    if v == nil or v == false then return state_dir .. "/rmail.log" end
+--
+-- With no setting, the log goes to RAM, named after the mailbox path the
+-- same way the transfers file is (/home/ritz/mail -> log-home-ritz-mail).
+-- It used to live in the mailbox's .state/ folder on disk; the owner moved
+-- it (2026-09-23, #397) because it records every exchange with a contact
+-- by name and time, and that record should not outlive a reboot.
+local function _log_file(v, mail_dir)
+    if v == nil or v == false then
+        return TMPFS_PROGRESS_DIR .. "/log-" .. mail_dir:gsub("^/", ""):gsub("/", "-")
+    end
     v = tostring(v):gsub('^"(.*)"$', '%1'):gsub("^'(.*)'$", '%1')
     v = v:match("^%s*(.-)%s*$")
     if v == "" then return nil end
@@ -154,12 +169,12 @@ local cfg = {
     -- you and the text.  Both, not either: the journal is what the OS
     -- expects, the file is what a person reaching for `tail -f` expects.
     --
-    -- The default lives in the mailbox rather than at a fixed path because
+    -- The default is named after the mailbox rather than fixed because
     -- a machine can hold several mailboxes (#382) and a shared path would
     -- interleave two daemons' lines into one unreadable file.  Set
     -- `log_file` in the config to put it somewhere else, or to `""` to
     -- keep the journal copy only.
-    log_file          = _log_file(config.log_file, paths.state),
+    log_file          = _log_file(config.log_file, MAIL),
 }
 
 -- Hook scripts.  The config parser doesn't strip quotes, so a user who
@@ -467,7 +482,8 @@ end
 -- was wiped" matters for correctness, so code paths that interpret
 -- file absence use path_state() instead of plain file_exists().
 
-local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
+-- TMPFS_PROGRESS_DIR itself is defined near the top of the file, beside
+-- the log setting, which also lives there.
 
 -- Return "live" (regular file or symlink with a live target), "dangling"
 -- (symlink whose target is gone — typically after a reboot wiped /tmp),
@@ -767,6 +783,13 @@ local log_broken    = false   -- complain once, not once per line
 local function log_handle()
     if log_broken or not cfg.log_file then return nil end
     if log_fh then return log_fh end
+    -- The default log sits in the RAM folder, which a reboot empties.
+    -- Nothing else may have recreated it yet when the first line is logged
+    -- (startup logs before any transfer is written), so make sure it is
+    -- there.  A log_file set elsewhere is the owner's path to provide.
+    if cfg.log_file:sub(1, #TMPFS_PROGRESS_DIR + 1) == TMPFS_PROGRESS_DIR .. "/" then
+        os.execute("mkdir -p " .. TMPFS_PROGRESS_DIR)
+    end
     local fh, err = io.open(cfg.log_file, "a")
     if not fh then
         log_broken = true
@@ -928,7 +951,7 @@ function ctimer.get(name)
         -- A contact we have never reached is due immediately.  That is what
         -- makes a newly added contact, and every contact at startup, get
         -- contacted on the next cycle rather than after a floor-length wait.
-        t = {interval = ctimer.FLOOR, next_due = 0, last_ok = nil}
+        t = {interval = ctimer.FLOOR, next_due = 0}
         ctimer.timers[name] = t
     end
     return t
@@ -941,7 +964,6 @@ end
 function ctimer.mark_success(name, now)
     local t = ctimer.get(name)
     t.interval = ctimer.FLOOR
-    t.last_ok  = now
     t.next_due = now + ctimer.jittered(ctimer.FLOOR)
 end
 
@@ -967,7 +989,6 @@ function ctimer.saw_inbound(name)
     if not name or name == "" then return end
     local t = ctimer.get(name)
     t.interval = ctimer.FLOOR
-    t.last_ok  = socket.gettime()
     t.next_due = 0
 end
 

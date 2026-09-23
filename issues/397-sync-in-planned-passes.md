@@ -2,7 +2,7 @@
 
 ## Status
 
-Open — designed with the owner 2026-09-23; not started.  Three open questions
+Open — designed with the owner 2026-09-23; the log move is built, the rest is not.  Two open questions
 below.  Absorbs #396.
 
 ## Current Behavior
@@ -35,10 +35,18 @@ mail from that mailbox stopped.  The record's own bug is fixed (see
 `scripts/test-stale-transfer-records.sh`); the cycle's shape that turned
 one bad record into a stalled mailbox is what this issue is about.
 
-The daemon's own log copy defaults to `.state/rmail.log` inside the
-mailbox — on disk (`_log_file`, the `log_file` config setting).  The service
-script separately captures the same lines into `/tmp/<service>.log`, which
-is RAM.
+**Already built (2026-09-23), ahead of the rest:** the daemon's own log
+copy defaults to RAM, `/tmp/rmail-progress/log-<mailbox path with dashes>`
+(`_log_file`; the folder constant `TMPFS_PROGRESS_DIR` moved up beside it;
+`log_handle` recreates the folder after a reboot).  It used to be
+`.state/rmail.log`, on disk.  An explicit `log_file` still wins, and
+`log_file = ""` still means no file copy.  Covered by
+`scripts/test-log-location.sh`.  The service script separately captures
+the same lines into `/tmp/<service>.log`, also RAM.  The daemon tests
+clear their own logs from the shared RAM folder.
+
+**Also built:** the unused "last success" time on each contact's timer is
+deleted (owner; see Resolved, under Open Questions).
 
 Outbox change notices that arrive during a sync are discarded by the drain
 at the end of the cycle, so a file saved mid-sync waits for a timer (was
@@ -107,8 +115,8 @@ reachable work or produces something new, or the sync stops and says why.
   address tried for the contact (local and public), the port, what each
   attempt got back (refused, timed out, no route, a status code and its
   body), how many bytes went out before it failed, and what is queued for
-  them.  Not included: when the contact last answered (see open question
-  3).  Owner: "If the failure is due to
+  them.  Not included: when the contact last answered (see Resolved,
+  under Open Questions).  Owner: "If the failure is due to
   the world, then we should try and identify exactly as much information as
   we can provide about it and give it to the user."  It reaches the owner
   through the existing problems-as-mail mechanism (`report_problem`,
@@ -169,8 +177,8 @@ sync at once.
 6. **World-failure report** through `report_problem` (outbound), one file
    per contact, with every attempt's detail; withdrawn on success.
 7. **Log default** moves from `.state/rmail.log` to `/tmp/rmail-progress/`
-   in `_log_file`; update README and `docs/` where the old path is named
-   (grep for `rmail.log`).
+   in `_log_file`.  *Done 2026-09-23; no README or `docs/` page named the
+   old path.*
 8. **Drain placement** (#396): move the outbox and contacts notice drains
    from the end of the sync to just before the final check.
 9. **Tests**, each on throwaway mailboxes the way
@@ -202,18 +210,19 @@ sync at once.
    the pass still runs, then part 5.  The alternative stops the rest of the
    pass (still running part 5), which is simpler but lets one broken record
    hold up every contact's mail, as in September.
-3. **The in-memory "last success" time on each contact's timer.**  Set on
-   every success and every inbound message, read nowhere, never saved.
-   Owner, 2026-09-23: "I feel like that's PII and we should remove it, or
-   add it to the PII removal issue file."  #348 (the PII issue) was closed
-   in April as reversed and covers `.state/` files only.  Recommended:
-   delete the field as dead data, here.  Put to the owner: the daemon's
-   log records every successful exchange with a name and a time, which is
-   the larger record — is the concern the time being kept, or being shown?
+Resolved:
 
-Resolved: the service log's unbounded growth during a runaway was a
-question while runaways were the design; with runaways decided against, a
-code error writes one entry per ordinary cycle.
+- **The in-memory "last success" time on each contact's timer** (set on
+  every success and inbound message, read nowhere, never saved).  Owner:
+  "I feel like that's PII and we should remove it, or add it to the PII
+  removal issue file."  #348 was closed in April as reversed and covers
+  `.state/` files only, so it was handled here: deleted.  The two larger
+  records of when contacts are talked to were settled at the same time —
+  the daemon's log moves to RAM (owner: "Let's move it to RAM then"), and
+  the stored failures' first/last-seen times stay, in RAM ("Sounds good").
+- **The service log's unbounded growth during a runaway** was a question
+  while runaways were the design; with runaways decided against, a code
+  error writes one entry per ordinary cycle.
 
 ## Related
 

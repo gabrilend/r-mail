@@ -181,11 +181,13 @@ no_crash() {
 
 state_of() { cat "$WORK/$1/.state/chunks-outgoing.json"; }
 
-# The daemon mirrors each mailbox's transfers into the machine-wide RAM
-# folder /tmp/rmail-progress/, named after the mailbox path.  That folder
-# is shared with the real mailboxes, so this run's copies are removed
-# rather than left beside them.  Everything else stays under $WORK.
+# The daemon keeps each mailbox's transfers file and its log in the
+# machine-wide RAM folder /tmp/rmail-progress/, named after the mailbox
+# path.  That folder is shared with the real mailboxes, so this run's files
+# are removed rather than left beside them.  Everything else stays under
+# $WORK.
 rm -f /tmp/rmail-progress/transfers-tmp-rmail-tests-stale-transfer-records-*
+rm -f /tmp/rmail-progress/log-tmp-rmail-tests-stale-transfer-records-*
 
 echo ""
 echo "an April-style record, source still there"
