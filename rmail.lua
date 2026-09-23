@@ -1784,21 +1784,19 @@ local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
 end
 
--- ---- PII helpers (#348) -------------------------------------------------
+-- ---- Reading state written while contact names were hashed (#348) -------
 --
--- Several state files key their entries by contact name (nat warnings,
--- pending address notifications).  Persisting the name in plaintext is
--- a PII leak: anyone with read access to .state/ learns who the user
--- talks to.  Hashing the name keeps the lookup working (same input
--- → same key) while hiding the identity.
+-- For a few weeks in spring 2026 some state files stored a hash of each
+-- contact's name instead of the name, on the theory that someone who could
+-- read .state/ but not the rest of the mailbox should not learn who the
+-- owner talks to.  That was reversed on 2026-04-18: anyone who can read
+-- .state/ can almost always read contacts, inbox/ and outbox/ too, which
+-- name the same people in plain text, and the hashes made the state files
+-- impossible to read or fix by hand.  State files now hold plain names.
 --
--- The hash isn't cryptographically secret by itself — an attacker with
--- the contacts file can just rehash every contact to reverse the map.
--- The threat model is "attacker has .state/ but not contacts" (backups
--- split across machines, forensic snapshots, etc.); for that case,
--- hashing is enough.  A stronger defence would store a per-install
--- random salt in STATE, but that adds moving parts for a modest gain;
--- deferred.
+-- What is left here only reads the old form back: hash_contact_name
+-- recomputes a hash so unmigrate_hashed_keys can turn a leftover hashed
+-- key into the name it stood for.  Nothing writes a hash any more.
 
 local function hex_sha256(data)
     local bytes = crypto.sha256(data)
@@ -3194,11 +3192,37 @@ local function _glob_to_lua_pattern(glob)
     return "^" .. table.concat(out) .. "$"
 end
 
+-- The path an `attach:` line names, as written: the text after the colon,
+-- trimmed, with one layer of matching double or single quotes taken off
+-- (#363 part c) -- people quote paths with spaces out of shell habit.
+-- nil for a line that is not an attach: line.  `~` is left for the caller
+-- to expand, because the glob check needs the path before expansion.
+--
+-- Every place that reads a path out of an attach: line goes through here.
+-- They used to each do it themselves, and disagreed: the parser expanded
+-- `~` while the missing-file note and the sent-line strike compared the
+-- raw text against the expanded path, so a `~` or quoted path never
+-- matched and a missing file waited forever with no note.
+--
+-- The user's file is never rewritten just to take quotes off; a line the
+-- daemon rewrites for its own reasons comes out unquoted anyway.
+local function _extract_attach_path(line)
+    local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
+    if not fp then return nil end
+    return fp:match('^"(.*)"$') or fp:match("^'(.*)'$") or fp
+end
+
 local function _list_dir_files(dir)
-    -- Regular files only (no dirs, no dotfiles).  Silent — no per-session
+    -- Files only (no folders, no dotfiles).  Silent — no per-session
     -- warnings, unlike list_files which is tailored to INBOX/OUTBOX/etc.
+    --
+    -- -L makes ls describe what a link points at, so -p marks a link to a
+    -- folder with a trailing / like a real folder and it is left out; a
+    -- link to a file is kept.  Without -L a link to a folder was attached
+    -- as though it were a file (#362 says folders matched by a wildcard
+    -- are skipped and links are followed).
     local files = {}
-    local handle = io.popen('ls -1p ' .. shell_quote(dir) .. ' 2>/dev/null')
+    local handle = io.popen('ls -1pL ' .. shell_quote(dir) .. ' 2>/dev/null')
     if handle then
         for name in handle:lines() do
             if name:sub(1, 1) ~= '.' and name:sub(-1) ~= '/' then
@@ -3263,9 +3287,7 @@ local function parse_outbox_file(path)
     local expanded_header = {}
     local file_changed = false
     for _, line in ipairs(header_lines) do
-        local is_attach = line:lower():match("^attach:") ~= nil
-        local fp = is_attach and
-            line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$") or nil
+        local fp = _extract_attach_path(line)
         if fp and fp ~= "" and _has_glob_chars(fp) then
             local matches = _expand_attach_glob(fp, path)
             if matches and #matches > 0 then
@@ -3304,11 +3326,9 @@ local function parse_outbox_file(path)
             if name and name ~= "" then
                 local attachments = {}
                 for j = i + 1, #expanded_header do
-                    if expanded_header[j]:lower():match("^attach:") then
-                        local afp = expanded_header[j]:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
-                        if afp and afp ~= "" then
-                            attachments[#attachments + 1] = expand_tilde(afp)
-                        end
+                    local afp = _extract_attach_path(expanded_header[j])
+                    if afp and afp ~= "" then
+                        attachments[#attachments + 1] = expand_tilde(afp)
                     end
                 end
                 entries[#entries + 1] = {name = name, attachments = attachments}
@@ -3336,8 +3356,9 @@ local function mark_missing_attachment(outbox_path, filepath, outbox_name)
     while pos <= #text do
         local line_end = text:find("\n", pos) or #text + 1
         local line = text:sub(pos, line_end - 1)
-        local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
-        if fp == filepath then
+        -- filepath is the expanded, unquoted path; the line is as written.
+        local fp = _extract_attach_path(line)
+        if fp and expand_tilde(fp) == filepath then
             local prefix = text:sub(1, line_end)
             if prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end
             local suffix = text:sub(line_end + 1)
@@ -3486,9 +3507,11 @@ local function remove_attach_from_file(filepath, attach_path)
     local header_lines, body = _scan_outbox_header(text)
     local kept = {}
     for _, line in ipairs(header_lines) do
-        if line:lower():match("^attach:") then
-            local fp = line:match("^[Aa][Tt][Tt][Aa][Cc][Hh]:%s*(.-)%s*$")
-            if fp ~= attach_path then kept[#kept + 1] = line end
+        -- attach_path is the expanded, unquoted path the transfer used; the
+        -- line is compared as the parser would read it.
+        local fp = _extract_attach_path(line)
+        if fp then
+            if expand_tilde(fp) ~= attach_path then kept[#kept + 1] = line end
         else
             kept[#kept + 1] = line
         end
@@ -4687,6 +4710,13 @@ local function sync_outbox(my_name)
                                     mark_missing_attachment(
                                         OUTBOX .. "/" .. name, filepath, name)
                                 elseif not in_progress then
+                                    -- The file is here now.  An already
+                                    -- delivered message reaches this branch
+                                    -- and not the undelivered one above, so
+                                    -- its note has to be taken away here too,
+                                    -- or it keeps saying "not found" beside a
+                                    -- file that is being sent.
+                                    clear_missing_marker(OUTBOX .. "/" .. name, filepath)
                                     local att_id = uuid()
                                     local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
                                     local expected_size = measure_size(filepath) or 0
@@ -6312,14 +6342,46 @@ local function handle_request(rt, client)
                 known_key = derive_key(cc[contact_name].token)
             end
 
-            -- Cache peer LAN IP on first request only
+            -- Learn a same-house contact's home-network address from the
+            -- connection it just made to us (first request only).
+            --
+            -- The address a connection arrives from is only the contact's
+            -- own when it came straight across our network.  A contact
+            -- that reaches us through the router's loop-back (hairpin)
+            -- arrives from whichever device relayed it -- on a house with
+            -- two routers in a row, the outer one.  Recording that sent
+            -- every later message to the router instead of the contact
+            -- (September 2026: sorelu filed as 192.168.0.1 while this
+            -- machine sits on 192.168.1.x, every send refused).  So the
+            -- address is kept only if it shares our own /24, the same test
+            -- discovery and address announcements use.
+            --
+            -- Three paths: not a private address, or the contact is not
+            -- in our house (their address is not our public one) -- nothing
+            -- to learn; private but on another /24 -- a relay, said once
+            -- in the log and never kept; private and on our /24 -- kept,
+            -- unless discovery or an announcement already told us where
+            -- they are (those are asked, not guessed, so they win).
+            --
+            -- The relay check does not wait on "not already known": that a
+            -- router is passing a contact's traffic through is worth saying
+            -- whatever else we know about them.
             local peer_ip = client:getpeername()
-            if peer_ip and contact_name and not rt.lan.peers[contact_name] then
-                local is_private = is_private_ipv4(peer_ip)
-                if is_private then
-                    local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
-                    if cc[contact_name] and cc[contact_name].ip == my_public then
+            if peer_ip and contact_name and is_private_ipv4(peer_ip) then
+                local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+                if cc[contact_name] and cc[contact_name].ip == my_public then
+                    local my_lan_ip = nat.get_local_ip()
+                    if not addrset.same_lan(peer_ip, my_lan_ip) then
+                        if not rt.lan.relayed[contact_name] then
+                            rt.lan.relayed[contact_name] = peer_ip
+                            log("LAN address: %s connected from %s, which is not on our network (%s) "
+                                .. "-- a router passing it through, not their address; not recorded",
+                                contact_name, peer_ip, tostring(my_lan_ip))
+                        end
+                    elseif not rt.lan.peers[contact_name] then
                         rt.lan.peers[contact_name] = peer_ip
+                        log("LAN address: %s is at %s (connected to us from there)",
+                            contact_name, peer_ip)
                     end
                 end
             end
@@ -6676,7 +6738,10 @@ local function init_runtime()
         -- see the `ctimer` table.  last_sync is kept only so an inotify
         -- trigger can still tell how long it has been since the last cycle.
         last_sync    = socket.gettime(),
-        lan = { udp = nil, peers = {}, discovery_sent = {} },
+        -- peers: contact name -> home-network address we will send to.
+        -- relayed: contact name -> an address a connection came from that
+        -- was a router, not them; kept only so that is logged once.
+        lan = { udp = nil, peers = {}, relayed = {}, discovery_sent = {} },
         outbox_inotify_fd = nil,
     }
 

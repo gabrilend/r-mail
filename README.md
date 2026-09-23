@@ -371,6 +371,14 @@ If the port isn't open or forwarded, the connection will either time out (packet
 
 **Port already in use** — another instance may be running, or change `port` in that mailbox's config file to something not in use by another application.
 
+**Renaming a contact** — the daemon does not follow a rename by itself. Its state files (`.state/*.json`) remember who each message went to by contact name, so after renaming `alice` to `alice-smith` in `contacts`, messages already sent to `alice` look like they went to someone who no longer exists: edits to them stop reaching her, and her deletions are not heard. Changing only the `to:` line in an outbox file is worse — the daemon reads it as one recipient removed and a new one added, and sends her the message a second time. To rename cleanly, with the mailbox's service stopped:
+1. Rename the entry in `contacts` (every `alice.` line becomes `alice-smith.`).
+2. Change `to: alice` to `to: alice-smith` in every outbox file that has it.
+3. Rename her in the state files: `sed -i 's/"alice"/"alice-smith"/g' .state/*.json`
+4. Start the service again.
+
+The state files are plain JSON on purpose, so that this is a few seconds of `sed` rather than a program.
+
 ## Docs
 
 - [docs/.templates/attachments.md](docs/.templates/attachments.md) — full attachment workflow, consent, configuration

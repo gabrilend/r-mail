@@ -32,13 +32,30 @@ follow() {
 }
 # }}}
 
+# {{{ is_rmail_log()
+# A service can be given any name (--service-name), so a log's file name
+# says nothing reliable about whether rmail wrote it.  Its first line does:
+# every daemon's first log line is "<date> <time> rmail starting: name=...".
+# The old /tmp/rmail.log from before per-mailbox services is also accepted
+# by name, since it may predate that line.
+is_rmail_log() {
+    case "${1##*/}" in
+        rmail.log) return 0 ;;
+    esac
+    head -n 1 "$1" | grep -q ' rmail starting: name='
+}
+# }}}
+
 # {{{ list_logs()
 # Every rmail log in /tmp, newest first.  Newest first because the one you
 # just installed is the one you almost certainly want to look at, so the
 # ordering means the common case needs no thought.
 list_logs() {
-    find /tmp -maxdepth 1 -name 'rmail*.log' -type f -printf '%T@ %p\n' 2>/dev/null \
-        | sort -nr | cut -d' ' -f2-
+    find /tmp -maxdepth 1 -name '*.log' -type f -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | cut -d' ' -f2- \
+        | while IFS= read -r f; do
+              is_rmail_log "$f" && printf '%s\n' "$f"
+          done
 }
 # }}}
 

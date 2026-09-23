@@ -13,10 +13,16 @@ config
 # mailbox at ~/notes/rmail produces rmail-home-ritz-notes-rmail.service
 # rather than rmail.service. Listing exact names left every second mailbox's
 # generated files showing up as untracked noise. (Re #381.)
-rmail*.nix
-rmail*.service
-rmail*-run
-rmail*-init
+#
+# Anchored to the project root and not tied to an "rmail" prefix, because
+# --service-name lets the owner pick any name (this machine's services are
+# kuvalu-mail and kuvalu-notes), and install.sh writes <service>.nix,
+# <service>.service, <service>-run and <service>-init into the root.  No
+# tracked file at the root has any of these shapes.
+/*.nix
+/*.service
+/*-run
+/*-init
 
 # Build temp files
 .build-tmp/
