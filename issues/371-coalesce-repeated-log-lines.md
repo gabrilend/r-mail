@@ -214,6 +214,9 @@ Open.
 2026-09-23: while designing #397, the owner decided a crashing sync's
 repeated error lines are **not** collapsed: "Nah let's keep it running
 away instead of collapsing identical lines. That way we have the timing
-information too."  Whether that decision covers this issue as a whole
-(for instance a contact unreachable for a week), or only crash runaways,
-is open question 1 in #397.
+information too."  Later the same day the owner dropped runaways from
+#397 altogether ("A log line would be just as useful, and wouldn't
+potentially crash the computer..."), so a code error now logs once per
+ordinary cycle.  Whether "keep the timing, don't collapse" still bears on
+this issue (for instance a contact unreachable for a week) is open
+question 1 in #397.

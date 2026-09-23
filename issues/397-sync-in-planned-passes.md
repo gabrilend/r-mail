@@ -2,7 +2,7 @@
 
 ## Status
 
-Open — designed with the owner 2026-09-23; not started.  Two open questions
+Open — designed with the owner 2026-09-23; not started.  Three open questions
 below.  Absorbs #396.
 
 ## Current Behavior
@@ -89,24 +89,26 @@ reachable work or produces something new, or the sync stops and says why.
 ### Code errors versus world errors
 
 - **A code error** (anything thrown — a Lua runtime error, a failed
-  assertion, the repeated-plan error) is not caught per action and not
-  stored as a failure.  It stops the sync before part 5, so the timers do
-  not move and the loop runs away.  That runaway is the alarm, and it is
-  kept deliberately.  Owner: "If a sync cycle is crashing, we need to find
-  out why, and fix it. A runaway timer is a great signal that something has
-  gone wrong. A backing off timer disguises the issue by papering over the
-  symptom and suggesting that it's fine."  And: "Code errors should be
-  noticed and fixed, we can design perfect software if we choose to."
-- The error is logged with the whole chain of calls that led to it (a
-  traceback), not only its last line, so the log names the caller.
-- The log is **not** coalesced during a runaway.  Owner: "Nah let's keep
-  it running away instead of collapsing identical lines. That way we have
-  the timing information too."
+  assertion, the repeated-plan error) is written to the log as one entry
+  carrying the whole chain of calls that led to it (a traceback), not only
+  its last line, so the log names the caller.  Owner: "Code errors should
+  be noticed and fixed, we can design perfect software if we choose to."
+- **Part 5 still runs after a code error.**  Timers move as normal, so a
+  code error repeats at the ordinary cadence (every 30s or so), one log
+  entry each time, and never spins the loop.  A code error is not a
+  statement about a contact's reachability, so it does not back anyone
+  off either.
+- *Decided against: letting a code error stop the timers so the loop runs
+  away as an alarm.*  Proposed 2026-09-23 and briefly adopted, then
+  reversed by the owner: "A log line would be just as useful, and wouldn't
+  potentially crash the computer..."  The September runaway wrote 200 MB
+  of log into RAM-backed `/tmp` in about 18½ hours.
 - **A world failure** is described as fully as the daemon can: every
   address tried for the contact (local and public), the port, what each
   attempt got back (refused, timed out, no route, a status code and its
-  body), how many bytes went out before it failed, when the contact last
-  answered, and what is queued for them.  Owner: "If the failure is due to
+  body), how many bytes went out before it failed, and what is queued for
+  them.  Not included: when the contact last answered (see open question
+  3).  Owner: "If the failure is due to
   the world, then we should try and identify exactly as much information as
   we can provide about it and give it to the user."  It reaches the owner
   through the existing problems-as-mail mechanism (`report_problem`,
@@ -159,8 +161,10 @@ sync at once.
    check results → record outcome, until a check plans nothing; stop with an
    error on a repeated plan; leave refused contacts out for the rest of the
    sync.
-4. **Replace the main loop's protected call** with one that attaches a
-   traceback.  Do not catch per action.
+4. **Catch code errors with a traceback** (Lua's `xpcall` with
+   `debug.traceback`), log one entry, and go on to part 5.  How much a
+   code error takes down with it — the one action, or the rest of the
+   pass — is open question 2.
 5. **Stored failures file** in `/tmp/rmail-progress/`, read by every check.
 6. **World-failure report** through `report_problem` (outbound), one file
    per contact, with every attempt's detail; withdrawn on success.
@@ -171,9 +175,9 @@ sync at once.
    from the end of the sync to just before the final check.
 9. **Tests**, each on throwaway mailboxes the way
    `scripts/test-stale-transfer-records.sh` builds them:
-   - a planted record that throws in a check: the sync stops, the log has a
-     traceback naming the caller, timers do not move (passes come back to
-     back);
+   - a planted record that throws: the log has one traceback entry naming
+     the caller, timers still move, and the next sync comes at the ordinary
+     cadence rather than back to back;
    - a contact that refuses: one outbox report with every address tried and
      each result; other contacts still deliver in the same sync; the report
      goes away when the contact answers;
@@ -188,18 +192,28 @@ sync at once.
 
 ## Open Questions
 
-1. **Does "keep it running away, don't collapse" apply to #371 as a
-   whole,** or only to crash runaways?  #371 proposes collapsing repeated
-   lines everywhere (for instance a contact that stays unreachable for a
-   week), with options that keep every timestamp.
-2. **The service's own log (`/tmp/kuvalu-mail.log`) has no size limit.**
-   The daemon's copy rotates at 5 MB; the service script's copy is written
-   by runit's shell redirect and only grows.  The September runaway wrote
-   200 MB in about 18½ hours; left for a week at that rate it is roughly
-   1.8 GB of RAM (the rate depends on how fast each pass fails).  Is that acceptable as the
-   price of the alarm, or should the service script rotate (for instance
-   through runit's own logger, `svlogd`, which caps size and keeps
-   timestamps)?
+1. **Does "don't collapse identical lines, keep the timing" apply to #371
+   as a whole?**  The owner said it about crash runaways, which are now
+   decided against.  #371 proposes collapsing repeated lines everywhere
+   (for instance a contact that stays unreachable for a week), with
+   options that keep every timestamp.
+2. **How much does a code error take down?**  Recommended: only the action
+   that threw — it is logged and skipped, every other planned action in
+   the pass still runs, then part 5.  The alternative stops the rest of the
+   pass (still running part 5), which is simpler but lets one broken record
+   hold up every contact's mail, as in September.
+3. **The in-memory "last success" time on each contact's timer.**  Set on
+   every success and every inbound message, read nowhere, never saved.
+   Owner, 2026-09-23: "I feel like that's PII and we should remove it, or
+   add it to the PII removal issue file."  #348 (the PII issue) was closed
+   in April as reversed and covers `.state/` files only.  Recommended:
+   delete the field as dead data, here.  Put to the owner: the daemon's
+   log records every successful exchange with a name and a time, which is
+   the larger record — is the concern the time being kept, or being shown?
+
+Resolved: the service log's unbounded growth during a runaway was a
+question while runaways were the design; with runaways decided against, a
+code error writes one entry per ordinary cycle.
 
 ## Related
 

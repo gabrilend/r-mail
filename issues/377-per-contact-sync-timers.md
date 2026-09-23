@@ -226,5 +226,5 @@ builders.  When any builder throws, it is skipped: every due contact stays
 due, the main loop sleeps for zero, and the mailbox spins (1,091,617 crash
 lines overnight on the main mailbox, 2026-09-22 → 23).  The redesign that
 fixes this — a sync in planned passes, with the timer bookkeeping as the
-last part of each pass, and a crash left to run away on purpose as the
-alarm — is #397.
+last part of each pass, run even after a code error, which is logged with
+its full chain of calls instead — is #397.
