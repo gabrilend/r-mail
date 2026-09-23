@@ -16,6 +16,11 @@ record time, so phase 4 wants a theme.  Two ways it could go:
 - a different numbering shape for new issues, leaving phase 4 as a
   one-issue overflow.
 
+2026-09-23: the owner chose to re-sort every issue into up to nine themed
+phases before release, together with writing blueprints for everything
+built without one.  Planned in #402 and deferred until then; until it
+runs, new issues that do not fit elsewhere continue here.
+
 ## Counts
 
     /home/ritz/programming/ai-stuff/scripts/progress-dashboard.lua /mnt/mtwo/programs/r-mail -m
