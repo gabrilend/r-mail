@@ -2,7 +2,10 @@
 
 ## Status
 
-Open — design question put to the owner 2026-09-22, not yet answered.
+Answered 2026-09-23: yes, honour them.  Absorbed into #397 (a sync runs
+in planned passes), whose design closes this gap by moving the drain to
+just before the final check.  Built and tested there; this file stays
+open until #397 lands.
 
 ## Current Behavior
 
@@ -51,5 +54,6 @@ If yes:
 
 ## Related
 
+- #397 (a sync runs in planned passes — where this is built)
 - #377 (per-contact sync timers; no-contact timer follow-up)
 - #347 (contacts tidy-up after the drain)

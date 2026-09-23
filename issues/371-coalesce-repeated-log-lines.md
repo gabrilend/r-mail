@@ -210,3 +210,10 @@ of interest when in fact real events were simply buried.
 ## Status
 
 Open.
+
+2026-09-23: while designing #397, the owner decided a crashing sync's
+repeated error lines are **not** collapsed: "Nah let's keep it running
+away instead of collapsing identical lines. That way we have the timing
+information too."  Whether that decision covers this issue as a whole
+(for instance a contact unreachable for a week), or only crash runaways,
+is open question 1 in #397.

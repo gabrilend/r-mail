@@ -60,3 +60,8 @@ gone unreachable stalls cycles until backoff climbs.
 
 Open. Diagnosed 2026-09-22. Severity much reduced by #377, mechanism
 unchanged.
+
+2026-09-23: #397 turns one sync into several passes, repeated until a
+check plans nothing.  A longer sync is a longer stall for inbound
+requests, so this gets worse when #397 lands unless outbound becomes
+non-blocking first or alongside.
