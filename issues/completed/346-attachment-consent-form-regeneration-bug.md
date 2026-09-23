@@ -64,3 +64,25 @@ Completed. Fixes in `rmail.lua`:
 
 Paired with narrow updates to #348 (PII window for attachment state is
 now bounded to the active transfer period).
+
+### Follow-up 2026-09-23: the form is named after its message
+
+Keying the form by the attachment's name alone kept two attachments on
+one message apart, but a photo named by a phone camera
+(`20260903_154820.jpg`) produced a form named by a bare date, with nothing
+saying which message it belonged to.  The owner agreed to name it after
+the message first and the attachment second
+(`dinosaur-hoodie-pic-20260903_154820.jpg-consent-to-download-form`), and
+to add an `Attached to:` line inside.
+
+`handle_attachment_request` looks the request's message id and sender up
+in `inbox.json`, skipping consent entries, and uses the name the message
+has in this inbox.  When the message is not in the record (deleted before
+the request came), the form is named by the attachment alone, its
+`Attached to:` line says the message is not in this mailbox's records, and
+the log says so.  The ending `-consent-to-download-form` is unchanged, so
+the phone (`Models.kt`, `isConsent`) and `helpers/raccept.sh` /
+`helpers/rdeny.sh` still recognise forms.  The collision rule (a short
+`att_id` prefix) still applies.  Covered by
+`scripts/test-consent-form-name.sh`; the helper-scripts doc's example is
+updated.

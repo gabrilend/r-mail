@@ -46,6 +46,12 @@ echo ""
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
+# Each daemon keeps its log in the machine-wide RAM folder, named after its
+# mailbox path.  That folder is shared with the real mailboxes, so this
+# run's logs are cleared at the start and at the end.
+RAM_LOGS="/tmp/rmail-progress/log-tmp-rmail-tests-lan-discovery-names-"
+rm -f "$RAM_LOGS"*
+
 # {{{ make_mailbox <dir> <own-name> <port>
 make_mailbox() {
     mkdir -p "$1/inbox" "$1/outbox" "$1/.state"
@@ -119,6 +125,8 @@ fi
 kill "$ALPHA_PID" "$BRAVO_PID"
 wait "$ALPHA_PID" 2>/dev/null
 wait "$BRAVO_PID" 2>/dev/null
+
+rm -f "$RAM_LOGS"*
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

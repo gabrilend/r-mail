@@ -1,6 +1,6 @@
 # Conversation Summary: agent-ae8d2aa410b76174f
 
-Generated on: 2026-09-23 10:06:09
+Generated on: 2026-09-23 10:10:32
 Models: claude-opus-5-5
 
 --------------------------------------------------------------------------------
@@ -224,6 +224,61 @@ still open or deferred, don't mark it complete; say what. Run `validate-issues
 back briefly.
 
 Address this before completing your current task.
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 2
+
+I rewrote both issue files as finished blueprints, and the validator reports
+nothing for either file.
+
+**Checked first:**
+- Your three fixes are in the daemon as you described.
+- The committed test passes again: `all cases passed`.
+- The test only checks note clearing on messages not yet delivered, so I checked
+  the delivered case with a one-off daemon run on port 59410 (script in my
+  scratchpad). The setup was an already-delivered message with a quoted `~` path
+  to a missing file. The note appeared, naming the expanded, unquoted path.
+  After I created the file, the log said `attach: found … cleared its
+  missing-attachment marker`, the note was gone, and the attachment was queued.
+
+**Issue 362, `issues/362-attach-glob-wildcard.md`:**
+- Status is completed 2026-09-23, verified by the test.
+- It covers the files matched, what gets logged, and what is left alone.
+- It lists the real helper functions in order, the decision to expand in the
+  file at parse time, and the rejected alternatives: using a shell to match, and
+  wildcards in folder names.
+- The September fix for links to folders has its own subsection.
+- All requirements, edge cases and history are kept. I added one edge case: a
+  filename containing a newline would break, and is not handled.
+
+**Issue 363, `issues/363-outbox-header-robustness.md`:**
+- Status is completed 2026-09-23. It records that part (c) was only written down
+  in July and first built in September.
+- It says plainly that the note now clears itself on both delivered and
+  undelivered messages, going further than the April plan to "leave it to the
+  user". The April wording is quoted.
+- The three September fixes are recorded: part (c) never built, `~` paths
+  getting no note, and the note not clearing on delivered messages.
+- It also records the decision that `//` lines don't end the header, and what
+  that costs: a message body starting with `//` is read as header.
+- The April example, the quoted-path cases, the non-goal and both real-world
+  source stories are kept. The code snippet is now described in words.
+
+**Still open:**
+- **Delivered-message clearing has no test.** It is verified only by my one-off
+  run, and the 363 Status says so. It could be added to the test script as its
+  own case.
+- **`q-a-tests.md` is out of date.** Its line on stale notes still says the note
+  "stays in the file until the user removes it". I did not edit it.
+- **An outbox change during a sync was once lost.** In my first one-off run I
+  added a new outbox file while a sync was still waiting on the unreachable
+  address. No follow-up sync ran within 60 seconds. When I waited for the sync
+  to finish first, it worked. This looks like a separate daemon bug and is not
+  recorded in either issue.
+
+I did not move files, touch git or edit any source. The earlier harness warning
+naming `issues/381-install-service-name-collision.md` was not my change.
 
 --------------------------------------------------------------------------------
 

@@ -3549,11 +3549,47 @@ local function handle_attachment_request(data, sender)
     if total and total > 0 then
         pct_str = string.format(" (%d%% of capacity)", math.floor(after / total * 100))
     end
-    -- Key the consent file by attachment filename (not outbox subject) so
-    -- two attachments on the same outbox message get distinct files. On
-    -- collision (same filename already in inbox or tracked by another
+    -- Which message is this attached to?  The request carries the message's
+    -- id; our inbox record maps id and sender to the name the message has
+    -- in this inbox, which is the name the owner knows it by.  Consent
+    -- entries are skipped: they share the record but are not messages.
+    local inbox_state = load_state("inbox.json")
+    local message_name
+    for inbox_name, meta in pairs(inbox_state) do
+        if meta.message_id == message_id and meta["from"] == sender
+           and not meta.consent then
+            message_name = inbox_name
+            break
+        end
+    end
+
+    -- The form is named after the message and then the attachment
+    -- (dinosaur-hoodie-pic-20260903_154820.jpg-consent-to-download-form),
+    -- so it sorts beside its message and says what it belongs to; the
+    -- attachment part keeps two attachments on one message apart.  Owner,
+    -- 2026-09-23: forms named only by the attachment read as a bare date
+    -- whenever a phone camera named the photo.  The ending stays
+    -- -consent-to-download-form, which the phone and the accept/deny
+    -- helpers recognise forms by.
+    --
+    -- Two paths: the message is in our record -- its name leads; it is not
+    -- (deleted before the request came, or never arrived) -- the form is
+    -- named by the attachment alone, says so in its text, and the log says
+    -- so too, rather than quietly looking like the ordinary case.
+    --
+    -- On collision (same name already in inbox or tracked by another
     -- pending entry), append a short att_id prefix to disambiguate.
     local base = filename ~= "" and filename or "attachment"
+    local attached_to
+    if message_name then
+        base = message_name .. "-" .. base
+        attached_to = message_name
+    else
+        attached_to = "a message that is not in this mailbox's records (id "
+            .. tostring(data.message_id) .. ")"
+        log("attachment request from %s: %s belongs to message %s, which is not in the inbox record; "
+            .. "form named by the attachment alone", sender, filename, tostring(data.message_id))
+    end
     local consent_file = sanitize_filename(base .. "-consent-to-download-form")
     local function name_in_use(name)
         if file_exists(INBOX .. "/" .. name) then return true end
@@ -3568,12 +3604,13 @@ local function handle_attachment_request(data, sender)
     end
     write_file(INBOX .. "/" .. consent_file, string.format(
         "%s wants to send you an attachment.\n\n" ..
+        "  Attached to:   %s\n" ..
         "  File:          %s\n" ..
         "  Expected size: %s\n" ..
         "  Available:     %s on this drive\n" ..
         "  After:         %s remaining%s\n\n" ..
         "Delete one line and leave your choice behind for the system to read:\n\naccept\ndeny",
-        sender, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
+        sender, attached_to, filename, fmt_bytes(expected_size), fmt_bytes(avail), fmt_bytes(after), pct_str))
 
     pending[att_id] = {
         inbox_file  = consent_file,
@@ -3588,7 +3625,6 @@ local function handle_attachment_request(data, sender)
     -- from it never reaches the phone.  `consent` marks it as a form rather
     -- than mail: deleting it declines rather than notifying the sender of
     -- a deleted message, and it leaves inbox.json with the form itself.
-    local inbox_state = load_state("inbox.json")
     inbox_state[consent_file] = {
         ["from"] = sender, message_id = "consent-" .. att_id, consent = att_id,
     }

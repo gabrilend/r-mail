@@ -93,14 +93,14 @@ run_case() {
     wait "$_pid" 2>/dev/null
 }
 
-make_mailbox "$WORK/default"  logdefault  59391
-make_mailbox "$WORK/explicit" logexplicit 59392 "log_file = \"$WORK/explicit-chosen.log\""
-make_mailbox "$WORK/none"     lognone     59393 'log_file = ""'
+make_mailbox "$WORK/default"  logdefault  59385
+make_mailbox "$WORK/explicit" logexplicit 59386 "log_file = \"$WORK/explicit-chosen.log\""
+make_mailbox "$WORK/none"     lognone     59387 'log_file = ""'
 
 echo "running three mailboxes at once (up to ${DEADLINE_SECONDS}s)"
-run_case default  59391 &
-run_case explicit 59392 &
-run_case none     59393 &
+run_case default  59385 &
+run_case explicit 59386 &
+run_case none     59387 &
 wait
 
 echo ""

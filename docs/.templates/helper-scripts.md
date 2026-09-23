@@ -69,7 +69,9 @@ helpers/rto.sh ~/mail/outbox/hello carol
 ## raccept.sh — accept a package request
 
 When a contact wants to send you an attachment, a consent file appears in
-your inbox (e.g. `photo-consent-to-download-form`). This script accepts the
+your inbox, named after the message and then the attachment (e.g.
+`beach-day-photo.jpg-consent-to-download-form` for `photo.jpg` attached to
+`beach-day`). This script accepts the
 request by removing the `deny` line, leaving only `accept` for the daemon to
 pick up on the next sync cycle.
 
@@ -80,7 +82,7 @@ helpers/raccept.sh <consent-file>
 **Example:**
 
 ```sh
-helpers/raccept.sh ~/mail/inbox/photo-consent-to-download-form
+helpers/raccept.sh ~/mail/inbox/beach-day-photo.jpg-consent-to-download-form
 ```
 
 ---
