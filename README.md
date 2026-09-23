@@ -193,7 +193,7 @@ alice.local-ip = 192.168.1.10
 
 The unindexed `ip`/`port` is the default — always tried first. Indexed entries are tried after the default, in order. A missing `port[N]` inherits the default `port`. When a non-default address succeeds after the default fails, the daemon automatically reorders the indexed entries so the working address is tried first next time (the default is never reordered).
 
-`local-ip` (and `local-ip[N]`) holds a contact's private LAN addresses — 10.x, 172.16–31.x, 192.168.x. They are tried *before* everything else, but only when your own LAN address shares their /24; private ranges are reused on every network, so from anywhere else they would name some other device. A public address in `local-ip` is ignored with a warning. Local addresses use the contact's default `port`.
+`local-ip` (and `local-ip[N]`) holds addresses that reach the contact only from inside their own network, such as their address on your shared home wifi; `ip` holds addresses that reach them from anywhere. rmail never decides which is which from the digits (private ranges are reused on every network, and carrier NAT hands out private-looking public addresses); it goes by where you filed each one. Local addresses are tried *before* everything else, but only when your own LAN address shares their /24, since from any other network the same address would name some other device. Local addresses use the contact's default `port`. Your daemon sends its own local address only to contacts you have given a `local-ip`.
 
 ## Ports
 

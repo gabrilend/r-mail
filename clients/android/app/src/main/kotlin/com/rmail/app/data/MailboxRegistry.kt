@@ -25,13 +25,6 @@ data class MailboxConfig(
     /** Primary address, for display: the first public one, else the first local one. */
     val host: String get() = hosts.firstOrNull() ?: localHosts.firstOrNull() ?: ""
 
-    /** Private addresses go to [localHosts], everything else to [hosts]. */
-    fun withAddressesSorted(): MailboxConfig {
-        val (priv, pub) = hosts.partition { isPrivateIpv4(it) }
-        return if (priv.isEmpty()) this
-        else copy(hosts = pub, localHosts = (localHosts + priv).distinct())
-    }
-
     val isConfigured: Boolean get() =
         (hosts.isNotEmpty() || localHosts.isNotEmpty()) && token.isNotBlank()
 }
@@ -134,7 +127,7 @@ class MailboxRegistry(private val context: Context) {
         bgSyncIntervalMinutes = obj.optInt("bg_sync_interval", 15),
         notificationDetail = obj.optString("notification_detail", "full"),
         mailboxPath = obj.optString("mailbox_path", "")
-    ).withAddressesSorted()  // a pre-list config may hold a LAN address as its host
+    )
 
     private fun toJson(c: MailboxConfig) = JSONObject().apply {
         put("id", c.id)
@@ -148,18 +141,4 @@ class MailboxRegistry(private val context: Context) {
         put("notification_detail", c.notificationDetail)
         put("mailbox_path", c.mailboxPath)
     }
-}
-
-/** Same ranges as the daemon's is_private_ipv4 (#409). */
-fun isPrivateIpv4(addr: String): Boolean {
-    val parts = addr.split(".")
-    if (parts.size != 4) return false
-    val o = parts.map { it.toIntOrNull() ?: return false }
-    if (o.any { it !in 0..255 }) return false
-    val (a, b) = o
-    return a == 10 || a == 127 ||
-        (a == 192 && b == 168) ||
-        (a == 172 && b in 16..31) ||
-        (a == 169 && b == 254) ||
-        (a == 100 && b in 64..127)
 }

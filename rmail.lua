@@ -570,19 +570,6 @@ end
 -- address-set functions are added further down.
 local addrset = {}
 
--- IPv6 counterpart: ULA (fc00::/7), link-local (fe80::/10) and loopback.
--- Everything else in IPv6 is globally routable, which is the point of it.
-function addrset.private_v6(addr)
-    if not addr or not addr:find(":") then return false end
-    local a = addr:lower():gsub("%%.*$", "")   -- drop a zone id (fe80::1%wlo1)
-    if a == "::1" then return true end
-    local first = tonumber(a:match("^(%x%x?%x?%x?):") or "", 16)
-    if not first then return false end
-    if first >= 0xfc00 and first <= 0xfdff then return true end   -- ULA
-    if first >= 0xfe80 and first <= 0xfebf then return true end   -- link-local
-    return false
-end
-
 -- Do two private IPv4 addresses plausibly share a LAN?  /24 is an
 -- assumption, and it errs toward
 -- "no": a false negative only skips the fast path, whereas a false positive
@@ -1152,9 +1139,8 @@ function contactfile.parse(text)
     end
     -- #409: local-ip / local-ip[N] are the contact's private addresses,
     -- kept apart from `ip` because they are only reachable from inside
-    -- their network.  A public address here is a mistake we refuse rather
-    -- than act on: it would be tried as "same LAN" from anywhere.  The
-    -- older single `lan_ip` field folds in as one more entry.
+    -- their network.  The user's filing is trusted as written.  The older
+    -- single `lan_ip` field folds in as one more entry.
     for cname, c in pairs(contacts) do
         local raw = c._local_ips or {}
         local idxs = {}
@@ -1163,16 +1149,13 @@ function contactfile.parse(text)
         local list, seen = {}, {}
         local function add(v)
             if not v or v == "" or seen[v] then return end
-            if addrset.private_v6(v) then
-                -- same_lan() cannot yet judge an IPv6 prefix, so it would
-                -- never be tried; say so rather than hold it silently.
-                log("warning: %s.local-ip = %s: IPv6 local addresses are not supported yet — ignored",
+            -- Whatever the user filed under local-ip is local; the digits
+            -- are not second-guessed.  Only IPv4 is tried for now, because
+            -- the same-network check (contact_endpoints) compares IPv4
+            -- prefixes -- say so rather than hold an entry that never runs.
+            if not v:match("^%d+%.%d+%.%d+%.%d+$") then
+                log("warning: %s.local-ip = %s: only IPv4 local addresses are tried for now",
                     cname, v)
-                return
-            elseif not is_private_ipv4(v) then
-                log("warning: %s.local-ip = %s is not a private address — ignored (use %s.ip)",
-                    cname, v, cname)
-                return
             end
             seen[v] = true
             list[#list + 1] = v
@@ -1523,49 +1506,39 @@ end
 -- `addrset` itself is declared up with is_private_ipv4.
 
 -- Every address this daemon believes reaches it, best-guess order first,
--- split into two lists: `public` (hostname, public IPv4, global IPv6) and
--- `local` (private IPv4).  Classified by the address itself rather than by
--- which state file it came from -- a "public_ip" that is really CGNAT is
--- not reachable from the internet and must not be announced as if it were.
--- Private IPv6 (ULA, link-local) goes in neither: see load_contacts.
+-- split into `public` and `local` by where each one came from -- never by
+-- its digits.  The public IP is what outside services report the internet
+-- sees; the LAN IP is read off our own network interface.  Private ranges
+-- are reused everywhere (and carrier NAT hands out "private-looking" public
+-- addresses), so the digits cannot say which is which; the source can.
 function addrset.mine(port)
     local pub, loc, seen = {}, {}, {}
-    local function add(addr)
+    local function add(list, addr, kind)
         if not addr or addr == "" or seen[addr] then return end
         seen[addr] = true
-        if is_hostname(addr) then
-            pub[#pub + 1] = {addr = addr, port = port, kind = "hostname"}
-        elseif is_private_ipv4(addr) then
-            loc[#loc + 1] = {addr = addr, port = port, kind = "private"}
-        elseif not addrset.private_v6(addr) then
-            pub[#pub + 1] = {addr = addr, port = port, kind = "public"}
-        end
+        list[#list + 1] = {addr = addr, port = port, kind = kind}
+    end
+    local function state(name)
+        return (read_file(STATE .. "/" .. name) or ""):match("^%s*(.-)%s*$")
     end
     -- A configured hostname goes first: it is the only address that stays
     -- correct across our own IP churn, which is the whole point of having
     -- one.
-    add(config.hostname and (tostring(config.hostname):gsub('^"(.*)"$', '%1')))
-    add((read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$"))
-    add((read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$"))
-    add((read_file(STATE .. "/public_ipv6") or ""):match("^%s*(.-)%s*$"))
+    add(pub, config.hostname and (tostring(config.hostname):gsub('^"(.*)"$', '%1')), "hostname")
+    add(pub, state("public_ip"), "public")       -- what the internet sees us as
+    add(pub, state("public_ipv6"), "ipv6")
+    add(loc, state("lan_ip"), "local")            -- our own network interface
     return pub, loc
 end
 
 -- Is this contact on our LAN?  Decides whether an announcement to them
--- carries our local addresses.  Evidence is any private address we hold
--- for them that shares our /24; a contact we only know by a public address
--- or hostname is treated as remote, and a remote contact has no use for
--- our 192.168.x.x -- worse, on their own network it names someone else.
+-- carries our local addresses.  We know only if we have been told: the
+-- contact has a local-ip, whether the user wrote it or the contact announced
+-- it to us.  Guessing from their addresses' digits was wrong for any network
+-- with a second router in it; a remote contact has no use for our LAN
+-- address, and on their own network it would name someone else.
 function addrset.contact_on_lan(contact)
-    local mine = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
-    if mine == "" then return false end
-    for _, v in ipairs(contact.local_ips or {}) do
-        if addrset.same_lan(v, mine) then return true end
-    end
-    for _, ep in ipairs(contact.endpoints or {}) do
-        if addrset.same_lan(ep.addr, mine) then return true end
-    end
-    return false
+    return contact.local_ips ~= nil and #contact.local_ips > 0
 end
 
 -- Rewrite a contact's local-ip lines to exactly `addrs` (a list of
@@ -1593,14 +1566,13 @@ end
 
 -- Is this an address we are entitled to overwrite on someone else's behalf?
 --
--- Public addresses are ours: we are authoritative about where we are on the
--- internet.  Private addresses are not -- we cannot know whether their route
--- to our LAN address works, and they can.  Hostnames are never touched;
--- re-resolution already handles IP churn invisibly.
+-- Everything in `ip` is a public address by the user's own filing (local
+-- ones live in local-ip), and we are authoritative about where we are on
+-- the internet -- so yes, except hostnames: re-resolution already handles
+-- IP churn invisibly, which is why the user chose one.  (A hostname is told
+-- apart by its syntax, which is certain; the digits of an IP are not.)
 function addrset.ours_to_replace(addr)
-    if is_hostname(addr) then return false end
-    if is_private_ipv4(addr) then return false end
-    return true
+    return not is_hostname(addr)
 end
 
 -- Rewrite a contact's address lines to exactly `addrs`, leaving every other
@@ -2579,32 +2551,28 @@ local function handle_update_address(data, sender)
     -- old "leave a multi-IP contact entirely alone" rule existed because one
     -- address could not say which of N was superseded; a full set can.
     --
-    -- Private addresses are split out into `local-ip` (#409 follow-up).  A
-    -- private address is kept only if it shares our /24: anywhere else it
-    -- names some other device on our own network, not the sender.  Peers
-    -- from #409 phase 1 put their LAN address in `ips`; the same rule sorts
-    -- it into the right place.
-    local my_lan = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
+    -- The sender labels its addresses: `ips` are public, `local_ips` are
+    -- local.  The labels are taken as given -- the sender knows where each
+    -- address came from, and the digits don't say.
     local announced, announced_local, local_seen = {}, {}, {}
-    local function take(addr, port)
-        if type(addr) ~= "string" or addr == "" then return end
-        if is_private_ipv4(addr) then
-            if addrset.same_lan(addr, my_lan) and not local_seen[addr] then
-                local_seen[addr] = true
-                announced_local[#announced_local + 1] = addr
-            end
-        elseif not addrset.private_v6(addr) then
+    local function take_public(addr, port)
+        if type(addr) == "string" and addr ~= "" then
             announced[#announced + 1] = {addr = addr, port = port}
         end
     end
-    -- Accept both the plain-string and {addr,port} forms so an older
-    -- peer's shape cannot crash a newer one.
+    local function take_local(addr)
+        if type(addr) == "string" and addr ~= "" and not local_seen[addr] then
+            local_seen[addr] = true
+            announced_local[#announced_local + 1] = addr
+        end
+    end
+    -- Accept both the plain-string and {addr,port} forms of each entry.
     for _, a in ipairs(type(data.ips) == "table" and data.ips or {}) do
-        if type(a) == "table" then take(a.addr, a.port or new_port)
-        else take(a, new_port) end
+        if type(a) == "table" then take_public(a.addr, a.port or new_port)
+        else take_public(a, new_port) end
     end
     for _, a in ipairs(type(data.local_ips) == "table" and data.local_ips or {}) do
-        if type(a) == "table" then take(a.addr) else take(a) end
+        if type(a) == "table" then take_local(a.addr) else take_local(a) end
     end
 
     -- Local set: ours to replace wholesale -- the sender is the authority

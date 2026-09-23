@@ -819,6 +819,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * "Detect IP" in the Add-address dialog.  The mailbox's own server is
+     * asked first: it knows both its addresses exactly (/api/myaddress).  If
+     * it can't be reached, a public address can still come from asking an
+     * outside service what address this phone's network shows the world --
+     * right for the server only when the phone is on the server's network,
+     * which the note says.  A local address has no such fallback.
+     */
+    suspend fun detectAddress(config: MailboxConfig, local: Boolean): com.rmail.app.ui.screens.DetectedAddress =
+        withContext(Dispatchers.IO) {
+            val info = try { clientFor(config).getMyAddress() } catch (_: Exception) { null }
+            val fromServer = if (local) info?.lanIp else info?.ip
+            when {
+                !fromServer.isNullOrBlank() ->
+                    com.rmail.app.ui.screens.DetectedAddress(fromServer,
+                        "Reported by the server itself.")
+                local ->
+                    com.rmail.app.ui.screens.DetectedAddress(null,
+                        "Couldn't reach the server to ask for its local address.")
+                else -> {
+                    val seen = listOf("https://ifconfig.me/ip", "https://icanhazip.com").firstNotNullOfOrNull { url ->
+                        try { java.net.URL(url).readText().trim().takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+                    }
+                    if (seen != null) com.rmail.app.ui.screens.DetectedAddress(seen,
+                        "Couldn't reach the server, so this is the public IP of the network this phone " +
+                        "is on (asked ifconfig.me). It's the server's only if the phone is on the server's network.")
+                    else com.rmail.app.ui.screens.DetectedAddress(null,
+                        "Couldn't reach the server or ifconfig.me.")
+                }
+            }
+        }
+
     /** Answer a consent form on the server, then sync so the answer goes out. */
     fun answerConsent(filename: String, answer: String, onResult: (Boolean) -> Unit) {
         val config = activeConfig ?: run { onResult(false); return }

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -135,7 +136,10 @@ fun InboxScreen(
     val syncError by vm.syncError.collectAsState()
     val outboxFiles by vm.outboxFiles.collectAsState()
     val attachments by vm.attachments.collectAsState()
-    var currentPanel by remember { mutableStateOf(if (initialShowOutbox) Panel.OUTBOX else Panel.INBOX) }
+    // Saveable, so opening a message and coming back returns to the tab it
+    // was opened from.  Plain remember was dropped when the read screen
+    // replaced this one, and Back always landed on the inbox.
+    var currentPanel by rememberSaveable { mutableStateOf(if (initialShowOutbox) Panel.OUTBOX else Panel.INBOX) }
 
     // Compose draft state in RAM
     var draftRecipients by remember { mutableStateOf(listOf("")) }
@@ -1295,11 +1299,7 @@ private fun SettingsPanel(
         if (activeConfig != null) {
             val cleanHosts = cleanAddressList(hosts)
             val cleanLocal = cleanAddressList(localHosts)
-            // Refuse rather than drop: a silently discarded address is one
-            // the user thinks is configured and is not.
-            if (cleanHosts.any { publicAddressError(it) != null } ||
-                cleanLocal.any { localAddressError(it) != null } ||
-                (cleanHosts.isEmpty() && cleanLocal.isEmpty())) {
+            if (cleanHosts.isEmpty() && cleanLocal.isEmpty()) {
                 showAddressErrors = true
                 return@save
             }
@@ -1347,23 +1347,21 @@ private fun SettingsPanel(
                 addresses = hosts,
                 onChange = { hosts = it; markModified() },
                 placeholder = "203.0.113.5 or host.example.com",
-                showErrors = showAddressErrors,
-                validate = ::publicAddressError,
             )
             AddressListEditor(
                 title = "Local addresses (same network only)",
                 addresses = localHosts,
                 onChange = { localHosts = it; markModified() },
                 placeholder = "192.168.1.10",
-                showErrors = showAddressErrors,
-                validate = ::localAddressError,
             )
-            AddAddressButton { addr ->
-                if (com.rmail.app.data.isPrivateIpv4(addr)) {
-                    if (addr !in localHosts) localHosts = localHosts + addr
-                } else if (addr !in hosts) hosts = hosts + addr
-                markModified()
-            }
+            AddAddressButton(
+                detect = { local -> vm.detectAddress(activeConfig, local) },
+                onAdd = { addr, local ->
+                    if (local) { if (addr !in localHosts) localHosts = localHosts + addr }
+                    else if (addr !in hosts) hosts = hosts + addr
+                    markModified()
+                }
+            )
             if (showAddressErrors && cleanAddressList(hosts).isEmpty() && cleanAddressList(localHosts).isEmpty()) {
                 Text("At least one address is required", color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall)

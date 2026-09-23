@@ -9,7 +9,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.rmail.app.data.isPrivateIpv4
+import kotlinx.coroutines.launch
 
 /**
  * An editable list of server addresses.  Each row has a `−` that asks
@@ -18,8 +18,8 @@ import com.rmail.app.data.isPrivateIpv4
  * which files the address into the right list itself.  Deliberately not
  * reorderable -- the first public address is the primary.
  *
- * [validate] returns an error message for a bad entry, or null.  Blank rows
- * are not errors; they are dropped on save.
+ * Blank rows are dropped on save.  Nothing is validated against the digits:
+ * which list an address belongs in is the user's call (see AddAddressButton).
  */
 @Composable
 fun AddressListEditor(
@@ -27,8 +27,6 @@ fun AddressListEditor(
     addresses: List<String>,
     onChange: (List<String>) -> Unit,
     placeholder: String,
-    showErrors: Boolean,
-    validate: (String) -> String? = { null },
 ) {
     var confirmRemove by remember { mutableStateOf<Int?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -38,15 +36,12 @@ fun AddressListEditor(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
         }
         addresses.forEachIndexed { i, addr ->
-            val error = if (showErrors && addr.isNotBlank()) validate(addr.trim()) else null
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = addr,
                     onValueChange = { v -> onChange(addresses.toMutableList().also { it[i] = v.trim() }) },
                     placeholder = { Text(placeholder) },
                     singleLine = true,
-                    isError = error != null,
-                    supportingText = error?.let { { Text(it) } },
                     modifier = Modifier.weight(1f)
                 )
                 IconButton(onClick = {
@@ -76,16 +71,32 @@ fun AddressListEditor(
     }
 }
 
+/** What "Detect IP" found: the address, and a line saying where it came from. */
+data class DetectedAddress(val address: String?, val note: String)
+
 /**
  * Full-width "Add new IP address" button, placed below both address lists.
- * Asks for the address, then [onAdd] files it: a private address goes to
- * the local list, anything else to the server list.
+ * The user says which kind of address it is with the Public / Local switch;
+ * nothing is inferred from the digits.  (Private ranges are reused on every
+ * network, and a "private-looking" address can be the right public one
+ * behind carrier NAT, so the digits cannot say which list an address
+ * belongs in -- only the user knows.)
+ *
+ * [detect] fills the field with an address of the chosen kind; it is added
+ * only when the user taps Add.
  */
 @Composable
-fun AddAddressButton(onAdd: (String) -> Unit) {
+fun AddAddressButton(
+    detect: suspend (local: Boolean) -> DetectedAddress,
+    onAdd: (address: String, local: Boolean) -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf("") }
-    OutlinedButton(onClick = { text = ""; open = true }, modifier = Modifier.fillMaxWidth()) {
+    var local by remember { mutableStateOf(false) }
+    var detecting by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    OutlinedButton(onClick = { text = ""; note = null; open = true }, modifier = Modifier.fillMaxWidth()) {
         Icon(Icons.Default.Add, contentDescription = null)
         Spacer(Modifier.width(8.dp))
         Text("Add new IP address")
@@ -96,25 +107,49 @@ fun AddAddressButton(onAdd: (String) -> Unit) {
             title = { Text("Add address") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Public", style = MaterialTheme.typography.bodyMedium,
+                            color = if (!local) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                        Switch(checked = local, onCheckedChange = { local = it; note = null })
+                        Text("Local", style = MaterialTheme.typography.bodyMedium,
+                            color = if (local) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    }
+                    Text(
+                        if (local) "Reachable only from the server's own network, e.g. its address on your home wifi."
+                        else "Reachable from anywhere: a public IP or a hostname.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     OutlinedTextField(
                         value = text,
-                        onValueChange = { text = it.trim() },
-                        placeholder = { Text("203.0.113.5, host.example.com or 192.168.1.10") },
+                        onValueChange = { text = it.trim(); note = null },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text(
-                        if (text.isBlank()) "Private (LAN) addresses go under local addresses; " +
-                            "everything else under server addresses."
-                        else if (isPrivateIpv4(text)) "Will be added as a local address."
-                        else "Will be added as a server address.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    OutlinedButton(
+                        onClick = {
+                            detecting = true
+                            scope.launch {
+                                val found = detect(local)
+                                found.address?.let { text = it }
+                                note = found.note
+                                detecting = false
+                            }
+                        },
+                        enabled = !detecting,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (detecting) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        else Text(if (local) "Detect local IP" else "Detect public IP")
+                    }
+                    note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
             },
             confirmButton = {
                 TextButton(enabled = text.isNotBlank(), onClick = {
-                    onAdd(text); open = false
+                    onAdd(text, local); open = false
                 }) { Text("Add") }
             },
             dismissButton = { TextButton(onClick = { open = false }) { Text("Cancel") } }
@@ -125,18 +160,3 @@ fun AddAddressButton(onAdd: (String) -> Unit) {
 /** Blank rows out, duplicates out, order kept. */
 fun cleanAddressList(list: List<String>): List<String> =
     list.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-
-/**
- * Error for an entry in the local-address list, or null if it is fine.
- * Mirrors the daemon's rule (#409): local means private IPv4, because a
- * private address is only reachable from inside its own network.
- */
-fun localAddressError(addr: String): String? =
-    if (isPrivateIpv4(addr)) null else "Must be a private IPv4 address (10.x, 172.16–31.x, 192.168.x)"
-
-/**
- * Error for an entry in the public-address list.  Private addresses belong
- * in the local list, where they are only tried briefly.
- */
-fun publicAddressError(addr: String): String? =
-    if (isPrivateIpv4(addr)) "Private address — add it under local addresses" else null

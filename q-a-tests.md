@@ -668,3 +668,14 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Uninstalling the remembered app brings the chooser back
 - [x] Files action bars (Delete / Forward / Save) sit above the list; the first file stays visible (seen on device)
 
+### No guessing public/private from digits — 2026-09-23
+
+- [x] `local-ip` holding a public-looking address is kept (harness)
+- [x] Own addresses split by source: a CGNAT-looking public_ip is announced as public, lan_ip as local (harness)
+- [x] A contact counts as on-LAN only if we hold a local-ip for it (harness)
+- [x] Announced `ips` labelled public are stored as ip even if they look private; `local_ips` stored as local-ip regardless of /24 (harness)
+- [ ] Android Add address: Public/Local switch files the address where chosen; no placeholder text; no save refusal based on digits
+- [ ] Android Add address: "Detect public IP" / "Detect local IP" fill the field from the server's /api/myaddress (note says so); with the server unreachable, public falls back to ifconfig.me with a note, local says it can't
+- [ ] Setup: Public/Local switch; LAN scan result sets Local
+- [ ] Outbox → open a message → Back returns to Outbox; Inbox → open → Back returns to Inbox
+
