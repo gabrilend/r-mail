@@ -88,7 +88,8 @@ jump around.
 - [ ] `remove_recipient_from_file` and `remove_attach_from_file` use the same blank-tolerant scanning rule — no orphan `attach:` lines left behind after a to: is removed
 - [ ] `attach:` path pointing to a non-existent file: daemon logs `attach: file not found: <path>` with the outbox filename, and inserts a `// MISSING ATTACHMENT:` marker line below the offending attach
 - [ ] Marker not duplicated on subsequent sync cycles (same `attach:` line, same missing file → one marker)
-- [ ] User fixing the path (making the file exist) lets the attachment proceed on the next sync cycle; stale `//` marker stays in the file until the user removes it
+- [ ] User fixing the path (making the file exist) lets the attachment proceed on the next sync cycle, and the daemon removes the `//` marker itself (log: `attach: found <path>, cleared its missing-attachment marker`) — on a message not yet delivered and on one already delivered
+- [ ] The same for a path written with `~` and for a path in quotes (`attach: "~/with space.jpg"`): marker names the expanded path without quotes; the quotes stay on the user's line
 - [ ] The fix does NOT reformat or remove blank lines the user intentionally put in their outbox file — file-on-disk only changes when glob expansion (#362) or a #363 marker needs to be written
 
 ### `attach:` glob expansion (#362)

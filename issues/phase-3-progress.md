@@ -32,6 +32,17 @@ Issues closed are listed here as they close, newest first, with one line
 on what they gave the project.  Earlier phase-3 issues were closed before
 this file existed; `issues/completed/3*.md` holds all of them.
 
+- **2026-09-23 — #362 wildcards in `attach:` lines** and **#363 outbox
+  header robustness.**  `attach: ~/pics/*.jpg` becomes one line per file;
+  blank lines inside the header, quoted paths and `~` paths all read the
+  same way; a missing file gets a note in the outbox file that clears
+  itself when the file appears.  Three defects found while closing them
+  were fixed first; covered by `scripts/test-outbox-headers.sh`.
+- **2026-09-23 — #381 one service per mailbox.**  Several mailboxes on
+  one machine each get their own service, named after the mailbox or
+  chosen with `--service-name`; the log viewer and ignore rules follow
+  any name.  Parts of it were later replaced by #382 (the mailbox is the
+  installation), recorded step by step in the issue.
 - **2026-09-23 — #391 attachment pipeline audit.**  Phone uploads can no
   longer ship a half-written message; consent forms reach the phone and
   are answered from it; a failed request keeps its zip instead of
