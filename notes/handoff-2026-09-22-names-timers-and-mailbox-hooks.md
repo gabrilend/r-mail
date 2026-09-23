@@ -30,6 +30,13 @@ services (`kuvalu-mail` on 8025 for `~/mail`, `kuvalu-notes` on 8026 for
   "consent granted by sorelu for victory-garden.jpg".  A file-exists check
   is handed a nil path somewhere in the attachment path.  Not investigated
   further; likely #391 territory.  Check whether it survives the restart.
+  **Resolved 2026-09-23.**  It survived the restart (over a million lines).
+  Cause: an April transfer record from before the #348 revert, carrying a
+  zip_id and no compressed_path, reached the chunk sender once sorelu
+  consented.  Fixed in code, covered by
+  `scripts/test-stale-transfer-records.sh`; the record was removed from
+  `~/mail/.state/` and `outbox/atch-test` deleted (its deletion notice
+  waits for sorelu to be reachable).  The picture itself was kept.
 
 ## Open, outside this repository (the owner's two mailboxes)
 

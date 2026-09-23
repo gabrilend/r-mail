@@ -298,7 +298,12 @@ local function write_file_binary(path, content)
     return true
 end
 
+-- A missing path is a caller's bug, not a file that doesn't exist, so it
+-- errors rather than answering "no".  Level 2 puts the caller's line in
+-- the message; without it every such bug reports this line and the log
+-- says nothing about where the missing path came from.
 local function file_exists(path)
+    if path == nil then error("file_exists: no path given", 2) end
     local f = io.open(path, "r")
     if f then f:close(); return true end
     return false
@@ -4221,7 +4226,18 @@ local function send_next_chunks(my_name)
             goto continue
         end
         local zip_path = transfer.compressed_path
-        if not file_exists(zip_path) then
+        -- Records written before the #348 revert (April 2026) name their
+        -- zip by a zip_id and carry no compressed_path at all.  That zip
+        -- lived in /tmp and is long gone, so the record is in exactly the
+        -- state the branch below exists for: no zip, rebuild from source.
+        -- Such a record can sit untouched for months while it waits for
+        -- consent, so this is reached whenever the consent finally comes.
+        if zip_path == nil then
+            log("chunk transfer: %s was recorded by an older version with no compressed copy on file", att_id)
+            transfer.zip_id = nil
+            changed = true
+        end
+        if zip_path == nil or not file_exists(zip_path) then
             -- The compressed zip lives in /tmp and can be wiped (e.g. a
             -- reboot) while a transfer waits for consent.  Rebuild it from
             -- the original source rather than dropping the transfer: the
