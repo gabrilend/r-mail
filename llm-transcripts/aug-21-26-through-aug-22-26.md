@@ -1,6 +1,6 @@
 # Conversation Summary: 2999f211-36c4-49ff-83f2-6e02bc2325f1
 
-Generated on: 2026-09-21 18:40:31
+Generated on: 2026-09-26 13:27:13
 Models: claude-opus-5
 
 --------------------------------------------------------------------------------
@@ -317,8 +317,12 @@ commits.
 
 > Exactly my four files staged. Writing the commit message:
 
+*[commit] a3d4d96 - Adopt AGPL-3.0-or-later, with the event scripts carved out*
+
 > Now the transcripts, kept as their own commit so the licensing record stays
 > clean:
+
+*[commit] b6c486f - Begin keeping the session transcripts in the tree*
 
 Both commits are in and the working tree is clean.
 
@@ -416,6 +420,10 @@ That sounds like a disaster waiting to happen.
 > That reasoning is worth leaving in the code, because "this warning should
 > really be fatal" is exactly the kind of thing a future reader talks themselves
 > into. Recording it so the decision doesn't get quietly reversed:
+
+*[commit] c61d4d9 - Record why a missing upstream notice only warns*
+
+*[commit] c478ab4 - Extend today's transcript through the licensing decisions*
 
 Behaviour unchanged, all twenty checks still pass, tree clean.
 

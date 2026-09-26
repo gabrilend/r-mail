@@ -37,3 +37,6 @@ clients/android/build/
 # Generated docs (source of truth is docs/.templates/)
 docs/*.md
 !docs/looking-for-docs.md
+
+# Conversation pages, rebuilt before every push (install-pages-hook)
+**/llm-transcripts/HTML/

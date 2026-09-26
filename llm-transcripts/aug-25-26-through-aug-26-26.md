@@ -1,7 +1,38 @@
 # Conversation Summary: 54098c7a-8a79-4a9c-a512-d2af52806693
 
-Generated on: 2026-09-16 18:00:18
+Generated on: 2026-09-26 12:48:03
 Models: claude-opus-5
+
+## Contents
+
+1. 2026-08-25 10:33, after Request 2 - Goal is running two rmail mailboxes side
+   by side, but the second install overwrote the first's runit service. Next
+   action is your call: restore both services as separately named units, or
+   write the issue file first.
+2. 2026-08-25 10:46, after Request 3 - You're setting up a second r-mail
+   mailbox, and both mailboxes are currently down because their runit services
+   have no run scripts yet. Next: run the four sudo commands I gave you to
+   install the scripts from the scratchpad.
+3. 2026-08-25 14:09, after Request 4 - Goal is running two rmail mailboxes side
+   by side; both are currently down because their runit service directories have
+   no run scripts. Next: run the four sudo cp/chmod commands to install the
+   scripts waiting in the scratchpad.
+4. 2026-08-26 10:35, after Request 7 - Goal is running two rmail mailboxes on
+   this machine; right now both are down because their startup scripts aren't
+   installed yet. Next: run the four sudo commands I posted to copy the two run
+   scripts into place and make them executable.
+5. 2026-08-26 11:10, after Request 9 - Goal is making r-mail support multiple
+   mailboxes cleanly. Both your daemons are running now; next action is running
+   the seven sudo commands to rename the services to kuvalu-mail and
+   kuvalu-notes. After that I'll write the revised plan into the issue file.
+6. 2026-08-26 11:20, after Request 10 - Goal: fix the installer so multiple
+   mailboxes don't collide. Both your mailboxes are now running fine as
+   kuvalu-mail and kuvalu-notes. Next: I write the revised plan into the issue
+   file, once you answer the convergence-versus-receipts question.
+7. 2026-08-26 11:37, after Request 12 - Your two mailboxes are running fine as
+   kuvalu-mail and kuvalu-notes, and we're working through the installer fixes
+   recorded in issue 377. Next up is writing the revised plan and design
+   decisions into that issue file.
 
 --------------------------------------------------------------------------------
 
