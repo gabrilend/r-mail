@@ -6783,6 +6783,45 @@ local function init_runtime()
 
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
+
+    -- Which of dkjson's two decoders this run is on (#403).  dkjson decides
+    -- by itself, once, while loading: it tries to switch to its LPeg decoder
+    -- (LPeg is a C text-matching library; faster on large texts) and stays
+    -- on its plain-Lua decoder if that fails.  Both give the same tables for
+    -- the same text (scripts/test-json-decoders.sh checks this), so the
+    -- choice changes speed, not meaning.  It used to be made in silence,
+    -- which hid a broken version check; now it is logged once, here.
+    --
+    -- LPeg is not an rmail dependency (not in DEPS_REGISTRY, never installed
+    -- by scripts/install.sh), so its absence is a plain statement, not an
+    -- error.  LPeg present but unused is the fallback-for-a-wrong-reason
+    -- case, so it is worded as a warning; the daemon still starts, since
+    -- every decode comes out the same either way.
+    --
+    -- Written as a function local to this start-up block, not at file level:
+    -- the file's top level is at Lua's limit of 200 local names, and one
+    -- more there stops the whole file from compiling.
+    -- {{{ describe_json_decoder
+    local function describe_json_decoder(json_module)
+        -- The switch worked: LPeg is doing the decoding.  LPeg 0.x keeps its
+        -- version behind a function, 1.x as a string; show either as text.
+        if json_module.using_lpeg then
+            local v = package.loaded.lpeg.version
+            if type(v) == "function" then v = v() end
+            return "json decoder: LPeg (" .. tostring(v) .. ")"
+        end
+        -- LPeg loaded (dkjson's require of it succeeded, so it sits in the
+        -- table of loaded modules) but dkjson refused or failed to use it.
+        if package.loaded.lpeg then
+            return "warning: json decoder: plain Lua, although LPeg is installed: "
+                .. tostring(json_module.lpeg_unused_reason)
+        end
+        -- LPeg could not be loaded by this Lua at all.
+        return "json decoder: plain Lua (LPeg is not installed for " .. _VERSION .. ")"
+    end
+    -- }}}
+    log("%s", describe_json_decoder(json))
+
     log("AES-256-GCM encryption enabled")
 
     -- Watch outbox and contacts for changes — triggers immediate sync via inotify

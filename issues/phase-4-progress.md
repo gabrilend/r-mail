@@ -27,4 +27,13 @@ runs, new issues that do not fit elsewhere continue here.
 
 ## Completed
 
-None yet.
+Newest first, with one line on what each gave the project.
+
+- **2026-09-29 — #403 the JSON library's choice of decoder is no longer
+  silent.**  The bundled dkjson's switch to its faster LPeg decoder
+  crashed on every modern LPeg and fell back to plain Lua without a word;
+  it now works with old and new LPeg, keeps the reason when it does not
+  switch, and the daemon logs which decoder it is on at start-up.  An
+  absent LPeg is stated, not an error (LPeg is not an rmail dependency).
+  Covered by `scripts/test-json-decoders.sh`.  Filed here only because
+  phase 3 is full; it moves with start-up and dependencies under #402.

@@ -600,7 +600,16 @@ end
 function json.use_lpeg ()
   local g = require ("lpeg")
 
-  if g.version() == "0.11" then
+  -- rmail change, 2026-09-29 (rmail issue #403): LPeg 0.x exposes
+  -- `version` as a function, LPeg 1.0 and later as a plain string
+  -- ("LPeg 1.1.0").  The original line called it unconditionally, which
+  -- raised on every modern LPeg; the pcall at the bottom of this file
+  -- swallowed that and dkjson quietly stayed on the plain Lua decoder.
+  -- Only a function-valued version can be the buggy 0.11, so only that
+  -- one is called and compared.
+  local lpeg_version = g.version
+  if type (lpeg_version) == "function" then lpeg_version = lpeg_version () end
+  if lpeg_version == "0.11" then
     error "due to a bug in LPeg 0.11, it cannot be used for JSON matching"
   end
 
@@ -706,8 +715,14 @@ function json.use_lpeg ()
   return json -- so you can get the module using json = require "dkjson".use_lpeg()
 end
 
+-- rmail change, 2026-09-29 (rmail issue #403): the original discarded
+-- this pcall's result, so the reason LPeg was not used (not installed,
+-- the 0.11 refusal, or a bug like the version check above) was lost.
+-- It is kept in json.lpeg_unused_reason so the caller can say which
+-- decoder it is on and why.  Nil when LPeg is in use.
 if always_try_using_lpeg then
-  pcall (json.use_lpeg)
+  local lpeg_ok, lpeg_err = pcall (json.use_lpeg)
+  if not lpeg_ok then json.lpeg_unused_reason = tostring (lpeg_err) end
 end
 
 return json
