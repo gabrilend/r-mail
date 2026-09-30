@@ -5,7 +5,14 @@
 Open, 2026-09-29.  Numbered in phase 4 because phase 3 is full (see
 `phase-4-progress.md`); it belongs with attachments when #402 re-sorts
 the phases.  The owner approved every fix below on 2026-09-29 ("yes,
-everything that you mentioned").
+everything that you mentioned"); #404e was found during the work and
+added.
+
+Done: #404a, #327 (reopened and closed), #404b, #404d, #404e — each with
+its own test, all passing.  Open: #404c, whose daemon side is done and
+tested but whose phone-app change has not been built (no Android SDK on
+the machine it was written on).  Until the new app is installed, phone
+uploads are refused.
 
 ## Current Behavior
 
@@ -17,8 +24,9 @@ extracts it into an `extract/` folder there, and files each entry into
 `attachments/`.  The phone can read anything in `attachments/` through
 `/api/attachments/<name>`, and the `on_package` hook is handed the path.
 
-A read of this path on 2026-09-29 found that it trusts the sender in
-several places where it should not:
+Every point below is now checked; the sub-issues describe how.  The
+list is kept as the record of what a read of this path on 2026-09-29
+found it trusting:
 
 1. **Symbolic links.**  A zip can hold a link entry; `unzip` recreates it.
    A link named `photo` pointing at `~/.ssh/id_rsa` is filed into
@@ -73,13 +81,30 @@ handler, so they go one after the other.
 
 ## Suggested Implementation Steps
 
-1. Build a stand-in contact for tests, `scripts/lib/fake-contact.lua`,
-   that speaks rmail's encrypted request format with a shared key, so a
-   test can send a real daemon things no honest daemon would.
-2. Complete the sub-issues in the order above, each with its own test
-   script and commit.
-3. `docs/attachments.md`: a section on what a received attachment is not
-   allowed to do.
+1. A stand-in contact for tests, `scripts/lib/fake-contact.lua`, that
+   speaks rmail's encrypted request format with a shared key, so a test
+   can send a real daemon things no honest daemon would; shared set-up for
+   such tests in `scripts/lib/test-receiver.sh`.  Done.
+2. The sub-issues in the order above, each with its own test script and
+   commit.  Done except the phone build in #404c.
+3. A control test, `scripts/test-attachment-round-trip.sh`: an honest
+   attachment between two real daemons still arrives.  Done.
+4. `docs/.templates/attachments.md` (the tracked source of
+   `docs/attachments.md`): "What a received attachment is not allowed to
+   do".  Done.
+
+## Tests
+
+    scripts/test-received-links.sh           #404a
+    scripts/test-unpacked-size.sh            #327
+    scripts/test-chunk-rules.sh              #404b
+    scripts/test-phone-upload-checks.sh      #404c (daemon side)
+    scripts/test-torn-pack.sh                #404d
+    scripts/test-attachment-ids-and-consent.sh  #404e
+    scripts/test-attachment-round-trip.sh    control: an honest transfer
+
+Each builds its own throwaway mailboxes under `/tmp/rmail/tests/` on its
+own port, so they can run together.
 
 ## Related
 

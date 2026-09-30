@@ -29,6 +29,15 @@ runs, new issues that do not fit elsewhere continue here.
 
 Newest first, with one line on what each gave the project.
 
+- **2026-09-29 — #404e attachment ids are checked, and nothing is taken
+  before the owner's yes.**  A contact chose the id that names a
+  transfer's folder, which is later removed with `rm -rf`; an id climbing
+  out with `../` pointed that at folders outside rmail's.  Only rmail's own
+  id shape is taken now, and a piece sent before the owner accepts is
+  refused.  Covered by `scripts/test-attachment-ids-and-consent.sh`.
+  Still open under #404: #404c (phone uploads) waits on building the
+  Android app.
+
 - **2026-09-29 — #404d a file written to while it is packed is packed
   again, not sent torn.**  Each file's size and modification time are
   taken before and after zip reads it; any difference throws the zip away

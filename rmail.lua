@@ -3476,6 +3476,15 @@ end
 -- to the code they serve.
 local upload = {}
 
+-- {{{ upload.valid_attachment_id
+-- True for an id shaped like the ones uuid() makes: hex digits and dashes,
+-- 8 to 64 characters.  A contact chooses the ids of the attachments it
+-- sends, and the receiver names a folder after each one (#404e).
+function upload.valid_attachment_id(id)
+    return type(id) == "string" and #id >= 8 and #id <= 64 and id:match("^[%x%-]+$") ~= nil
+end
+-- }}}
+
 -- {{{ upload.fingerprint
 -- One line per file and folder under `path` (or `path` itself when it is a
 -- file): its name, size in bytes and modification time to the fraction of
@@ -3589,6 +3598,13 @@ local function handle_attachment_request(data, sender)
     local expected_size = tonumber(data.expected_size)
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
+    -- The id becomes a folder name under the pending folder, and that
+    -- folder is later removed with rm -rf.  An id like ../../home/you would
+    -- reach outside it, so only the shape rmail's own ids have is taken
+    -- (#404e).
+    if not upload.valid_attachment_id(att_id) then
+        return 400, {error = "attachment_id must be 8 to 64 hex digits and dashes"}
+    end
     -- The declared size is what both size limits are built from (#327),
     -- so it must be a real byte count.  Missing or not a whole number:
     -- refused.  It used to be read as 0 when missing, and 0 used to mean
@@ -4274,6 +4290,10 @@ local function handle_attachment_chunk(data, sender)
     if not att_id or not data.data then
         return 400, {error = "missing required fields"}
     end
+    -- The id names a folder; see handle_attachment_request (#404e).
+    if not upload.valid_attachment_id(att_id) then
+        return 400, {error = "attachment_id must be 8 to 64 hex digits and dashes"}
+    end
     -- Every claim in the chunk is checked before it is used (#404b).
     -- Chunk number and count: whole numbers, 0 <= index < count.
     if not upload.whole_number(total_chunks) or total_chunks < 1
@@ -4299,6 +4319,17 @@ local function handle_attachment_chunk(data, sender)
     local filename = cpe.filename  -- sanitized at request time
     if cpe.status == "cancel_pending" then
         return 200, {ok = false, cancelled = true}
+    end
+    -- Nothing is taken before the owner says yes (#404e).  "accepted": the
+    -- answer is recorded and on its way to the sender; "receiving": it
+    -- arrived.  Any other state -- still "pending" an answer, or
+    -- "declined" -- refuses the piece without writing anything.  This
+    -- used to let a contact send the whole attachment before the owner
+    -- answered, and it was filed.
+    if cpe.status ~= "accepted" and cpe.status ~= "receiving" then
+        log("chunk for %s from %s refused: the owner has not accepted it (status %s)",
+            filename, sender, tostring(cpe.status))
+        return 403, {error = "no consent for this attachment"}
     end
 
     local pending_dir = paths.pending .. "/.pending/" .. att_id

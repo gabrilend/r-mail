@@ -144,6 +144,11 @@ receiving daemon checks it before anything reaches `attachments/`:
   complete.  The zip must hold exactly one regular file, and if unzip
   cannot unpack it the upload is refused rather than filed half-done.
   (#404c)
+- **Nothing before your yes, and no strange ids.**  A piece that arrives
+  while the consent form is still unanswered (or after you declined) is
+  refused and nothing is written.  The id a contact gives an attachment
+  names a folder on your drive, so only ids shaped like rmail's own (hex
+  digits and dashes) are taken.  (#404e)
 
 ### In-progress visibility
 
