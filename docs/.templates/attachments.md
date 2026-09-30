@@ -124,6 +124,14 @@ receiving daemon checks it before anything reaches `attachments/`:
   extracted folder is searched for links; finding any refuses the whole
   transfer.  The phone is never served a link from `attachments/`, even
   one you made by hand.  (#404a)
+- **No piece without its checksums, and no changing the count.**  Every
+  piece must carry the SHA-256 of itself and of the whole zip.  How many
+  pieces there are, the whole zip's checksum and the length of a piece are
+  fixed when piece 0 arrives; a later piece that disagrees is not stored,
+  and the receiver asks for piece 0 again (which is also how a sender that
+  had to pack the file anew starts over).  Every piece but the last must
+  be exactly that length, and pieces smaller than 4 KiB are refused, so a
+  sender cannot declare a vast number of tiny pieces.  (#404b)
 
 ### In-progress visibility
 

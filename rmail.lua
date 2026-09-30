@@ -4180,17 +4180,63 @@ function upload.refuse_transfer(att_id, cpe, cprog, reason)
 end
 -- }}}
 
+-- {{{ upload.whole_number
+-- True for a number with no fractional part that a double holds exactly.
+-- Chunk numbers and counts arrive as JSON numbers from the sender, so
+-- -3, 2.5, 1e300 and inf are all possible and all refused.
+function upload.whole_number(n)
+    return type(n) == "number" and n == math.floor(n) and n >= 0 and n < 2^53
+end
+-- }}}
+
+-- {{{ upload.is_sha256
+-- True for a SHA-256 written the way rmail writes them: 64 hex digits.
+function upload.is_sha256(s)
+    return type(s) == "string" and #s == 64 and s:match("^%x+$") ~= nil
+end
+-- }}}
+
+-- {{{ upload.missing_chunks
+-- The pinned chunk numbers not yet on disk, lowest first.
+function upload.missing_chunks(pending_dir, total_chunks)
+    local missing = {}
+    for i = 0, total_chunks - 1 do
+        if not file_exists(pending_dir .. "/chunk-" .. tostring(i)) then
+            missing[#missing + 1] = i
+        end
+    end
+    return missing
+end
+-- }}}
+
+-- The smallest piece a sender may cut its zip into, the last piece
+-- excepted.  Without a floor, a sender could declare a billion one-byte
+-- pieces and have the receiver count through them on every chunk (#404b).
+-- rmail's own default piece is 5 MiB (attachment_chunk_size).
+upload.MIN_CHUNK_LENGTH = 4096
+
 local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
     local total_chunks = tonumber(data.total_chunks)
     local chunk_checksum = data.chunk_checksum
     local total_checksum = data.total_checksum
-    if not att_id or chunk_index == nil or not total_chunks or not data.data then
+    if not att_id or not data.data then
         return 400, {error = "missing required fields"}
+    end
+    -- Every claim in the chunk is checked before it is used (#404b).
+    -- Chunk number and count: whole numbers, 0 <= index < count.
+    if not upload.whole_number(total_chunks) or total_chunks < 1
+       or not upload.whole_number(chunk_index) or chunk_index >= total_chunks then
+        return 400, {error = "chunk_index and total_chunks must be whole numbers, 0 <= chunk_index < total_chunks"}
+    end
+    -- Both checksums are required.  Their absence used to skip the check.
+    if not upload.is_sha256(chunk_checksum) or not upload.is_sha256(total_checksum) then
+        return 400, {error = "chunk_checksum and total_checksum are required (64 hex digits each)"}
     end
     local raw = mime.unb64(data.data)
     if not raw then return 400, {error = "invalid base64"} end
+    if #raw == 0 then return 400, {error = "empty chunk"} end
 
     -- Require matching request state. Without an attachment_request + user
     -- consent, we have no business accepting or extracting chunks, and we
@@ -4209,72 +4255,91 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(pending_dir))
     local chunk_path = pending_dir .. "/chunk-" .. tostring(chunk_index)
 
-    local valid = not chunk_checksum or sha256_of_bytes(raw) == chunk_checksum
-    if not valid then
-        -- discard bad chunk; it stays missing in the response
+    local limit = upload.size_limit(cpe.expected_size)
+    local pinned = cpe.total_chunks ~= nil
+    local same_shape = pinned and cpe.total_chunks == total_chunks
+                       and cpe.total_checksum == total_checksum
+
+    if sha256_of_bytes(raw) ~= chunk_checksum then
+        -- A damaged piece: dropped, and the answer lists what is still
+        -- owed so the sender sends it again.  Nothing pinned yet: chunk 0
+        -- is what is owed first.
         log("chunk %d checksum mismatch from %s for %s", chunk_index, sender, filename)
-    else
-        -- Enforce the sender's declared expected_size.  Without this check, a
-        -- malicious or buggy sender could advertise a small attachment in the
-        -- consent prompt and then stream arbitrary amounts of data, exhausting
-        -- the recipient's disk after consent was already granted.
-        -- Applies whatever the declared size, 0 included (#327): a declared
-        -- 0 used to switch the check off.  expected_size is always a
-        -- number here -- the request handler refuses anything else.
-        do
-            -- Lazy-initialise bytes_received from any existing on-disk chunks,
-            -- so a transfer started before this check was added gets a correct
-            -- running total the first time it arrives.
-            if cpe.bytes_received == nil then
-                local sum = 0
-                for i = 0, (total_chunks or 0) - 1 do
-                    local f = io.open(pending_dir .. "/chunk-" .. tostring(i), "rb")
-                    if f then
-                        f:seek("end"); sum = sum + f:seek(); f:close()
-                    end
-                end
-                cpe.bytes_received = sum
-            end
-
-            -- If this chunk overwrites an existing one (sender retry), only the
-            -- size delta counts.
-            local existing = 0
-            local f_old = io.open(chunk_path, "rb")
-            if f_old then
-                f_old:seek("end"); existing = f_old:seek(); f_old:close()
-            end
-            local projected = cpe.bytes_received + (#raw - existing)
-
-            local limit = upload.size_limit(cpe.expected_size)
-            if projected > limit then
-                log("oversize transfer from %s: %s declared %s, " ..
-                    "cumulative would reach %s (limit %s) — rejecting",
-                    sender, filename, fmt_bytes(cpe.expected_size),
-                    fmt_bytes(projected), fmt_bytes(limit))
-                os.execute('rm -rf ' .. shell_quote(pending_dir))
-                remove_consent_form(cpe.inbox_file, att_id)
-                cpe.status = "cancel_pending"
-                cpe.rejection_reason = "oversize"
-                cprog[att_id] = cpe
-                save_state("consent-pending.json", cprog)
-                return 200, {ok = false, cancelled = true}
-            end
-
-            cpe.bytes_received = projected
-            cprog[att_id] = cpe
-            save_state("consent-pending.json", cprog)
-        end
-
-        write_file_binary(chunk_path, raw)
+        return 200, {ok = true, missing = same_shape
+            and upload.missing_chunks(pending_dir, cpe.total_chunks) or {0}}
     end
 
-    -- compute missing list
-    local missing = {}
-    for i = 0, total_chunks - 1 do
-        if not file_exists(pending_dir .. "/chunk-" .. tostring(i)) then
-            missing[#missing + 1] = i
+    -- The transfer's shape is pinned at chunk 0 (#404b): the count, the
+    -- whole zip's checksum and the piece length are fixed in the consent
+    -- record, and every later chunk must agree.  The sender sends chunk 0
+    -- first, and again first whenever it packs the file anew (a reboot
+    -- wiped its zip), so chunk 0 is also where a new shape is accepted.
+    if chunk_index == 0 and not same_shape then
+        -- Nothing pinned yet, or the sender packed the file again: pieces
+        -- of any earlier zip are useless, so start clean.
+        if pinned then
+            log("attachment %s from %s: the sender packed it again (%d pieces, was %d) -- starting over",
+                filename, sender, total_chunks, cpe.total_chunks)
         end
+        os.execute('rm -rf ' .. shell_quote(pending_dir) .. ' && mkdir -p ' .. shell_quote(pending_dir))
+        if total_chunks > 1 and #raw < upload.MIN_CHUNK_LENGTH then
+            -- a many-piece transfer cut into tiny pieces: refused
+            return 400, {error = "pieces must be at least " .. upload.MIN_CHUNK_LENGTH .. " bytes"}
+        end
+        if (total_chunks - 1) * #raw > limit then
+            -- this many pieces of this length cannot fit the declared size
+            log("oversize transfer from %s: %s declared %s, but %d pieces of %s cannot fit (limit %s) -- rejecting",
+                sender, filename, fmt_bytes(cpe.expected_size), total_chunks, fmt_bytes(#raw), fmt_bytes(limit))
+            return upload.refuse_transfer(att_id, cpe, cprog, "oversize")
+        end
+        cpe.total_chunks, cpe.total_checksum, cpe.chunk_length = total_chunks, total_checksum, #raw
+        cpe.bytes_received = 0
+        same_shape = true
+    elseif not same_shape then
+        -- A later piece of a shape that is not pinned: not stored.  Asking
+        -- for chunk 0 makes the sender send it next, which pins.
+        log("chunk %d from %s for %s does not match the pinned transfer -- asking for chunk 0",
+            chunk_index, sender, filename)
+        return 200, {ok = true, missing = {0}}
     end
+    -- same_shape: this piece belongs to the pinned transfer
+
+    -- Every piece but the last is exactly chunk_length long (the sender
+    -- cuts at a fixed size); the last is 1 to chunk_length bytes.
+    local is_last = chunk_index == total_chunks - 1
+    if (not is_last and #raw ~= cpe.chunk_length) or (is_last and #raw > cpe.chunk_length) then
+        return 400, {error = string.format("piece %d is %d bytes; pieces are %d bytes, the last at most that",
+                                           chunk_index, #raw, cpe.chunk_length)}
+    end
+
+    -- Enforce the sender's declared expected_size.  Without this check, a
+    -- malicious or buggy sender could advertise a small attachment in the
+    -- consent prompt and then stream arbitrary amounts of data, exhausting
+    -- the recipient's disk after consent was already granted.  Applies
+    -- whatever the declared size, 0 included (#327).  bytes_received is
+    -- set to 0 whenever the shape is pinned, so it is always a number here.
+    -- A resent piece overwrites the old one, so only the difference counts.
+    local existing = 0
+    local f_old = io.open(chunk_path, "rb")
+    if f_old then
+        f_old:seek("end"); existing = f_old:seek(); f_old:close()
+    end
+    local projected = cpe.bytes_received + (#raw - existing)
+    if projected > limit then
+        -- over: refused for good
+        log("oversize transfer from %s: %s declared %s, " ..
+            "cumulative would reach %s (limit %s) — rejecting",
+            sender, filename, fmt_bytes(cpe.expected_size),
+            fmt_bytes(projected), fmt_bytes(limit))
+        return upload.refuse_transfer(att_id, cpe, cprog, "oversize")
+    end
+    -- within: counted and stored
+    cpe.bytes_received = projected
+    cprog[att_id] = cpe
+    save_state("consent-pending.json", cprog)
+    write_file_binary(chunk_path, raw)
+
+    local missing = upload.missing_chunks(pending_dir, total_chunks)
 
     if cpe.status == "receiving" then
         -- User cancelled mid-transfer: either deleted the progress file or
@@ -4321,36 +4386,18 @@ local function handle_attachment_chunk(data, sender)
     end
     f:close()
 
-    if total_checksum and sha256_file(zip_path) ~= total_checksum then
-        os.remove(zip_path)
-        log("total checksum mismatch for %s from %s — initiating repair", filename, sender)
-        -- Repair: re-verify each chunk, delete bad ones, return new missing list
-        local repair_missing = {}
-        for i = 0, total_chunks - 1 do
-            local cp = pending_dir .. "/chunk-" .. tostring(i)
-            if file_exists(cp) then
-                if chunk_checksum then
-                    -- We don't have per-chunk checksums stored, so we can't verify
-                    -- individual chunks against expected values here. Instead, delete
-                    -- all chunks and request a full re-send. The sender's manifest
-                    -- will handle it.
-                end
-                -- For now: keep all chunks (they were individually verified on receive)
-                -- The whole-file mismatch likely means an assembly bug, not chunk corruption
-            else
-                repair_missing[#repair_missing + 1] = i
-            end
-        end
-        if #repair_missing == 0 then
-            -- All chunks present but assembly checksum failed — re-request all chunks
-            -- to rule out disk corruption between receive and assembly
-            for i = 0, total_chunks - 1 do
-                os.remove(pending_dir .. "/chunk-" .. tostring(i))
-                repair_missing[#repair_missing + 1] = i
-            end
-            log("repair: cleared all chunks for full re-transfer of %s", filename)
-        end
-        return 200, {ok = true, missing = repair_missing}
+    if sha256_file(zip_path) ~= cpe.total_checksum then
+        -- Every piece matched its own checksum when it arrived, yet the
+        -- whole does not match: a piece changed on disk since, or the
+        -- sender's whole checksum is wrong.  Either way no piece can be
+        -- singled out, so all are dropped and asked for again.
+        log("total checksum mismatch for %s from %s -- clearing all pieces for a full re-send",
+            filename, sender)
+        os.execute('rm -rf ' .. shell_quote(pending_dir) .. ' && mkdir -p ' .. shell_quote(pending_dir))
+        cpe.bytes_received = 0
+        cprog[att_id] = cpe
+        save_state("consent-pending.json", cprog)
+        return 200, {ok = true, missing = upload.missing_chunks(pending_dir, total_chunks)}
     end
 
     -- Extract somewhere private first, then file each entry.  Extracting

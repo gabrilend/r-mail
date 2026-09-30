@@ -29,6 +29,15 @@ runs, new issues that do not fit elsewhere continue here.
 
 Newest first, with one line on what each gave the project.
 
+- **2026-09-29 — #404b every attachment piece carries its checksums, and
+  the piece count is fixed per transfer.**  A piece without checksums is
+  refused; piece numbers must be whole and in range; the count, the whole
+  zip's checksum and the piece length are pinned when piece 0 arrives,
+  and a later piece that disagrees is not stored.  A claim of a million
+  pieces no longer makes the receiver count to a million.  Covered by
+  `scripts/test-chunk-rules.sh`; an honest two-mailbox transfer by
+  `scripts/test-attachment-round-trip.sh`.
+
 - **2026-09-29 — #404a a symbolic link in a received zip becomes a note.**
   A contact's zip could plant a link to any file on the computer (a
   private key, say) in `attachments/`, and the phone read through it.
