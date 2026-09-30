@@ -25,9 +25,14 @@
 #                     a damaged piece: dropped and still owed
 #   out of order      the last piece, then the middle one: the file
 #                     arrives whole
-#   impossible shape  a million pieces for a 20 KB file: cancelled as
-#                     oversize; three 100-byte pieces: refused (pieces
-#                     smaller than 4 KiB are not allowed but for the last)
+#   impossible shape  50,000 pieces of 8 KiB for a 20 KB file: cancelled
+#                     as oversize; more pieces than the cap: refused
+#   tiny pieces       the same zip in 100-byte pieces (about 200 of them):
+#                     each answer lists at most a batch of 64 owed pieces
+#                     and how many are held, and the file arrives whole.
+#                     There is no smallest piece -- the owner wants
+#                     messages under 1 KB carried as attachments -- so the
+#                     count is capped instead (2026-09-29, #404b)
 #
 # Usage:
 #   scripts/test-chunk-rules.sh          # use the enclosing checkout
@@ -123,17 +128,40 @@ local ID2 = "99999999-9999-4999-8999-999999999999"
 if not mallory:ask_and_accept(BOX, ID2, "huge.bin", 20000, 30) then
     print("-- consent never recorded"); os.exit(1)
 end
-s, a = mallory:send_chunk(ID2, zip, 0, SIZE, {total_chunks = 1000000})
-expect("a million pieces for 20 KB is cancelled", 200, s, a, function(x) return x.cancelled == true end)
+s, a = mallory:send_chunk(ID2, zip, 0, SIZE, {total_chunks = 50000})
+expect("50,000 pieces of 8 KiB for 20 KB is cancelled", 200, s, a, function(x) return x.cancelled == true end)
 local rec = mallory:consent_record(BOX, ID2)
 print(rec and rec.rejection_reason == "oversize" and "ok its record says oversize" or
       ("-- its record says " .. tostring(rec and rec.rejection_reason)))
+local ID4 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+if not mallory:ask_and_accept(BOX, ID4, "counted.bin", 20000, 30) then
+    print("-- consent never recorded"); os.exit(1)
+end
+s, a = mallory:send_chunk(ID4, zip, 0, 1, {total_chunks = 100001})
+expect("more pieces than the cap is refused", 400, s, a)
+
+print("section tiny pieces")
 local ID3 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 if not mallory:ask_and_accept(BOX, ID3, "tiny.bin", 20000, 30) then
     print("-- consent never recorded"); os.exit(1)
 end
-s, a = mallory:send_chunk(ID3, zip:sub(1, 300), 0, 100)
-expect("three 100-byte pieces are refused", 400, s, a)
+local TINY = 100
+local count = math.ceil(#zip / TINY)
+s, a = mallory:send_chunk(ID3, zip, 0, TINY)
+local first = {}
+for i = 1, 64 do first[i] = i end
+expect("piece 0 of " .. count .. " is taken, and the answer lists pieces 1 to 64", 200, s, a,
+       missing_is(first))
+expect("the answer says one piece is held", 200, s, a, function(x) return x.held == 1 end)
+local largest, last_a = 0, a
+for i = 1, count - 1 do
+    s, last_a = mallory:send_chunk(ID3, zip, i, TINY)
+    if s ~= 200 then print("-- piece " .. i .. " answered " .. tostring(s)); break end
+    largest = math.max(largest, #last_a.missing)
+end
+print(largest <= 64 and "ok no answer listed more than 64 owed pieces" or
+      ("-- an answer listed " .. largest .. " owed pieces"))
+expect("the last tiny piece completes the transfer", 200, s, last_a, missing_is({}))
 LUA
 stop_receiver
 
@@ -144,7 +172,7 @@ if cmp -s "$BOX/attachments/pieces.bin" "$WORK/src/pieces.bin"; then
 else
     note_fail "the file sent out of order did not arrive whole"
 fi
-if [ -e "$BOX/attachments/huge.bin" ] || [ -e "$BOX/attachments/tiny.bin" ]; then
+if [ -e "$BOX/attachments/huge.bin" ] || [ -e "$BOX/attachments/counted.bin" ]; then
     note_fail "a refused transfer filed something"
 else
     ok "the refused transfers filed nothing"

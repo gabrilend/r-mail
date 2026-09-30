@@ -4262,24 +4262,56 @@ function upload.is_sha256(s)
 end
 -- }}}
 
+-- The most pieces one transfer may be cut into, for contacts and the phone
+-- alike.  There is no smallest piece: the owner wants messages of under
+-- 1 KB carried as attachments, so a piece may be as small as its sender
+-- likes, and it is the count that is bounded instead (#404b, 2026-09-29:
+-- "We need to find a way to dismantle the floor").  At rmail's default
+-- 5 MiB piece this allows about 500 GB; at 1 KiB, about 100 MB.
+upload.MAX_CHUNKS = 100000
+
+-- The most piece numbers one answer lists as still owed.  An answer
+-- listing every missing piece cost the receiver a look for each one, on
+-- every piece, and grew as large as the count; a batch keeps both small.
+-- The sender sends the batch and learns the next from the last answer.
+upload.MISSING_ANSWER = 64
+
 -- {{{ upload.missing_chunks
--- The pinned chunk numbers not yet on disk, lowest first.
-function upload.missing_chunks(pending_dir, total_chunks)
+-- Up to upload.MISSING_ANSWER pinned chunk numbers not yet on disk, lowest
+-- first, looking from the record's low-water mark (every piece below it is
+-- on disk).  Empty only when every piece is held.
+function upload.missing_chunks(pending_dir, cpe)
     local missing = {}
-    for i = 0, total_chunks - 1 do
+    local i = cpe.low_water
+    while i < cpe.total_chunks and #missing < upload.MISSING_ANSWER do
         if not file_exists(pending_dir .. "/chunk-" .. tostring(i)) then
             missing[#missing + 1] = i
         end
+        i = i + 1
     end
     return missing
 end
 -- }}}
 
--- The smallest piece a sender may cut its zip into, the last piece
--- excepted.  Without a floor, a sender could declare a billion one-byte
--- pieces and have the receiver count through them on every chunk (#404b).
--- rmail's own default piece is 5 MiB (attachment_chunk_size).
-upload.MIN_CHUNK_LENGTH = 4096
+-- {{{ upload.count_held
+-- Counts the pieces on disk and sets the low-water mark: used when a
+-- transfer pinned before the count was kept (in flight across an upgrade)
+-- meets this code.  Its cost is one look per piece, once per transfer.
+function upload.count_held(pending_dir, cpe)
+    local held, low, gap = 0, 0, false
+    for i = 0, cpe.total_chunks - 1 do
+        if file_exists(pending_dir .. "/chunk-" .. tostring(i)) then
+            -- on disk: counted, and the mark passes it while no gap is seen
+            held = held + 1
+            if not gap then low = i + 1 end
+        else
+            -- the first gap stops the mark
+            gap = true
+        end
+    end
+    cpe.pieces_held, cpe.low_water = held, low
+end
+-- }}}
 
 local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
@@ -4299,6 +4331,10 @@ local function handle_attachment_chunk(data, sender)
     if not upload.whole_number(total_chunks) or total_chunks < 1
        or not upload.whole_number(chunk_index) or chunk_index >= total_chunks then
         return 400, {error = "chunk_index and total_chunks must be whole numbers, 0 <= chunk_index < total_chunks"}
+    end
+    -- The count is bounded in place of a smallest piece (see MAX_CHUNKS).
+    if total_chunks > upload.MAX_CHUNKS then
+        return 400, {error = "at most " .. upload.MAX_CHUNKS .. " pieces"}
     end
     -- Both checksums are required.  Their absence used to skip the check.
     if not upload.is_sha256(chunk_checksum) or not upload.is_sha256(total_checksum) then
@@ -4346,8 +4382,14 @@ local function handle_attachment_chunk(data, sender)
         -- owed so the sender sends it again.  Nothing pinned yet: chunk 0
         -- is what is owed first.
         log("chunk %d checksum mismatch from %s for %s", chunk_index, sender, filename)
-        return 200, {ok = true, missing = same_shape
-            and upload.missing_chunks(pending_dir, cpe.total_chunks) or {0}}
+        if not same_shape then
+            -- nothing pinned for this shape: chunk 0 is owed first
+            return 200, {ok = true, missing = {0}}
+        end
+        -- pinned: the next batch still owed
+        if cpe.pieces_held == nil then upload.count_held(pending_dir, cpe) end
+        return 200, {ok = true, missing = upload.missing_chunks(pending_dir, cpe),
+                     held = cpe.pieces_held}
     end
 
     -- The transfer's shape is pinned at chunk 0 (#404b): the count, the
@@ -4363,10 +4405,6 @@ local function handle_attachment_chunk(data, sender)
                 filename, sender, total_chunks, cpe.total_chunks)
         end
         os.execute('rm -rf ' .. shell_quote(pending_dir) .. ' && mkdir -p ' .. shell_quote(pending_dir))
-        if total_chunks > 1 and #raw < upload.MIN_CHUNK_LENGTH then
-            -- a many-piece transfer cut into tiny pieces: refused
-            return 400, {error = "pieces must be at least " .. upload.MIN_CHUNK_LENGTH .. " bytes"}
-        end
         if (total_chunks - 1) * #raw > limit then
             -- this many pieces of this length cannot fit the declared size
             log("oversize transfer from %s: %s declared %s, but %d pieces of %s cannot fit (limit %s) -- rejecting",
@@ -4375,6 +4413,8 @@ local function handle_attachment_chunk(data, sender)
         end
         cpe.total_chunks, cpe.total_checksum, cpe.chunk_length = total_chunks, total_checksum, #raw
         cpe.bytes_received = 0
+        -- pieces on disk, and the lowest number not yet on disk
+        cpe.pieces_held, cpe.low_water = 0, 0
         same_shape = true
     elseif not same_shape then
         -- A later piece of a shape that is not pinned: not stored.  Asking
@@ -4384,6 +4424,10 @@ local function handle_attachment_chunk(data, sender)
         return 200, {ok = true, missing = {0}}
     end
     -- same_shape: this piece belongs to the pinned transfer
+    if cpe.pieces_held == nil then
+        -- pinned before the count was kept (in flight across an upgrade)
+        upload.count_held(pending_dir, cpe)
+    end
 
     -- Every piece but the last is exactly chunk_length long (the sender
     -- cuts at a fixed size); the last is 1 to chunk_length bytes.
@@ -4416,11 +4460,20 @@ local function handle_attachment_chunk(data, sender)
     end
     -- within: counted and stored
     cpe.bytes_received = projected
+    write_file_binary(chunk_path, raw)
+    if f_old == nil then
+        -- a piece not held before: one more held
+        cpe.pieces_held = cpe.pieces_held + 1
+    end
+    -- the low-water mark passes every piece now held above it
+    while cpe.low_water < total_chunks
+          and file_exists(pending_dir .. "/chunk-" .. tostring(cpe.low_water)) do
+        cpe.low_water = cpe.low_water + 1
+    end
     cprog[att_id] = cpe
     save_state("consent-pending.json", cprog)
-    write_file_binary(chunk_path, raw)
 
-    local missing = upload.missing_chunks(pending_dir, total_chunks)
+    local missing = upload.missing_chunks(pending_dir, cpe)
 
     if cpe.status == "receiving" then
         -- User cancelled mid-transfer: either deleted the progress file or
@@ -4435,7 +4488,7 @@ local function handle_attachment_chunk(data, sender)
             log("attachment transfer cancelled by user: %s from %s", att_id, sender)
             return 200, {ok = false, cancelled = true}
         end
-        local received = total_chunks - #missing
+        local received = cpe.pieces_held
         local avg_str = ""
         if cpe.start_time and received > 0 then
             local elapsed = os.time() - cpe.start_time
@@ -4453,8 +4506,13 @@ local function handle_attachment_chunk(data, sender)
                 math.floor(received / total_chunks * 100), avg_str))
     end
 
+    -- Completion is decided by the look on disk, never by the held count:
+    -- an empty batch means the look reached the last piece and found every
+    -- one.  The count only feeds the progress shown to both people, so a
+    -- crash between writing a piece and saving the count cannot stall it.
     if #missing > 0 then
-        return 200, {ok = true, missing = missing}
+        -- pieces still owed: this batch, and how many are held
+        return 200, {ok = true, missing = missing, held = cpe.pieces_held}
     end
 
     -- all chunks present: reassemble
@@ -4476,9 +4534,11 @@ local function handle_attachment_chunk(data, sender)
             filename, sender)
         os.execute('rm -rf ' .. shell_quote(pending_dir) .. ' && mkdir -p ' .. shell_quote(pending_dir))
         cpe.bytes_received = 0
+        cpe.pieces_held, cpe.low_water = 0, 0
         cprog[att_id] = cpe
         save_state("consent-pending.json", cprog)
-        return 200, {ok = true, missing = upload.missing_chunks(pending_dir, total_chunks)}
+        return 200, {ok = true, missing = upload.missing_chunks(pending_dir, cpe),
+                     held = cpe.pieces_held}
     end
 
     -- Extract somewhere private first, then file each entry.  Extracting
@@ -4595,8 +4655,16 @@ local function write_transfers_file(att_state)
             if transfer.status == "awaiting_consent" then
                 progress = "awaiting consent"
             else
-                local missing_count = transfer.missing and #transfer.missing or 0
-                local sent = transfer.total_chunks - missing_count
+                local sent
+                if transfer.held ~= nil then
+                    -- the receiver said how many it holds
+                    sent = transfer.held
+                else
+                    -- a receiver from before #404b's batches lists every
+                    -- owed piece, so the count is what is not listed
+                    local missing_count = transfer.missing and #transfer.missing or 0
+                    sent = transfer.total_chunks - missing_count
+                end
                 progress = sent .. " / " .. transfer.total_chunks .. " chunks received"
             end
             by_path[path][transfer.to] = progress
@@ -4763,51 +4831,70 @@ local function send_next_chunks(my_name)
         local missing = transfer.missing or {}
         local aborted = false
         local cancelled = false
-        for _, chunk_index in ipairs(missing) do
-            f:seek("set", chunk_index * cfg.chunk_size)
-            local raw = f:read(cfg.chunk_size)
-            if not raw then
-                log("chunk read error at %d for %s", chunk_index, att_id)
-                aborted = true; break
-            end
-            local results = http_post_batch_with_fallback({{
-                endpoints = contact_endpoints(contact),
-                path = "/deliver",
-                payload = json.encode({
-                    type = "attachment_chunk",
-                    attachment_id = att_id,
-                    message_id = transfer.message_id,
-                    filename = transfer.filename,
-                    chunk_index = chunk_index,
-                    total_chunks = transfer.total_chunks,
-                    data = mime.b64(raw),
-                    chunk_checksum = sha256_of_bytes(raw),
-                    total_checksum = transfer.total_checksum,
-                }),
-                psk_key = contact.token,
-            }})
-            local resp = results[1].data or {}
-            if results[1].ok then
-                -- receiver tells us what's still missing
-                local new_missing = resp.missing
-                if type(new_missing) == "table" then
-                    transfer.missing = new_missing
+        -- The receiver lists at most a batch of owed pieces per answer
+        -- (upload.MISSING_ANSWER, #404b); after one batch is sent, the last
+        -- answer names the next.  Passes are bounded so a piece that keeps
+        -- arriving damaged waits for the next cycle rather than looping.
+        local passes = 0
+        local pass_limit = math.ceil(transfer.total_chunks / upload.MISSING_ANSWER) + 2
+        while #missing > 0 and passes < pass_limit do
+            passes = passes + 1
+            for _, chunk_index in ipairs(missing) do
+                f:seek("set", chunk_index * cfg.chunk_size)
+                local raw = f:read(cfg.chunk_size)
+                if not raw then
+                    log("chunk read error at %d for %s", chunk_index, att_id)
+                    aborted = true; break
                 end
-                note_contact_result(transfer.to, true)
-                changed = true; did_work = true
-                if #transfer.missing == 0 then break end
-            elseif resp.cancelled then
-                -- Cancelled by receiver is reachability success from our
-                -- perspective — we heard back.
-                note_contact_result(transfer.to, true)
-                log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
-                cancelled = true; break
-            else
-                note_contact_result(transfer.to, false)
-                -- Chunk-specific detail dropped; reachability rolls into
-                -- the unreachable summary (#324).
-                aborted = true; break
+                local results = http_post_batch_with_fallback({{
+                    endpoints = contact_endpoints(contact),
+                    path = "/deliver",
+                    payload = json.encode({
+                        type = "attachment_chunk",
+                        attachment_id = att_id,
+                        message_id = transfer.message_id,
+                        filename = transfer.filename,
+                        chunk_index = chunk_index,
+                        total_chunks = transfer.total_chunks,
+                        data = mime.b64(raw),
+                        chunk_checksum = sha256_of_bytes(raw),
+                        total_checksum = transfer.total_checksum,
+                    }),
+                    psk_key = contact.token,
+                }})
+                local resp = results[1].data or {}
+                if results[1].ok then
+                    -- receiver tells us what's still missing
+                    local new_missing = resp.missing
+                    if type(new_missing) == "table" then
+                        transfer.missing = new_missing
+                    end
+                    -- how many pieces the receiver holds, for the progress file
+                    if upload.whole_number(resp.held) then
+                        transfer.held = resp.held
+                    end
+                    note_contact_result(transfer.to, true)
+                    changed = true; did_work = true
+                    if #transfer.missing == 0 then break end
+                elseif resp.cancelled then
+                    -- Cancelled by receiver is reachability success from our
+                    -- perspective — we heard back.
+                    note_contact_result(transfer.to, true)
+                    log("transfer cancelled by receiver: %s to %s", transfer.filename, transfer.to)
+                    cancelled = true; break
+                else
+                    note_contact_result(transfer.to, false)
+                    -- Chunk-specific detail dropped; reachability rolls into
+                    -- the unreachable summary (#324).
+                    aborted = true; break
+                end
             end
+            if aborted or cancelled or missing == transfer.missing then
+                -- stopped, or no answer replaced the batch: nothing more to learn
+                break
+            end
+            -- the last answer's batch is next (empty when all are held)
+            missing = transfer.missing
         end
         f:close()
         if cancelled then
@@ -6528,7 +6615,7 @@ function upload.start(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
-    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > 100000 then
+    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > upload.MAX_CHUNKS then
         return 400, {error = "invalid num_chunks"}
     end
     local pieces, total = upload.checksums_from(data, num_chunks)
@@ -6596,7 +6683,7 @@ function upload.resume(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
-    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > 100000 then
+    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > upload.MAX_CHUNKS then
         return 400, {error = "invalid num_chunks"}
     end
     local pieces, total = upload.checksums_from(data, num_chunks)

@@ -136,8 +136,11 @@ receiving daemon checks it before anything reaches `attachments/`:
   fixed when piece 0 arrives; a later piece that disagrees is not stored,
   and the receiver asks for piece 0 again (which is also how a sender that
   had to pack the file anew starts over).  Every piece but the last must
-  be exactly that length, and pieces smaller than 4 KiB are refused, so a
-  sender cannot declare a vast number of tiny pieces.  (#404b)
+  be exactly that length.  A piece may be as small as its sender likes,
+  but no transfer may have more than 100,000 pieces, so a sender cannot
+  declare a vast number of tiny ones.  Each answer lists at most 64 of the
+  pieces still owed, with how many are held; the sender works through
+  them batch by batch.  (#404b)
 - **Files sent up from your phone are checked the same way.**  The phone
   declares the checksum of every piece and of the whole zip before it
   sends; each piece is checked as it arrives, the whole when it is
