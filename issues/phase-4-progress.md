@@ -72,3 +72,16 @@ Newest first, with one line on what each gave the project.
   absent LPeg is stated, not an error (LPeg is not an rmail dependency).
   Covered by `scripts/test-json-decoders.sh`.  Filed here only because
   phase 3 is full; it moves with start-up and dependencies under #402.
+
+- **2026-09-30 — #405 zips are packed and read by the shared zip
+  library.**  rmail no longer runs `zip` or `unzip`.  A copy of the shared
+  library (my-libs/zip, also rao-chat's) in `libs/` packs attachments and
+  reads every received zip.  It checks the whole structure before making
+  a byte (names that climb out, overlapping entries, devices, damage),
+  counts every byte before it is made, and never makes a link.  This
+  replaces #404a's link listing, #327's `unzip -p` byte count and #404c's
+  `unzip -p`.  Phone uploads gain a bound: the claimed size must fit the
+  free space.  Until compression exists, attachments travel uncompressed
+  (larger on the wire).  Covered by every attachment test and the new
+  `scripts/test-zip-library.sh`, which also fails when the copy drifts
+  from the library.

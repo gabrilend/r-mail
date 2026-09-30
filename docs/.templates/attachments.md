@@ -32,7 +32,10 @@ to: bob
 Alice and Sarah get the PDF, bob just gets the message body.
 ```
 
-The path can point to a file or a directory. Directories are zipped recursively.
+The path can point to a file or a directory. Directories are zipped recursively,
+with their tree kept. If the path itself is a symbolic link, it is followed
+once; links inside a directory are sent as links (never followed), and the
+receiver turns each into a note (#405).
 The original file is never modified or deleted.
 
 ---
@@ -89,7 +92,8 @@ If you **delete the consent file entirely**: this is treated as a decline.
 
 ## Transfer mechanics
 
-The sender compresses the file (zip) once and splits it into chunks (default
+The sender packs the file into a zip once, with rmail's own packer (the shared
+zip library, #405; files are stored, not yet compressed), and splits it into chunks (default
 5 MB each). Each chunk is sent as a separate request over the same AES-256-GCM
 encrypted channel as messages. The receiver responds to each chunk with a list of still-
 missing chunk indices, so chunks can be received in any order. The sender
@@ -125,11 +129,26 @@ receiving daemon checks it before anything reaches `attachments/`:
 
   Control characters in the target are written as `\xNN`.  If something
   in a received folder does not work, look for these notes; make the link
-  yourself if it is one you want.  Links are left out of extraction
-  altogether (so nothing can be written through one), and afterwards the
-  extracted folder is searched for links; finding any refuses the whole
-  transfer.  The phone is never served a link from `attachments/`, even
-  one you made by hand.  (#404a)
+  yourself if it is one you want.  The zip reader never makes a link at
+  all, so nothing can be written through one.  The phone is never served
+  a link from `attachments/`, even one you made by hand.  (#404a, #405)
+- **Checked whole before anything is made, and counted byte by byte.**
+  Zips are read by rmail's own zip reader (the shared zip library in
+  `libs/`, #405), not by `unzip`.  Before a single byte is made it
+  refuses:
+  - a name that climbs out of the folder (`..`) or starts at the root;
+  - a name with a control character;
+  - two entries on one path;
+  - entries that share bytes (the "overlapping" zip bomb);
+  - devices, pipes and sockets;
+  - encryption;
+  - damaged headers.
+
+  It then counts every byte before it is made, so a zip that would
+  unpack to more than the declared size plus 10% and 4 KiB stops at that
+  limit, with nothing past it written (`oversize-unpacked`, #327).  Any
+  refusal removes everything unpacked and cancels the transfer, and the
+  record names the reason.
 - **No piece without its checksums, and no changing the count.**  Every
   piece must carry the SHA-256 of itself and of the whole zip.  How many
   pieces there are, the whole zip's checksum and the length of a piece are
@@ -144,9 +163,10 @@ receiving daemon checks it before anything reaches `attachments/`:
 - **Files sent up from your phone are checked the same way.**  The phone
   declares the checksum of every piece and of the whole zip before it
   sends; each piece is checked as it arrives, the whole when it is
-  complete.  The zip must hold exactly one regular file, and if unzip
-  cannot unpack it the upload is refused rather than filed half-done.
-  (#404c)
+  complete.  The zip must hold exactly one regular file, whose size must
+  fit the free space on the disk. If the zip reader cannot unpack it
+  byte for byte, the upload is refused rather than filed half-done.
+  (#404c, #405)
 - **Nothing before your yes, and no strange ids.**  A piece that arrives
   while the consent form is still unanswered (or after you declined) is
   refused and nothing is written.  The id a contact gives an attachment

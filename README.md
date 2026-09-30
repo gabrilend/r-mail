@@ -94,7 +94,7 @@ For full details on the attachment workflow, per-recipient targeting, configurat
 - **Lua** 5.1+ (5.4 recommended)
 - **LuaSocket** — TCP networking for Lua
 - **OpenSSL** — AES-256-GCM encryption
-- **zip / unzip** — file compression for attachment transfer
+- **zip library** — attachment packing and unpacking, in plain Lua, carried in `libs/` (the shared my-libs/zip; no `zip` or `unzip` programs are needed to run rmail, only for its tests)
 
 Run `./scripts/install.sh` to compile all dependencies from source into the r-mail directory.
 
@@ -352,8 +352,6 @@ Hooks are a powerful feature — any executable works, in any language. For full
 **"luasocket not found"** — run `./scripts/install.sh` to compile it locally.
 
 **"rmail_crypto.so not found"** — run `./scripts/install.sh` to compile it from source. OpenSSL headers are required.
-
-**"zip not found" or "unzip not found"** — run `./scripts/install.sh` to compile Info-ZIP from source. Both are required for attachment transfer.
 
 **Messages not sending** — this is almost always a port issue. Check these in order:
 1. Is the recipient's daemon actually running?

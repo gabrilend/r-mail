@@ -24,8 +24,8 @@
 #   two files           a zip holding two files: refused, nothing filed
 #   a folder            a zip holding only a folder: refused
 #   broken zip          a zip whose content is damaged (its outer checksum
-#                       matches, so only unzip can tell): refused, and no
-#                       half-file is filed
+#                       matches, so only the zip reader can tell): refused
+#                       as damaged, and no half-file is filed
 #   not a zip           a plain file: refused -- everything that crosses
 #                       the network travels zipped (owner, 2026-09-29)
 #
@@ -49,11 +49,13 @@ printf 'first\n' > "$WORK/two/a.txt"
 printf 'second\n' > "$WORK/two/b.txt"
 (cd "$WORK/two" && zip -q "$WORK/two.zip" a.txt b.txt)
 (cd "$WORK/folder" && zip -q "$WORK/folder.zip" only)
-# A zip whose stored data is damaged: text compresses, so the damage lands
-# inside a compressed stream, which unzip notices by its CRC.
+# A zip whose stored data is damaged: text compresses (20,000 bytes of one
+# repeated line become about a hundred), so the damage at byte 80 -- past
+# the 30-byte header, the name and its extra fields -- lands inside the
+# compressed stream.  (At byte 200 it landed in the table of contents.)
 yes 'a line of text that compresses well' | head -c 20000 > "$WORK/one/letter.txt"
 (cd "$WORK/one" && zip -q "$WORK/broken.zip" letter.txt)
-printf 'XXXXXXXX' | dd of="$WORK/broken.zip" bs=1 seek=200 conv=notrunc status=none
+printf 'XXXX' | dd of="$WORK/broken.zip" bs=1 seek=80 conv=notrunc status=none
 
 start_receiver
 run_lua_cases <<'LUA'
@@ -140,7 +142,7 @@ print(id_s == 500 and tostring(ans.error):find("not a regular file") and "ok a z
 
 print("section broken zip")
 id_s, ans = send_all("letter.txt", fc.read_file(WORK .. "/broken.zip"))
-print(id_s == 500 and tostring(ans.error):find("could not unpack") and "ok a damaged zip is refused" or
+print(id_s == 500 and tostring(ans.error):find("refused damaged", 1, true) and "ok a damaged zip is refused" or
       ("-- it answered " .. tostring(id_s) .. " " .. json.encode(ans)))
 
 print("section not a zip")

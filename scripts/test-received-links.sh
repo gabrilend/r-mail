@@ -25,11 +25,12 @@
 #                        in attachments/, each link has its note with the
 #                        right text, and the secret's content is in no
 #                        filed file.
-#   hidden link name     a link whose own name holds a newline, which the
-#                        zip listing cannot show faithfully, so the first
-#                        line of defence misses it; unzip makes it, and the
-#                        second line (a search for links after extracting)
-#                        must refuse the whole transfer.
+#   hidden link name     a link whose own name holds a newline.  Since #405
+#                        the shared zip reader checks every name before
+#                        anything is made, and refuses a control character
+#                        in a name ("bad-name"): the whole transfer is
+#                        refused and nothing is filed.  (With unzip, only a
+#                        search for links after extracting caught it.)
 #   phone and links      the owner's phone (a contact marked own) asks for a
 #                        link planted in attachments/ by hand: the file, its
 #                        info and its first piece are all refused, and the
@@ -85,7 +86,7 @@ s, a = mallory:send_whole(BOX, "22222222-2222-4222-8222-222222222222", "hidden",
 print(s == 200 and a.cancelled == true and "ok the transfer was refused" or
       ("-- the transfer was not refused: " .. tostring(s) .. " " .. mallory.json.encode(a or {})))
 local rec = mallory:consent_record(BOX, "22222222-2222-4222-8222-222222222222")
-print(rec and rec.rejection_reason == "link-in-archive" and "ok its record says link-in-archive" or
+print(rec and rec.rejection_reason == "bad-name" and "ok its record says bad-name" or
       ("-- its record says " .. tostring(rec and rec.rejection_reason)))
 
 print("section phone and links")

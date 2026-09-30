@@ -1863,8 +1863,6 @@ end
 local tools = {
     upnpc   = nat_find_tool("upnpc"),
     natpmpc = nat_find_tool("natpmpc"),
-    zip     = nat_find_tool("zip"),
-    unzip   = nat_find_tool("unzip"),
 }
 
 function nat.get_local_ip()
@@ -3476,6 +3474,13 @@ end
 -- to the code they serve.
 local upload = {}
 
+-- The shared zip library (my-libs/zip, copied into libs/ by its
+-- install-into; #405): our own packer and a reader that checks a zip's
+-- whole structure before making a byte and meters every byte it makes.
+-- rmail no longer runs zip or unzip.  Plain Lua on 5.3/5.4 and LuaJIT.
+upload.zip_reader = require("zip-reader")
+upload.zip_writer = require("zip-writer")
+
 -- {{{ upload.valid_attachment_id
 -- True for an id shaped like the ones uuid() makes: hex digits and dashes,
 -- 8 to 64 characters.  A contact chooses the ids of the attachments it
@@ -3503,56 +3508,35 @@ function upload.fingerprint(path)
 end
 -- }}}
 
--- Pack a file or folder into a zip in the pending folder.  Returns
--- (zip path, SHA-256, packed size), or nil and a reason:
+-- Pack a file or folder into a zip in the pending folder, with the shared
+-- zip library's packer (#405; rmail used to run zip).  Returns (zip path,
+-- SHA-256, packed size, unpacked size), or nil and a reason:
 --   "missing"    the source could not be read before packing
---   "zip-failed" zip exited with an error, or wrote nothing
---   "changed"    the source changed while zip was reading it (#404d); the
+--   "zip-failed" the packer could not make the zip (named in the log)
+--   "changed"    the source changed while it was being read (#404d); the
 --                zip would be a torn copy -- the start of the old content
 --                and the end of the new -- so it is deleted.  Callers try
 --                again on a later cycle.
+-- A folder keeps its tree under its own name; a file is packed alone.
+-- The packed path is followed once if it is a link; links inside a folder
+-- travel as links, and every receiver turns them into notes (the zip
+-- program followed them all, so a link in a folder could send any file on
+-- the machine).  The unpacked size is counted exactly while packing.
 local function compress_attachment(filepath)
     os.execute('mkdir -p ' .. shell_quote(paths.pending))
     local zip_path = paths.pending .. "/rmail-" .. uuid() .. ".zip"
-    local before = upload.fingerprint(filepath)
-    if not before then return nil, "missing" end
-    local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
-    local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
-    if is_dir_h then is_dir_h:close() end
-    local ret
-    if is_dir then
-        -- Preserve the directory's internal structure: zip -r from the
-        -- parent so the archive holds <dirname>/... with subdirectories
-        -- intact.  The old -rj junked paths, which flattened the tree AND
-        -- hard-failed (zip aborts) on same-named files in different
-        -- subdirs — silently dropping the whole attachment.
-        local dir = filepath:gsub("/+$", "")
-        local parent = dir:match("^(.*)/[^/]+$") or "."
-        if parent == "" then parent = "/" end
-        local base = dir:match("([^/]+)$") or dir
-        ret = upload.succeeded('cd ' .. shell_quote(parent) .. ' && ' .. tools.zip ..
-                         ' -r ' .. shell_quote(zip_path) .. ' ' .. shell_quote(base) ..
-                         ' >/dev/null 2>&1')
-    else
-        -- Single file: -j junks the path so the recipient gets just the
-        -- filename, not the sender's directory layout.
-        ret = upload.succeeded(tools.zip .. ' -j ' .. shell_quote(zip_path) ..
-                         ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
-    end
-    -- upload.succeeded reads the exit status right on every Lua; the old
-    -- `if not ret` counted a failing zip as success on LuaJIT.
-    if not ret then
-        os.remove(zip_path)
-        log("packing %s failed: zip exited with an error", filepath)
+    if not upload.fingerprint(filepath) then return nil, "missing" end
+    local ok, packed = pcall(upload.zip_writer.pack, filepath:gsub("/+$", ""), zip_path)
+    if not ok then
+        -- the packer removed its half-made zip; why decides the reason
+        if tostring(packed):find("changed while it was packed", 1, true) then
+            log("packing %s: it changed while it was being packed -- will pack it again next cycle", filepath)
+            return nil, "changed"
+        end
+        log("packing %s failed: %s", filepath, tostring(packed))
         return nil, "zip-failed"
     end
-    if upload.fingerprint(filepath) ~= before then
-        -- written to while zip read it: a torn copy, thrown away
-        os.remove(zip_path)
-        log("packing %s: it changed while it was being packed -- will pack it again next cycle", filepath)
-        return nil, "changed"
-    end
-    -- unchanged: the zip is a true copy
+    -- made, and unchanged throughout: the zip is a true copy
     local checksum = sha256_file(zip_path)
     local size_h = io.popen('wc -c < ' .. shell_quote(zip_path) .. ' 2>/dev/null')
     local comp_size = size_h and tonumber(size_h:read("*a"))
@@ -3562,7 +3546,7 @@ local function compress_attachment(filepath)
         log("packing %s failed: zip wrote nothing", filepath)
         return nil, "zip-failed"
     end
-    return zip_path, checksum, comp_size
+    return zip_path, checksum, comp_size, packed.size
 end
 
 -- remove a specific attach: line from an outbox file
@@ -4031,163 +4015,10 @@ function upload.succeeded(cmd)
 end
 -- }}}
 
--- {{{ upload.list_entries
--- Read a zip's table of contents.  Returns a list of entries
---   { kind = string (one character: "-" file, "d" folder, "l" link, or
---                    another mode letter for anything stranger),
---     name = string (the path stored in the zip, as the listing shows it) }
--- or nil and a reason.
---
--- `unzip -Z` is zipinfo.  Its default listing is one line per entry:
---   lrwxrwxrwx  3.0 unx       13 bx stor 26-Sep-29 22:39 d/lnk
--- mode, zip version, system, size, text/binary + extra-field flags,
--- method, date, time, then the name (which may hold spaces) after one
--- space.  The version column (digits.digit) is what tells an entry line
--- from the header and totals lines around it.
---
--- A name holding control characters is shown escaped (^J), so the listing
--- is still one line per entry; such a name will simply not match anything
--- later, which the post-extraction link search is there to catch.  The
--- entry count is checked against the header's own count so that a line
--- the pattern failed to read cannot go missing silently.
-function upload.list_entries(zip)
-    local h = io.popen(tools.unzip .. " -Z " .. shell_quote(zip))
-    if not h then return nil, "could not run unzip -Z" end
-    local entries, declared = {}, nil
-    for line in h:lines() do
-        local n = line:match("number of entries: (%d+)")
-        if n then
-            -- the header line: how many entries the zip says it has
-            declared = tonumber(n)
-        else
-            local mode, name = line:match(
-                "^(%S+)%s+%d+%.%d+%s+%S+%s+%d+%s+%S+%s+%S+%s+%S+%s+%S+ (.*)$")
-            if mode then
-                -- an entry line
-                entries[#entries + 1] = {kind = mode:sub(1, 1), name = name}
-            end
-            -- any other line is the "Archive:" heading or the totals line
-        end
-    end
-    h:close()
-    if declared == nil then
-        -- no header: unzip could not read the file as a zip at all
-        return nil, "not a readable zip"
-    end
-    if declared ~= #entries then
-        return nil, string.format("the listing shows %d entries but the zip says %d",
-                                  #entries, declared)
-    end
-    return entries
-end
--- }}}
-
--- {{{ upload.unzip_pattern
--- unzip reads the names given to it (for -p and -x) as wildcard patterns:
--- * ? and [...] match other names.  Wrapping each of those characters in
--- brackets makes it match only itself, so a name is taken literally.
-function upload.unzip_pattern(name)
-    return (name:gsub("[%[%*%?]", function(ch) return "[" .. ch .. "]" end))
-end
--- }}}
-
--- {{{ upload.link_note
--- The text left in place of a symbolic link.  The owner's design
--- (2026-09-29): a note an agent or a person will find when something does
--- not work, saying what the link was, so it can be made by hand if it is
--- valid here -- a recognition check rather than a silent gap.  Control
--- characters in the target become \xNN so the note stays one honest line
--- and a target cannot write a second line of its own.
-function upload.link_note(target)
-    local shown = target:gsub("%c", function(ch)
-        return string.format("\\x%02X", ch:byte())
-    end)
-    return "This was a symbolic link to: " .. shown .. "\n" ..
-           "It was not recreated, because a link can point at any file on this " ..
-           "computer. If it is valid here, make it by hand.\n"
-end
--- }}}
-
 -- {{{ upload.is_link
 -- True when path is a symbolic link (live or dangling).
 function upload.is_link(path)
     return upload.succeeded("test -L " .. shell_quote(path))
-end
--- }}}
-
--- {{{ upload.unpack_received
--- Extract a received zip into extract_dir without ever creating a link.
--- Returns true, or nil plus a short reason and a sentence for the log.
---
--- Two lines of defence (#404a):
---   1. Links are found in the table of contents first and left out of
---      extraction, so none exists at any moment for a later entry to be
---      written through.  Each gets a note (<name>.symlink.txt) whose text
---      comes from the link entry's own content, which is its target.
---   2. After extraction the folder is searched for links.  Any at all
---      refuses the whole transfer: something got past step 1.
-function upload.unpack_received(zip, extract_dir)
-    local entries, why = upload.list_entries(zip)
-    if not entries then return nil, "unreadable-archive", why end
-
-    local links = {}
-    for _, e in ipairs(entries) do
-        if e.kind == "l" then
-            -- A note is written at the link's own path inside extract_dir,
-            -- so a name that could climb out of it is refused outright.
-            if e.name:sub(1, 1) == "/" or ("/" .. e.name .. "/"):find("/%.%./") then
-                return nil, "link-in-archive",
-                    "a link entry has a name that leaves the folder: " .. e.name
-            end
-            links[#links + 1] = e.name
-        end
-    end
-
-    -- Extract everything except the links.
-    local cmd = tools.unzip .. " -o -q " .. shell_quote(zip) .. " -d " .. shell_quote(extract_dir)
-    if #links > 0 then
-        -- links present: exclude each one by its literal name
-        cmd = cmd .. " -x"
-        for _, name in ipairs(links) do cmd = cmd .. " " .. shell_quote(upload.unzip_pattern(name)) end
-    end
-    -- no links: nothing to exclude
-    if not upload.succeeded(cmd .. " >/dev/null") then
-        return nil, "extraction-failed", "unzip did not finish cleanly"
-    end
-
-    -- Second line of defence, before any note is written (a note is a
-    -- regular file and cannot be confused with a link, but checking first
-    -- keeps the question "did unzip make a link?" unmixed).
-    local fh = io.popen("find " .. shell_quote(extract_dir) .. " -type l")
-    local survivor = fh and fh:read("*l")
-    if fh then fh:close() end
-    if survivor then
-        return nil, "link-in-archive", "unzip created a link anyway: " .. survivor
-    end
-
-    for _, name in ipairs(links) do
-        local th = io.popen(tools.unzip .. " -p " .. shell_quote(zip) .. " " ..
-                            shell_quote(upload.unzip_pattern(name)))
-        local target = th and th:read("*a")
-        if th then th:close() end
-        if not target or target == "" then
-            -- The name did not match its own entry (a name the listing
-            -- escaped), or the entry is empty: nothing honest to write.
-            return nil, "link-in-archive", "could not read where link " .. name .. " points"
-        end
-        local note = extract_dir .. "/" .. name .. ".symlink.txt"
-        if file_exists(note) then
-            -- the zip also holds a real file by that name; refuse rather
-            -- than choose which one the owner meant
-            return nil, "link-in-archive", "a file already has the note's name: " .. name .. ".symlink.txt"
-        end
-        local parent = note:match("^(.*)/[^/]*$")
-        os.execute("mkdir -p " .. shell_quote(parent))
-        if not write_file(note, upload.link_note(target)) then
-            return nil, "extraction-failed", "could not write the note for " .. name
-        end
-    end
-    return true
 end
 -- }}}
 
@@ -4204,27 +4035,36 @@ function upload.size_limit(expected_size)
 end
 -- }}}
 
--- {{{ upload.measure_unpacked
--- Count the bytes a zip would unpack to, without writing any of them, and
--- stop counting one byte past `limit`.  Returns the count, which is
--- limit + 1 when the zip is bigger than the limit.
+-- {{{ upload.unpack_received
+-- Unpack a received zip into extract_dir (existing and empty) with the
+-- shared zip reader (#405), holding everything it makes to `limit` bytes.
+-- Returns true, or nil plus a short reason and a sentence for the log.
 --
--- The sizes a zip's table of contents claims are written by its sender, so
--- they are not used.  Instead every entry is really decompressed:
--- `unzip -p` streams all contents to its standard output, `head -c`
--- stops after limit + 1 bytes (closing the pipe, which stops unzip), and
--- `wc -c` counts what got through.  One pipeline because it is a stream:
--- nothing is stored, and a zip bomb costs a fraction of a second.
-function upload.measure_unpacked(zip, limit)
-    local h = io.popen(tools.unzip .. " -p " .. shell_quote(zip) ..
-                       " | head -c " .. string.format("%d", limit + 1) .. " | wc -c")
-    local count = h and tonumber(h:read("*a"))
-    if h then h:close() end
-    if not count then
-        -- wc always prints a number; no number means the shell never ran
-        error("could not measure the unpacked size of " .. zip)
+-- The reader checks the whole zip before making a byte: names that climb
+-- out of the folder or start at the root, entries that share bytes (the
+-- overlapping bomb), devices, encryption, ZIP64, damaged headers.  It
+-- then counts every byte before it exists, so a zip bomb stops at the
+-- limit with nothing past it written (#327).  A link is never made: its
+-- note, <name>.symlink.txt, is written in its place (#404a).  On any
+-- refusal it removes everything it made.
+--
+-- Reasons: "oversize-unpacked" (the reader's unpacks-larger: the name the
+-- records already used), the reader's own ("bad-name", "overlap",
+-- "duplicate", "special-file", "damaged", "zip64", "encrypted",
+-- "unsupported", "multi-disk", "unpacks-smaller"), or
+-- "extraction-failed" when the disk, not the zip, was the problem.
+-- `exact` is false: senders declare `du -sb` sizes, a ceiling, not a count.
+function upload.unpack_received(zip, extract_dir, limit)
+    local ok, made = pcall(upload.zip_reader.extract, zip, extract_dir,
+                           {size = limit, exact = false, now = os.time()})
+    if ok then return true end
+    local reason = tostring(made):match("^refused ([%w%-]+):")
+    if reason == nil then
+        -- not a refusal of the zip: the disk or the reader itself failed
+        return nil, "extraction-failed", tostring(made)
     end
-    return count
+    if reason == "unpacks-larger" then reason = "oversize-unpacked" end
+    return nil, reason, tostring(made)
 end
 -- }}}
 
@@ -4547,29 +4387,21 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local extract_dir = pending_dir .. "/extract"
     os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
-    -- A zip bomb is caught before anything is written (#327): the unpacked
-    -- bytes are counted, and the same limit as the packed bytes applies.
+    -- The shared zip reader unpacks it (#405): the whole structure checked
+    -- first, then every byte counted before it is made, held to the same
+    -- limit as the packed bytes (#327), so a zip bomb stops with nothing
+    -- past the limit written.  No link is ever made (#404a).
     local unpacked_limit = upload.size_limit(cpe.expected_size)
-    local unpacked_bytes = upload.measure_unpacked(zip_path, unpacked_limit)
-    if unpacked_bytes > unpacked_limit then
-        -- over the limit: refused for good, like an oversize packed transfer
-        log("oversize transfer from %s: %s declared %s, unpacks to more than %s -- rejecting",
-            sender, filename, fmt_bytes(cpe.expected_size), fmt_bytes(unpacked_limit))
-        return upload.refuse_transfer(att_id, cpe, cprog, "oversize-unpacked")
-    end
-    -- within the limit: go on to extract
-    -- No symbolic link is ever recreated from a contact's zip (#404a); see
-    -- upload.unpack_received for the two lines of defence.
-    local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir)
+    local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir, unpacked_limit)
     if not unpacked and why == "extraction-failed" then
-        -- unzip itself failed: the chunks matched their checksums, so the
-        -- zip is what the sender sent.  Kept as before: answer 500 and
-        -- leave the chunks, so the owner can look at them.
+        -- the disk failed, not the zip: the chunks matched their checksums,
+        -- so the zip is what the sender sent.  Kept as before: answer 500
+        -- and leave the chunks, so the owner can look at them.
         log("failed to extract %s from %s: %s", filename, sender, detail)
         return 500, {error = "extraction failed"}
     elseif not unpacked then
-        -- A link, or a zip whose contents could not be listed faithfully:
-        -- refuse the transfer for good.
+        -- the zip itself was refused (too large, a bad name, overlapping
+        -- entries, damage...): refused for good, by its reason
         log("refused %s from %s: %s -- transfer cancelled", filename, sender, detail)
         return upload.refuse_transfer(att_id, cpe, cprog, why)
     end
@@ -6548,24 +6380,42 @@ function upload.finish(upload_id, uploads)
         -- entry, a regular file (#404c).  More entries used to be joined
         -- end to end into one file; a folder or link entry has no file
         -- content to give.
-        local entries, why = upload.list_entries(zip)
-        if not entries then
-            return upload.discard(upload_id, uploads, "the upload is not a readable zip: " .. why)
+        -- The shared zip reader (#405) checks the whole structure: an
+        -- unreadable, overlapping or badly named zip is refused here.
+        local listed, entries = pcall(upload.zip_reader.list, zip)
+        if not listed then
+            return upload.discard(upload_id, uploads, "the upload is not a readable zip: " .. tostring(entries))
         end
         if #entries ~= 1 then
             return upload.discard(upload_id, uploads,
                 string.format("the upload holds %d entries; a phone upload is one file", #entries))
         end
-        if entries[1].kind ~= "-" then
+        if entries[1].kind ~= "file" then
             return upload.discard(upload_id, uploads, "the upload's one entry is not a regular file")
         end
-        -- -p writes the content without trusting any path stored in the
-        -- zip.  Its exit status is checked: the shell creates `tmp` before
-        -- unzip runs, so the file existing proves nothing.
-        if not upload.succeeded(tools.unzip .. " -p " .. shell_quote(zip) .. " > " .. shell_quote(tmp)) then
-            os.remove(tmp)
-            return upload.discard(upload_id, uploads, "unzip could not unpack the upload")
+        -- No size was agreed for a phone upload, so its entry's own claim
+        -- is the budget, and the claim must fit the free space: the meter
+        -- then holds the entry to it, and a claim of a terabyte from a
+        -- small zip is refused before a byte is written.
+        local free = check_disk_space(u.upload_dir)
+        if free == nil then
+            return upload.discard(upload_id, uploads, "the free space on the disk could not be measured")
         end
+        if entries[1].size > free then
+            return upload.discard(upload_id, uploads, string.format(
+                "the upload would unpack to %s, more than the %s free", fmt_bytes(entries[1].size), fmt_bytes(free)))
+        end
+        local unpack_dir = u.upload_dir .. "/unpack"
+        os.execute("rm -rf " .. shell_quote(unpack_dir) .. " && mkdir -p " .. shell_quote(unpack_dir))
+        local made, why = pcall(upload.zip_reader.extract, zip, unpack_dir,
+                                {size = entries[1].size, exact = true, now = os.time()})
+        if not made then
+            -- the reader removed what it made; the reason says what failed
+            return upload.discard(upload_id, uploads, "the upload could not be unpacked: " .. tostring(why))
+        end
+        -- The one file, wherever its name put it inside unpack_dir, becomes
+        -- `tmp`; any name the zip stored is not trusted for anything else.
+        os.rename(unpack_dir .. "/" .. table.concat(entries[1].pieces, "/"), tmp)
     else
         -- Not a zip: refused.  Everything that crosses the network travels
         -- zipped, so that one checked path handles it and every zip danger
@@ -7378,12 +7228,8 @@ local function init_runtime()
             " is outside 1-65535: " .. tostring(configured_port) .. "\n")
         os.exit(1)
     end
-    if not tools.zip then
-        io.stderr:write("error: 'zip' not found\n       run: scripts/install.sh\n"); os.exit(1)
-    end
-    if not tools.unzip then
-        io.stderr:write("error: 'unzip' not found\n       run: scripts/install.sh\n"); os.exit(1)
-    end
+    -- zip and unzip are no longer needed: attachments are packed and read
+    -- by the shared zip library in libs/ (#405).
     align_contacts()
 
     local rt = {

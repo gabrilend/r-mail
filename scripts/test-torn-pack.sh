@@ -12,9 +12,10 @@
 # says so in the log, and leaves the attachment to be packed again on a
 # later cycle.
 #
-# This script runs two throwaway mailboxes.  The sender's `zip` is a
-# stand-in placed first on its PATH: while a marker file exists, it adds a
-# line to the attachment and then runs the real zip -- a file being written
+# This script runs two throwaway mailboxes.  The sender's `find` is a
+# stand-in placed first on its PATH: while a marker file exists, each
+# `find -H` (the packer's listing, #405) lists and then adds a line to the
+# attachment -- a file being written
 # during packing, every time.  The checks:
 #
 #   torn        the sender's log says the file changed while it was being
@@ -61,9 +62,9 @@ echo "  checkout: $DIR"
 echo "  scratch:  $WORK"
 echo ""
 
-REAL_ZIP=$(command -v zip)
-if [ -z "$REAL_ZIP" ]; then
-    note_fail "no zip on this machine"
+REAL_FIND=$(command -v find)
+if [ -z "$REAL_FIND" ]; then
+    note_fail "no find on this machine"
     exit 1
 fi
 
@@ -87,18 +88,22 @@ MARKER="$WORK/keep-writing"
 printf 'the first line\n' > "$SOURCE"
 touch "$MARKER"
 
-# The stand-in zip: writes to the source while the marker exists, then
-# hands every argument to the real zip.
-cat > "$WORK/bin/zip" <<EOF
+# The stand-in find (#405: packing is the shared zip library's, which lists
+# the tree with `find -H` before reading it and again after): while the
+# marker exists, each `find -H` lists as usual and then writes to the
+# source -- a file being written during packing, every time.  rmail's other
+# uses of find (no -H) are passed through untouched.
+cat > "$WORK/bin/find" <<EOF
 #!/bin/sh
-# stand-in zip for test-torn-pack.sh: simulates a file being written during packing
-if [ -e "$MARKER" ]; then
-    sleep 1
+# stand-in find for test-torn-pack.sh: simulates a file being written during packing
+"$REAL_FIND" "\$@"
+status=\$?
+if [ "\$1" = "-H" ] && [ -e "$MARKER" ]; then
     printf 'a line written during packing\n' >> "$SOURCE"
 fi
-exec "$REAL_ZIP" "\$@"
+exit \$status
 EOF
-chmod +x "$WORK/bin/zip"
+chmod +x "$WORK/bin/find"
 
 printf 'to: receiver\nattach: %s\n\nmy notes\n' "$SOURCE" > "$WORK/sender/outbox/notes"
 

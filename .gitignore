@@ -2,6 +2,10 @@
 deps/
 libs/*
 !libs/dkjson.lua
+# the shared zip library, plain Lua carried with rmail (#405): a copy made
+# by my-libs/zip/install-into, checked by scripts/test-zip-library.sh
+!libs/zip-*.lua
+!libs/zip-library.version
 
 # local config used for testing
 config
