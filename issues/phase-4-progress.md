@@ -29,6 +29,12 @@ runs, new issues that do not fit elsewhere continue here.
 
 Newest first, with one line on what each gave the project.
 
+- **2026-09-29 — #404d a file written to while it is packed is packed
+  again, not sent torn.**  Each file's size and modification time are
+  taken before and after zip reads it; any difference throws the zip away
+  and leaves the attachment for the next cycle.  zip's exit status is now
+  read correctly on LuaJIT too.  Covered by `scripts/test-torn-pack.sh`.
+
 - **2026-09-29 — #404b every attachment piece carries its checksums, and
   the piece count is fixed per transfer.**  A piece without checksums is
   refused; piece numbers must be whole and in range; the count, the whole

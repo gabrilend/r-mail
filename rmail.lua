@@ -3469,9 +3469,44 @@ local function sha256_of_bytes(data)
     return result
 end
 
+-- Attachment helpers live in one table because the main chunk is at Lua's
+-- 200-local ceiling: every further `local function` at this level would
+-- push it over.  Declared here, above compress_attachment, which is the
+-- first function that uses it; its members are defined further down, next
+-- to the code they serve.
+local upload = {}
+
+-- {{{ upload.fingerprint
+-- One line per file and folder under `path` (or `path` itself when it is a
+-- file): its name, size in bytes and modification time to the fraction of
+-- a second.  Two fingerprints differ when anything was written in between.
+-- Used by compress_attachment to notice a file changing while zip reads it
+-- (#404d).  `find -printf` is GNU find, as `stat -c` elsewhere is GNU stat.
+function upload.fingerprint(path)
+    local h = io.popen("find " .. shell_quote(path) .. " -printf '%p %s %T@\\n'")
+    local text = h and h:read("*a")
+    if h then h:close() end
+    if not text or text == "" then
+        -- find printed nothing: the path is gone or unreadable
+        return nil
+    end
+    return text
+end
+-- }}}
+
+-- Pack a file or folder into a zip in the pending folder.  Returns
+-- (zip path, SHA-256, packed size), or nil and a reason:
+--   "missing"    the source could not be read before packing
+--   "zip-failed" zip exited with an error, or wrote nothing
+--   "changed"    the source changed while zip was reading it (#404d); the
+--                zip would be a torn copy -- the start of the old content
+--                and the end of the new -- so it is deleted.  Callers try
+--                again on a later cycle.
 local function compress_attachment(filepath)
     os.execute('mkdir -p ' .. shell_quote(paths.pending))
     local zip_path = paths.pending .. "/rmail-" .. uuid() .. ".zip"
+    local before = upload.fingerprint(filepath)
+    if not before then return nil, "missing" end
     local is_dir_h = io.popen('test -d ' .. shell_quote(filepath) .. ' && echo yes 2>/dev/null')
     local is_dir = is_dir_h and is_dir_h:read("*a"):match("yes")
     if is_dir_h then is_dir_h:close() end
@@ -3486,22 +3521,38 @@ local function compress_attachment(filepath)
         local parent = dir:match("^(.*)/[^/]+$") or "."
         if parent == "" then parent = "/" end
         local base = dir:match("([^/]+)$") or dir
-        ret = os.execute('cd ' .. shell_quote(parent) .. ' && ' .. tools.zip ..
+        ret = upload.succeeded('cd ' .. shell_quote(parent) .. ' && ' .. tools.zip ..
                          ' -r ' .. shell_quote(zip_path) .. ' ' .. shell_quote(base) ..
                          ' >/dev/null 2>&1')
     else
         -- Single file: -j junks the path so the recipient gets just the
         -- filename, not the sender's directory layout.
-        ret = os.execute(tools.zip .. ' -j ' .. shell_quote(zip_path) ..
+        ret = upload.succeeded(tools.zip .. ' -j ' .. shell_quote(zip_path) ..
                          ' ' .. shell_quote(filepath) .. ' >/dev/null 2>&1')
     end
-    -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
-    if not ret then return nil, nil, nil end
+    -- upload.succeeded reads the exit status right on every Lua; the old
+    -- `if not ret` counted a failing zip as success on LuaJIT.
+    if not ret then
+        os.remove(zip_path)
+        log("packing %s failed: zip exited with an error", filepath)
+        return nil, "zip-failed"
+    end
+    if upload.fingerprint(filepath) ~= before then
+        -- written to while zip read it: a torn copy, thrown away
+        os.remove(zip_path)
+        log("packing %s: it changed while it was being packed -- will pack it again next cycle", filepath)
+        return nil, "changed"
+    end
+    -- unchanged: the zip is a true copy
     local checksum = sha256_file(zip_path)
     local size_h = io.popen('wc -c < ' .. shell_quote(zip_path) .. ' 2>/dev/null')
     local comp_size = size_h and tonumber(size_h:read("*a"))
     if size_h then size_h:close() end
-    if not checksum or not comp_size or comp_size == 0 then return nil, nil, nil end
+    if not checksum or not comp_size or comp_size == 0 then
+        os.remove(zip_path)
+        log("packing %s failed: zip wrote nothing", filepath)
+        return nil, "zip-failed"
+    end
     return zip_path, checksum, comp_size
 end
 
@@ -3897,9 +3948,8 @@ end
 
 -- Filing into the attachments directory, shared by phone uploads and
 -- attachments received from contacts: one flat folder, so names collide.
--- One table rather than several locals: the main chunk is at Lua's
--- 200-local ceiling.
-local upload = {}
+-- (The `upload` table itself is declared above compress_attachment, which
+-- also uses it.)
 
 -- Pick the name a new file is stored under: its own if free, the
 -- existing file's if the content is identical (no duplicate), otherwise
@@ -4647,6 +4697,13 @@ local function send_next_chunks(my_name)
             if src and file_exists(src) then
                 new_zip, new_checksum, new_size = compress_attachment(src)
             end
+            if not new_zip and new_checksum == "changed" then
+                -- The source was being written while it was packed (#404d);
+                -- compress_attachment has logged it.  The transfer is kept
+                -- and packed again on the next cycle, rather than cancelled
+                -- as a missing source is below.
+                goto continue
+            end
             if new_zip and new_size then
                 transfer.compressed_path = new_zip
                 transfer.total_checksum  = new_checksum
@@ -5119,7 +5176,11 @@ local function sync_outbox(my_name)
                                             message_id = rmeta.message_id,
                                         }
                                     else
-                                        log("failed to compress %s for %s", filepath, rname)
+                                        -- Not recorded, so the next cycle
+                                        -- packs it again.  On failure
+                                        -- compress_attachment returns the
+                                        -- reason where the checksum would be.
+                                        log("failed to compress %s for %s (%s)", filepath, rname, tostring(checksum))
                                     end
                                 end
                             end

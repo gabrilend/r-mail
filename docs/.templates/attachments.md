@@ -95,6 +95,12 @@ encrypted channel as messages. The receiver responds to each chunk with a list o
 missing chunk indices, so chunks can be received in any order. The sender
 continues until the missing list is empty, then marks the transfer complete.
 
+If the file (or anything in the folder) is being written while it is
+packed, the half-old, half-new zip is thrown away and the log says so:
+`packing <path>: it changed while it was being packed -- will pack it again
+next cycle`.  It is packed again on a later cycle, once it holds still.
+(#404d)
+
 Every chunk carries a SHA-256 checksum. Corrupted chunks are discarded and
 re-requested automatically.
 
