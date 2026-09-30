@@ -63,8 +63,10 @@ While both lines are present, the daemon treats the request as pending and
 checks again on the next sync cycle. You can leave it for as long as you like.
 
 The `Expected size` is the original uncompressed size, as reported by the
-sender. rmail is a trust-based system — the value is not independently
-verified before transfer. See issue #327 for planned size enforcement.
+sender.  It is enforced: a transfer may take at most that size × 1.1 plus
+4 KiB, both in the packed bytes that arrive and in the bytes the zip
+unpacks to (measured before anything is written).  A transfer over either
+limit is cancelled and nothing is kept.  (#327)
 
 ### After your decision
 

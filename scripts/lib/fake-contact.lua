@@ -165,6 +165,36 @@ function M:ask_and_accept(mailbox, att_id, filename, expected_size, seconds)
 end
 -- }}}
 
+-- {{{ function M.for_test
+-- The usual start of a test's Lua half (see scripts/lib/test-receiver.sh,
+-- which passes DIR PORT MALLORY_TOKEN PHONE_TOKEN WORK as arguments):
+-- returns the contact "mallory", the owner's phone, and the mailbox folder,
+-- once the daemon answers.  Exits the script when it never does.
+function M.for_test(args)
+    local dir, port, work = args[1], tonumber(args[2]), args[5]
+    local mallory = M.new(dir, "127.0.0.1", port, args[3])
+    local phone   = M.new(dir, "127.0.0.1", port, args[4])
+    local up = mallory:wait_for(30, function()
+        return (pcall(function() mallory:request("GET", "/") end))
+    end)
+    if not up then print("-- the daemon never answered"); os.exit(1) end
+    return mallory, phone, work .. "/box", work
+end
+-- }}}
+
+-- {{{ function M:send_whole
+-- Ask to send `bytes` (a zip) as `filename` declaring `expected_size`,
+-- accept on the owner's behalf, and send it as one chunk.  Returns the
+-- chunk answer (status, table), or nil when consent was never recorded.
+function M:send_whole(box, att_id, filename, bytes, expected_size)
+    if not self:ask_and_accept(box, att_id, filename, expected_size, 30) then
+        print("-- " .. filename .. ": consent never recorded")
+        return nil
+    end
+    return self:send_chunk(att_id, bytes, 0, math.max(1, #bytes))
+end
+-- }}}
+
 -- {{{ function M.read_file
 function M.read_file(path)
     local f = assert(io.open(path, "rb"))

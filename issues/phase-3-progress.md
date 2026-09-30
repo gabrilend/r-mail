@@ -32,6 +32,15 @@ Issues closed are listed here as they close, newest first, with one line
 on what they gave the project.  Earlier phase-3 issues were closed before
 this file existed; `issues/completed/3*.md` holds all of them.
 
+- **2026-09-29 — #327 reopened and closed again: the unpacked size is
+  enforced.**  A transfer already could not take more packed bytes than
+  its declared size allows; now the bytes its zip unpacks to are measured
+  (really decompressed into a counter, nothing written) against the same
+  limit before extraction, so a small zip cannot unpack into gigabytes.
+  A declared size of 0 no longer switches the limit off, and a request
+  without a size is refused.  Covered by `scripts/test-unpacked-size.sh`.
+  Part of #404 (received attachments are untrusted input).
+
 - **2026-09-23 — #362 wildcards in `attach:` lines** and **#363 outbox
   header robustness.**  `attach: ~/pics/*.jpg` becomes one line per file;
   blank lines inside the header, quoted paths and `~` paths all read the

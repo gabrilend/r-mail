@@ -20,11 +20,11 @@
 # daemon would:
 #
 #   links become notes   a zip with a file, a link to a secret outside the
-#                        mailbox at the top, a link inside a folder, and a
-#                        link whose target holds a newline.  Afterwards no
-#                        link exists in attachments/, each link has its note
-#                        with the right text, and the secret's content is
-#                        in no filed file.
+#                        mailbox, a link inside a folder, and a link whose
+#                        target holds a newline.  Afterwards no link exists
+#                        in attachments/, each link has its note with the
+#                        right text, and the secret's content is in no
+#                        filed file.
 #   hidden link name     a link whose own name holds a newline, which the
 #                        zip listing cannot show faithfully, so the first
 #                        line of defence misses it; unzip makes it, and the
@@ -43,42 +43,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-
-LAUNCHER="$DIR/run-rmail.sh"
-LUA="$DIR/deps/lua/bin/lua"
-
-# RAM-backed scratch space, per project convention.  Rebuilt every run.
 WORK="/tmp/rmail/tests/received-links"
-RAM_FILES="/tmp/rmail-progress/*-tmp-rmail-tests-received-links-*"
-
 PORT=59480
-MALLORY_TOKEN="received-links-test-contact-token-not-a-secret"
-PHONE_TOKEN="received-links-test-phone-token-not-a-secret"
-
-ok()   { printf "  \033[32mok\033[0m   %s\n" "$*"; }
-fail() { printf "  \033[31m--\033[0m   %s\n" "$*"; }
-info() { printf "       %s\n" "$*"; }
-
-FAILURES=0
-note_fail() { fail "$*"; FAILURES=$((FAILURES + 1)); }
-
-echo ""
-echo "rmail received-links test"
-echo "  checkout: $DIR"
-echo "  scratch:  $WORK"
-echo ""
-
-if [ ! -x "$LUA" ]; then
-    note_fail "no bundled Lua at $LUA (scripts/install.sh builds it)"
-    exit 1
-fi
-
-rm -rf "$WORK"
-mkdir -p "$WORK/box/inbox" "$WORK/box/outbox" "$WORK/box/.state" "$WORK/box/attachments"
-rm -f $RAM_FILES
-printf 'name = receiver\nport = %s\nattachment_pending_dir = %s\n' "$PORT" "$WORK/pending" > "$WORK/box/config"
-printf 'mallory.token = "%s"\n\nphone.token = "%s"\nphone.own = true\n' \
-    "$MALLORY_TOKEN" "$PHONE_TOKEN" > "$WORK/box/contacts"
+TEST_NAME="received-links"
+. "$SCRIPT_DIR/lib/test-receiver.sh"
 
 # The secret a link would expose.  Outside the mailbox, like ~/.ssh.
 SECRET="$WORK/secret-key.txt"
@@ -99,47 +67,23 @@ printf 'an ordinary file\n' > "$WORK/build2/plain.txt"
 ln -s "$SECRET" "$WORK/build2/hidden${NL}name"
 (cd "$WORK/build2" && zip -qry "$WORK/hidden.zip" .)
 
-"$LAUNCHER" "$WORK/box/config" > "$WORK/daemon.log" 2>&1 &
-DAEMON_PID=$!
-
-# The Lua half: talks to the daemon, prints one "ok ..." / "-- ..." line
-# per check, which the shell below counts.
-"$LUA" - "$DIR" "$PORT" "$MALLORY_TOKEN" "$PHONE_TOKEN" "$WORK" > "$WORK/lua.out" 2>&1 <<'LUA'
-local DIR, PORT, MALLORY, PHONE, WORK = arg[1], tonumber(arg[2]), arg[3], arg[4], arg[5]
-package.path = DIR .. "/scripts/lib/?.lua;" .. package.path
+start_receiver
+run_lua_cases <<'LUA'
+package.path = arg[1] .. "/scripts/lib/?.lua;" .. package.path
 local fc = require("fake-contact")
-local mallory = fc.new(DIR, "127.0.0.1", PORT, MALLORY)
-local phone   = fc.new(DIR, "127.0.0.1", PORT, PHONE)
-local BOX = WORK .. "/box"
-
--- wait for the daemon to answer at all
-local up = mallory:wait_for(30, function()
-    return pcall(function() mallory:request("GET", "/") end)
-end)
-if not up then print("-- the daemon never answered"); os.exit(1) end
-
--- {{{ local function send_zip
--- Ask, accept, and send the whole zip in one piece.
-local function send_zip(att_id, filename, zip_path)
-    local bytes = fc.read_file(zip_path)
-    if not mallory:ask_and_accept(BOX, att_id, filename, 100000, 30) then
-        print("-- " .. filename .. ": consent never recorded")
-        return nil
-    end
-    local status, answer = mallory:send_chunk(att_id, bytes, 0, 5242880)
-    return status, answer
-end
--- }}}
+local mallory, phone, BOX, WORK = fc.for_test(arg)
 
 print("section links become notes")
-local s, a = send_zip("11111111-1111-4111-8111-111111111111", "pkg", WORK .. "/links.zip")
+local s, a = mallory:send_whole(BOX, "11111111-1111-4111-8111-111111111111", "pkg",
+                                fc.read_file(WORK .. "/links.zip"), 100000)
 print(s == 200 and a.ok == true and "ok the zip was taken" or
-      ("-- the zip was not taken: " .. tostring(s) .. " " .. mallory.json.encode(a)))
+      ("-- the zip was not taken: " .. tostring(s) .. " " .. mallory.json.encode(a or {})))
 
 print("section hidden link name")
-s, a = send_zip("22222222-2222-4222-8222-222222222222", "hidden", WORK .. "/hidden.zip")
+s, a = mallory:send_whole(BOX, "22222222-2222-4222-8222-222222222222", "hidden",
+                          fc.read_file(WORK .. "/hidden.zip"), 100000)
 print(s == 200 and a.cancelled == true and "ok the transfer was refused" or
-      ("-- the transfer was not refused: " .. tostring(s) .. " " .. mallory.json.encode(a)))
+      ("-- the transfer was not refused: " .. tostring(s) .. " " .. mallory.json.encode(a or {})))
 local rec = mallory:consent_record(BOX, "22222222-2222-4222-8222-222222222222")
 print(rec and rec.rejection_reason == "link-in-archive" and "ok its record says link-in-archive" or
       ("-- its record says " .. tostring(rec and rec.rejection_reason)))
@@ -155,25 +99,9 @@ print(st == 403 and "ok its first piece is refused" or ("-- its first piece answ
 local _, body = phone:request("GET", "/api/attachments")
 print(not body:find("planted", 1, true) and "ok the listing leaves it out" or "-- the listing shows it")
 LUA
-LUA_STATUS=$?
+stop_receiver
 
-kill "$DAEMON_PID"
-wait "$DAEMON_PID" 2>/dev/null
-
-# Relay the Lua half's verdicts.
-while IFS= read -r line; do
-    case "$line" in
-        "section "*) echo ""; echo "${line#section }" ;;
-        "ok "*)      ok "${line#ok }" ;;
-        "-- "*)      note_fail "${line#-- }" ;;
-        *)           info "$line" ;;
-    esac
-done < "$WORK/lua.out"
-if [ "$LUA_STATUS" -ne 0 ]; then
-    note_fail "the stand-in contact stopped with status $LUA_STATUS"
-fi
-
-ATT="$WORK/box/attachments"
+ATT="$BOX/attachments"
 echo ""
 echo "what was filed"
 LINKS=$(find "$ATT" -type l ! -name planted)
@@ -188,29 +116,31 @@ if grep -Rq "SECRET-KEY-MATERIAL" "$ATT" --exclude=planted; then
 else
     ok "the secret's content is in no filed file"
 fi
-if [ "$(cat "$ATT/pkg/hello.txt" 2>&1)" = "an ordinary file" ]; then
+if [ -f "$ATT/pkg/hello.txt" ] && [ "$(cat "$ATT/pkg/hello.txt")" = "an ordinary file" ]; then
     ok "the ordinary file arrived"
 else
     note_fail "the ordinary file did not arrive"
 fi
-EXPECTED_KEY="This was a symbolic link to: $SECRET
-It was not recreated, because a link can point at any file on this computer. If it is valid here, make it by hand."
-if [ "$(cat "$ATT/pkg/key.symlink.txt" 2>&1)" = "$EXPECTED_KEY" ]; then
-    ok "the link to the secret became a note naming its target"
+
+# note_says <file> <exact first line> -- the note exists and says this
+note_says() {
+    [ -f "$1" ] && [ "$(head -n 1 "$1")" = "$2" ] && [ "$(wc -l < "$1")" -eq 2 ]
+}
+if note_says "$ATT/pkg/key.symlink.txt" "This was a symbolic link to: $SECRET" \
+   && grep -qx "It was not recreated, because a link can point at any file on this computer. If it is valid here, make it by hand." "$ATT/pkg/key.symlink.txt"; then
+    ok "the link to the secret became a two-line note naming its target"
 else
     note_fail "no correct note for the link to the secret"
-    info "$(cat "$ATT/pkg/key.symlink.txt" 2>&1)"
 fi
-if grep -q "^This was a symbolic link to: /etc/hostname$" "$ATT/pkg/inner/lnk.symlink.txt" 2>/dev/null; then
+if note_says "$ATT/pkg/inner/lnk.symlink.txt" "This was a symbolic link to: /etc/hostname"; then
     ok "the link inside a folder became a note"
 else
     note_fail "no note for the link inside a folder"
 fi
-if grep -q '^This was a symbolic link to: /tmp/a\\x0Ab$' "$ATT/pkg/newline-target.symlink.txt" 2>/dev/null; then
-    ok "a newline in a target is written as \\x0A, keeping the note one line"
+if note_says "$ATT/pkg/newline-target.symlink.txt" 'This was a symbolic link to: /tmp/a\x0Ab'; then
+    ok "a newline in a target is written as \\x0A, keeping the note two lines"
 else
     note_fail "the newline in a target was not escaped"
-    info "$(cat "$ATT/pkg/newline-target.symlink.txt" 2>&1)"
 fi
 if [ -e "$ATT/plain.txt" ]; then
     note_fail "the refused transfer still filed its ordinary file"
@@ -218,13 +148,4 @@ else
     ok "the refused transfer filed nothing"
 fi
 
-rm -f $RAM_FILES
-
-echo ""
-if [ "$FAILURES" -eq 0 ]; then
-    printf "  \033[32mall cases passed\033[0m\n\n"
-    exit 0
-fi
-printf "  \033[31m%s case(s) failed\033[0m\n\n" "$FAILURES"
-info "daemon log: $WORK/daemon.log"
-exit 1
+finish

@@ -3535,9 +3535,16 @@ local function handle_attachment_request(data, sender)
     -- sanitized name is what the user sees in the consent form and what the
     -- saved attachment will actually be called.
     local filename = sanitize_filename(data.filename or "")
-    local expected_size = tonumber(data.expected_size) or 0
+    local expected_size = tonumber(data.expected_size)
     local message_id = data.message_id or uuid()
     if not att_id then return 400, {error = "missing attachment_id"} end
+    -- The declared size is what both size limits are built from (#327),
+    -- so it must be a real byte count.  Missing or not a whole number:
+    -- refused.  It used to be read as 0 when missing, and 0 used to mean
+    -- "no limit at all".
+    if not expected_size or expected_size < 0 or expected_size ~= math.floor(expected_size) then
+        return 400, {error = "expected_size must be a whole number of bytes"}
+    end
 
     local pending = load_state("consent-pending.json")
     -- Idempotent: if we already have an entry for this att_id, a retry from
@@ -4118,6 +4125,43 @@ function upload.unpack_received(zip, extract_dir)
 end
 -- }}}
 
+-- {{{ upload.size_limit
+-- The most bytes a transfer declared as `expected_size` bytes may take,
+-- packed or unpacked (#327).  10% headroom plus 4 KiB: zipping data that
+-- is already compressed (jpg, mp3) can grow it slightly by zip's own
+-- bookkeeping, and the 4 KiB floor covers tiny files, where 10% rounds to
+-- almost nothing.  The sender measures expected_size with `du -sb`, which
+-- for a folder also counts the folders themselves, so honest content is
+-- always under it.
+function upload.size_limit(expected_size)
+    return math.floor(expected_size * 1.1) + 4096
+end
+-- }}}
+
+-- {{{ upload.measure_unpacked
+-- Count the bytes a zip would unpack to, without writing any of them, and
+-- stop counting one byte past `limit`.  Returns the count, which is
+-- limit + 1 when the zip is bigger than the limit.
+--
+-- The sizes a zip's table of contents claims are written by its sender, so
+-- they are not used.  Instead every entry is really decompressed:
+-- `unzip -p` streams all contents to its standard output, `head -c`
+-- stops after limit + 1 bytes (closing the pipe, which stops unzip), and
+-- `wc -c` counts what got through.  One pipeline because it is a stream:
+-- nothing is stored, and a zip bomb costs a fraction of a second.
+function upload.measure_unpacked(zip, limit)
+    local h = io.popen(tools.unzip .. " -p " .. shell_quote(zip) ..
+                       " | head -c " .. string.format("%d", limit + 1) .. " | wc -c")
+    local count = h and tonumber(h:read("*a"))
+    if h then h:close() end
+    if not count then
+        -- wc always prints a number; no number means the shell never ran
+        error("could not measure the unpacked size of " .. zip)
+    end
+    return count
+end
+-- }}}
+
 -- {{{ upload.refuse_transfer
 -- Stop a contact's transfer for good: its pending folder (chunks, zip,
 -- anything extracted) is removed, the consent form leaves the inbox, and
@@ -4174,7 +4218,10 @@ local function handle_attachment_chunk(data, sender)
         -- malicious or buggy sender could advertise a small attachment in the
         -- consent prompt and then stream arbitrary amounts of data, exhausting
         -- the recipient's disk after consent was already granted.
-        if cpe and cpe.expected_size and cpe.expected_size > 0 then
+        -- Applies whatever the declared size, 0 included (#327): a declared
+        -- 0 used to switch the check off.  expected_size is always a
+        -- number here -- the request handler refuses anything else.
+        do
             -- Lazy-initialise bytes_received from any existing on-disk chunks,
             -- so a transfer started before this check was added gets a correct
             -- running total the first time it arrives.
@@ -4198,11 +4245,7 @@ local function handle_attachment_chunk(data, sender)
             end
             local projected = cpe.bytes_received + (#raw - existing)
 
-            -- 10% headroom plus a 4KB floor: zipping incompressible data (jpg,
-            -- mp3, already-compressed files) can inflate slightly due to zip
-            -- metadata.  The floor covers tiny attachments where 10% rounds
-            -- to almost nothing.
-            local limit = math.floor(cpe.expected_size * 1.1) + 4096
+            local limit = upload.size_limit(cpe.expected_size)
             if projected > limit then
                 log("oversize transfer from %s: %s declared %s, " ..
                     "cumulative would reach %s (limit %s) — rejecting",
@@ -4316,6 +4359,17 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local extract_dir = pending_dir .. "/extract"
     os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
+    -- A zip bomb is caught before anything is written (#327): the unpacked
+    -- bytes are counted, and the same limit as the packed bytes applies.
+    local unpacked_limit = upload.size_limit(cpe.expected_size)
+    local unpacked_bytes = upload.measure_unpacked(zip_path, unpacked_limit)
+    if unpacked_bytes > unpacked_limit then
+        -- over the limit: refused for good, like an oversize packed transfer
+        log("oversize transfer from %s: %s declared %s, unpacks to more than %s -- rejecting",
+            sender, filename, fmt_bytes(cpe.expected_size), fmt_bytes(unpacked_limit))
+        return upload.refuse_transfer(att_id, cpe, cprog, "oversize-unpacked")
+    end
+    -- within the limit: go on to extract
     -- No symbolic link is ever recreated from a contact's zip (#404a); see
     -- upload.unpack_received for the two lines of defence.
     local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir)
