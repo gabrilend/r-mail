@@ -29,6 +29,17 @@ runs, new issues that do not fit elsewhere continue here.
 
 Newest first, with one line on what each gave the project.
 
+- **2026-09-29 — #404a a symbolic link in a received zip becomes a note.**
+  A contact's zip could plant a link to any file on the computer (a
+  private key, say) in `attachments/`, and the phone read through it.
+  Links are now left out of extraction and replaced by a
+  `<name>.symlink.txt` note saying where they pointed; a search after
+  extracting refuses any that slip through; the phone is never served a
+  link.  Also fixed: the phone's attachment listing crashed whenever a
+  folder was in `attachments/`.  Covered by
+  `scripts/test-received-links.sh`.  Part of #404 (received attachments
+  are untrusted input), which is still open.
+
 - **2026-09-29 — #403 the JSON library's choice of decoder is no longer
   silent.**  The bundled dkjson's switch to its faster LPeg decoder
   crashed on every modern LPeg and fell back to plain Lua without a word;

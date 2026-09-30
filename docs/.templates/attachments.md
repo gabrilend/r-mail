@@ -100,6 +100,29 @@ When all chunks have arrived, the receiver reassembles the zip, verifies the
 total checksum, extracts the file, and fires the `on_package` hook (if
 configured).
 
+### What a received attachment is not allowed to do
+
+A contact's zip is a claim about files, written by the contact.  The
+receiving daemon checks it before anything reaches `attachments/`:
+
+- **No symbolic links.**  A symbolic link is a tiny file whose content is
+  a path; opening it opens whatever that path names, anywhere on the
+  computer.  A link entry in a received zip is never recreated.  In its
+  place is a plain note, `<name>.symlink.txt`:
+
+  ```
+  This was a symbolic link to: /home/alice/.ssh/id_rsa
+  It was not recreated, because a link can point at any file on this computer. If it is valid here, make it by hand.
+  ```
+
+  Control characters in the target are written as `\xNN`.  If something
+  in a received folder does not work, look for these notes; make the link
+  yourself if it is one you want.  Links are left out of extraction
+  altogether (so nothing can be written through one), and afterwards the
+  extracted folder is searched for links; finding any refuses the whole
+  transfer.  The phone is never served a link from `attachments/`, even
+  one you made by hand.  (#404a)
+
 ### In-progress visibility
 
 While a transfer is running, the consent file in your inbox is updated after each

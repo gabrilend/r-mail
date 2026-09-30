@@ -383,65 +383,6 @@ local function start_file_watcher(path)
     return fd, inotify_wrap(fd)
 end
 
--- Per-session cache of directories we've already warned about,
--- keyed by absolute "<parent-dir>/<subdir>" so the same stray dir
--- doesn't log once per sync cycle.  Cleared on daemon restart,
--- which is exactly often enough for a warning — if the dir is
--- still there the user will see the warning again next startup.
-local _listed_dir_warned = {}
-
-local function list_files(dir)
-    -- `ls -1p` appends a trailing `/` to directory entries (POSIX).
-    -- Skip those + dotfiles so every returned name is a regular file
-    -- the caller can read.  Without this, a user-created subdirectory
-    -- in inbox/ whose name happened to match a consent/progress file
-    -- would make consent_cancelled() see a failed read and cancel the
-    -- transfer (#356), and a dir whose name matched an in-flight
-    -- message would block the delete-notify path in sync_inbox.
-    --
-    -- Directories found in a watched location are skipped *and*
-    -- logged once per session.  The message is tailored by dir: the
-    -- outbox case tells the user how to send the directory as an
-    -- attachment (the most likely intent), the inbox case tells them
-    -- rmail doesn't write directories there, and the attachments
-    -- case just notes we're ignoring it — user-organised subfolders
-    -- under attachments/ are legitimate.
-    local files = {}
-    local handle = io.popen('ls -1p "' .. dir .. '" 2>/dev/null')
-    if handle then
-        for name in handle:lines() do
-            if name:sub(1, 1) ~= '.' then
-                if name:sub(-1) == '/' then
-                    local real = name:sub(1, -2)
-                    local key = dir .. "/" .. real
-                    if not _listed_dir_warned[key] then
-                        _listed_dir_warned[key] = true
-                        local abs = dir .. "/" .. real
-                        if OUTBOX and dir == OUTBOX then
-                            log("ignoring directory %s in outbox — rmail " ..
-                                "sends regular files.  To send the directory " ..
-                                "as an attachment, create a new outbox " ..
-                                "message with a line like:", abs)
-                            log("    attach: %s", abs)
-                        elseif INBOX and dir == INBOX then
-                            log("ignoring directory %s in inbox — rmail " ..
-                                "doesn't put directories there; your daemon " ..
-                                "didn't create this one", abs)
-                        else
-                            log("ignoring directory %s — rmail only " ..
-                                "processes regular files at this path", abs)
-                        end
-                    end
-                else
-                    files[#files + 1] = name
-                end
-            end
-        end
-        handle:close()
-    end
-    return files
-end
-
 local function shell_quote(s)
     return "'" .. s:gsub("'", "'\\''") .. "'"
 end
@@ -825,6 +766,70 @@ local function log(fmt, ...)
     fh:flush()
     local size = fh:seek("end")
     if size and size >= LOG_MAX_BYTES then log_rotate() end
+end
+
+-- The directory-listing helper sits below log() because it logs: placed
+-- above it, the name `log` was still unbound when the helper was
+-- compiled, and the first directory it met crashed the request
+-- (found 2026-09-29: the phone's attachment listing, whenever a folder
+-- attachment was in attachments/).
+-- Per-session cache of directories we've already warned about,
+-- keyed by absolute "<parent-dir>/<subdir>" so the same stray dir
+-- doesn't log once per sync cycle.  Cleared on daemon restart,
+-- which is exactly often enough for a warning — if the dir is
+-- still there the user will see the warning again next startup.
+local _listed_dir_warned = {}
+
+local function list_files(dir)
+    -- `ls -1p` appends a trailing `/` to directory entries (POSIX).
+    -- Skip those + dotfiles so every returned name is a regular file
+    -- the caller can read.  Without this, a user-created subdirectory
+    -- in inbox/ whose name happened to match a consent/progress file
+    -- would make consent_cancelled() see a failed read and cancel the
+    -- transfer (#356), and a dir whose name matched an in-flight
+    -- message would block the delete-notify path in sync_inbox.
+    --
+    -- Directories found in a watched location are skipped *and*
+    -- logged once per session.  The message is tailored by dir: the
+    -- outbox case tells the user how to send the directory as an
+    -- attachment (the most likely intent), the inbox case tells them
+    -- rmail doesn't write directories there, and the attachments
+    -- case just notes we're ignoring it — user-organised subfolders
+    -- under attachments/ are legitimate.
+    local files = {}
+    local handle = io.popen('ls -1p "' .. dir .. '" 2>/dev/null')
+    if handle then
+        for name in handle:lines() do
+            if name:sub(1, 1) ~= '.' then
+                if name:sub(-1) == '/' then
+                    local real = name:sub(1, -2)
+                    local key = dir .. "/" .. real
+                    if not _listed_dir_warned[key] then
+                        _listed_dir_warned[key] = true
+                        local abs = dir .. "/" .. real
+                        if OUTBOX and dir == OUTBOX then
+                            log("ignoring directory %s in outbox — rmail " ..
+                                "sends regular files.  To send the directory " ..
+                                "as an attachment, create a new outbox " ..
+                                "message with a line like:", abs)
+                            log("    attach: %s", abs)
+                        elseif INBOX and dir == INBOX then
+                            log("ignoring directory %s in inbox — rmail " ..
+                                "doesn't put directories there; your daemon " ..
+                                "didn't create this one", abs)
+                        else
+                            log("ignoring directory %s — rmail only " ..
+                                "processes regular files at this path", abs)
+                        end
+                    end
+                else
+                    files[#files + 1] = name
+                end
+            end
+        end
+        handle:close()
+    end
+    return files
 end
 
 -- ---- The daemon reporting its own problems as mail (#382) ---------------
@@ -3928,6 +3933,209 @@ function upload.file_entry(src, name)
     end
 end
 
+-- ---- Unpacking a zip that came from somebody else (#404) ----------------
+--
+-- A zip that arrives from a contact or the phone is a claim about files,
+-- written by the sender.  Everything below checks the claim before the
+-- disk is touched.  They live in the `upload` table for the same reason
+-- the filing helpers do: the main chunk is at Lua's 200-local ceiling.
+
+-- {{{ upload.succeeded
+-- Run a shell command and answer whether it exited 0.  os.execute reports
+-- this differently by Lua version: 5.1 and LuaJIT return the exit status
+-- as a number (0 on success, so a failure is still "truthy"); 5.2 and
+-- later return true or nil.  Testing `if not ret` is only right on the
+-- second kind, which is how a failing zip or unzip went unnoticed on
+-- LuaJIT.
+function upload.succeeded(cmd)
+    local first = os.execute(cmd)
+    if type(first) == "number" then
+        -- Lua 5.1 / LuaJIT: the number is the status; only 0 is success.
+        return first == 0
+    end
+    -- Lua 5.2+: true means exit 0; nil means non-zero exit or a signal.
+    return first == true
+end
+-- }}}
+
+-- {{{ upload.list_entries
+-- Read a zip's table of contents.  Returns a list of entries
+--   { kind = string (one character: "-" file, "d" folder, "l" link, or
+--                    another mode letter for anything stranger),
+--     name = string (the path stored in the zip, as the listing shows it) }
+-- or nil and a reason.
+--
+-- `unzip -Z` is zipinfo.  Its default listing is one line per entry:
+--   lrwxrwxrwx  3.0 unx       13 bx stor 26-Sep-29 22:39 d/lnk
+-- mode, zip version, system, size, text/binary + extra-field flags,
+-- method, date, time, then the name (which may hold spaces) after one
+-- space.  The version column (digits.digit) is what tells an entry line
+-- from the header and totals lines around it.
+--
+-- A name holding control characters is shown escaped (^J), so the listing
+-- is still one line per entry; such a name will simply not match anything
+-- later, which the post-extraction link search is there to catch.  The
+-- entry count is checked against the header's own count so that a line
+-- the pattern failed to read cannot go missing silently.
+function upload.list_entries(zip)
+    local h = io.popen(tools.unzip .. " -Z " .. shell_quote(zip))
+    if not h then return nil, "could not run unzip -Z" end
+    local entries, declared = {}, nil
+    for line in h:lines() do
+        local n = line:match("number of entries: (%d+)")
+        if n then
+            -- the header line: how many entries the zip says it has
+            declared = tonumber(n)
+        else
+            local mode, name = line:match(
+                "^(%S+)%s+%d+%.%d+%s+%S+%s+%d+%s+%S+%s+%S+%s+%S+%s+%S+ (.*)$")
+            if mode then
+                -- an entry line
+                entries[#entries + 1] = {kind = mode:sub(1, 1), name = name}
+            end
+            -- any other line is the "Archive:" heading or the totals line
+        end
+    end
+    h:close()
+    if declared == nil then
+        -- no header: unzip could not read the file as a zip at all
+        return nil, "not a readable zip"
+    end
+    if declared ~= #entries then
+        return nil, string.format("the listing shows %d entries but the zip says %d",
+                                  #entries, declared)
+    end
+    return entries
+end
+-- }}}
+
+-- {{{ upload.unzip_pattern
+-- unzip reads the names given to it (for -p and -x) as wildcard patterns:
+-- * ? and [...] match other names.  Wrapping each of those characters in
+-- brackets makes it match only itself, so a name is taken literally.
+function upload.unzip_pattern(name)
+    return (name:gsub("[%[%*%?]", function(ch) return "[" .. ch .. "]" end))
+end
+-- }}}
+
+-- {{{ upload.link_note
+-- The text left in place of a symbolic link.  The owner's design
+-- (2026-09-29): a note an agent or a person will find when something does
+-- not work, saying what the link was, so it can be made by hand if it is
+-- valid here -- a recognition check rather than a silent gap.  Control
+-- characters in the target become \xNN so the note stays one honest line
+-- and a target cannot write a second line of its own.
+function upload.link_note(target)
+    local shown = target:gsub("%c", function(ch)
+        return string.format("\\x%02X", ch:byte())
+    end)
+    return "This was a symbolic link to: " .. shown .. "\n" ..
+           "It was not recreated, because a link can point at any file on this " ..
+           "computer. If it is valid here, make it by hand.\n"
+end
+-- }}}
+
+-- {{{ upload.is_link
+-- True when path is a symbolic link (live or dangling).
+function upload.is_link(path)
+    return upload.succeeded("test -L " .. shell_quote(path))
+end
+-- }}}
+
+-- {{{ upload.unpack_received
+-- Extract a received zip into extract_dir without ever creating a link.
+-- Returns true, or nil plus a short reason and a sentence for the log.
+--
+-- Two lines of defence (#404a):
+--   1. Links are found in the table of contents first and left out of
+--      extraction, so none exists at any moment for a later entry to be
+--      written through.  Each gets a note (<name>.symlink.txt) whose text
+--      comes from the link entry's own content, which is its target.
+--   2. After extraction the folder is searched for links.  Any at all
+--      refuses the whole transfer: something got past step 1.
+function upload.unpack_received(zip, extract_dir)
+    local entries, why = upload.list_entries(zip)
+    if not entries then return nil, "unreadable-archive", why end
+
+    local links = {}
+    for _, e in ipairs(entries) do
+        if e.kind == "l" then
+            -- A note is written at the link's own path inside extract_dir,
+            -- so a name that could climb out of it is refused outright.
+            if e.name:sub(1, 1) == "/" or ("/" .. e.name .. "/"):find("/%.%./") then
+                return nil, "link-in-archive",
+                    "a link entry has a name that leaves the folder: " .. e.name
+            end
+            links[#links + 1] = e.name
+        end
+    end
+
+    -- Extract everything except the links.
+    local cmd = tools.unzip .. " -o -q " .. shell_quote(zip) .. " -d " .. shell_quote(extract_dir)
+    if #links > 0 then
+        -- links present: exclude each one by its literal name
+        cmd = cmd .. " -x"
+        for _, name in ipairs(links) do cmd = cmd .. " " .. shell_quote(upload.unzip_pattern(name)) end
+    end
+    -- no links: nothing to exclude
+    if not upload.succeeded(cmd .. " >/dev/null") then
+        return nil, "extraction-failed", "unzip did not finish cleanly"
+    end
+
+    -- Second line of defence, before any note is written (a note is a
+    -- regular file and cannot be confused with a link, but checking first
+    -- keeps the question "did unzip make a link?" unmixed).
+    local fh = io.popen("find " .. shell_quote(extract_dir) .. " -type l")
+    local survivor = fh and fh:read("*l")
+    if fh then fh:close() end
+    if survivor then
+        return nil, "link-in-archive", "unzip created a link anyway: " .. survivor
+    end
+
+    for _, name in ipairs(links) do
+        local th = io.popen(tools.unzip .. " -p " .. shell_quote(zip) .. " " ..
+                            shell_quote(upload.unzip_pattern(name)))
+        local target = th and th:read("*a")
+        if th then th:close() end
+        if not target or target == "" then
+            -- The name did not match its own entry (a name the listing
+            -- escaped), or the entry is empty: nothing honest to write.
+            return nil, "link-in-archive", "could not read where link " .. name .. " points"
+        end
+        local note = extract_dir .. "/" .. name .. ".symlink.txt"
+        if file_exists(note) then
+            -- the zip also holds a real file by that name; refuse rather
+            -- than choose which one the owner meant
+            return nil, "link-in-archive", "a file already has the note's name: " .. name .. ".symlink.txt"
+        end
+        local parent = note:match("^(.*)/[^/]*$")
+        os.execute("mkdir -p " .. shell_quote(parent))
+        if not write_file(note, upload.link_note(target)) then
+            return nil, "extraction-failed", "could not write the note for " .. name
+        end
+    end
+    return true
+end
+-- }}}
+
+-- {{{ upload.refuse_transfer
+-- Stop a contact's transfer for good: its pending folder (chunks, zip,
+-- anything extracted) is removed, the consent form leaves the inbox, and
+-- the record becomes cancel_pending, which send_attachment_cancellations
+-- turns into a notice to the sender.  `reason` is kept in the record as
+-- rejection_reason so the state file says why.  Returns the answer the
+-- chunk handler gives the sender.
+function upload.refuse_transfer(att_id, cpe, cprog, reason)
+    os.execute('rm -rf ' .. shell_quote(paths.pending .. "/.pending/" .. att_id))
+    remove_consent_form(cpe.inbox_file, att_id)
+    cpe.status = "cancel_pending"
+    cpe.rejection_reason = reason
+    cprog[att_id] = cpe
+    save_state("consent-pending.json", cprog)
+    return 200, {ok = false, cancelled = true}
+end
+-- }}}
+
 local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
@@ -4108,13 +4316,22 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local extract_dir = pending_dir .. "/extract"
     os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
-    local ret = os.execute(tools.unzip .. ' -o ' .. shell_quote(zip_path) ..
-                           ' -d ' .. shell_quote(extract_dir) .. ' >/dev/null 2>&1')
-    -- Lua 5.4 returns true on success, Lua 5.1 returns 0. Check for falsy value.
-    if not ret then
-        log("failed to extract %s from %s", filename, sender)
+    -- No symbolic link is ever recreated from a contact's zip (#404a); see
+    -- upload.unpack_received for the two lines of defence.
+    local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir)
+    if not unpacked and why == "extraction-failed" then
+        -- unzip itself failed: the chunks matched their checksums, so the
+        -- zip is what the sender sent.  Kept as before: answer 500 and
+        -- leave the chunks, so the owner can look at them.
+        log("failed to extract %s from %s: %s", filename, sender, detail)
         return 500, {error = "extraction failed"}
+    elseif not unpacked then
+        -- A link, or a zip whose contents could not be listed faithfully:
+        -- refuse the transfer for good.
+        log("refused %s from %s: %s -- transfer cancelled", filename, sender, detail)
+        return upload.refuse_transfer(att_id, cpe, cprog, why)
     end
+    -- unpacked: every entry in extract_dir is a regular file or folder
 
     local target = paths.attachments .. "/" .. filename
     local lh = io.popen('ls -A ' .. shell_quote(extract_dir) .. ' 2>/dev/null')
@@ -5888,6 +6105,9 @@ local function handle_api_list_attachments()
     local result = {}
     for _, f in ipairs(list_files(paths.attachments)) do
         local path = paths.attachments .. "/" .. f
+        -- A symbolic link is left out: the phone is only ever given files
+        -- that are really in this folder (#404a).  Anything else is listed.
+        if upload.is_link(path) then goto next_file end
         local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
         local size = h and tonumber(h:read("*a"))
         if h then h:close() end
@@ -5898,13 +6118,30 @@ local function handle_api_list_attachments()
             sender   = sender_for[f] or "",
             checksum = sha256_file(path) or "",
         }
+        ::next_file::
     end
     return 200, {files = result}
 end
 
+-- {{{ upload.refuse_link
+-- The three download handlers below ask this first.  A symbolic link in
+-- attachments/ is never read through: it could name any file on this
+-- computer, and before #404a a contact's zip could plant one.  Returns
+-- true (and logs) when the path is a link, so the caller answers 403.
+function upload.refuse_link(path, filename)
+    if upload.is_link(path) then
+        log("phone asked for %s, which is a symbolic link -- refused (links are never served)", filename)
+        return true
+    end
+    return false
+end
+-- }}}
+
 -- GET /api/attachments/<filename> — download an attachment file to the phone.
 local function handle_api_get_attachment(filename)
     filename = sanitize_filename(filename)
+    -- a link: refused; anything else: read as before
+    if upload.refuse_link(paths.attachments .. "/" .. filename, filename) then return 403, nil, nil end
     local content = read_file_binary(paths.attachments .. "/" .. filename)
     if not content then return 404, nil, nil end
     return 200, "application/octet-stream", content
@@ -5934,6 +6171,8 @@ local DOWNLOAD_CHUNK_SIZE = 256 * 1024  -- 256 KiB per chunk (small for resumabi
 local function handle_api_attachment_info(filename)
     filename = sanitize_filename(filename)
     local path = paths.attachments .. "/" .. filename
+    -- a link: refused; anything else: measured as before
+    if upload.refuse_link(path, filename) then return 403, {error = "symbolic links are not served"} end
     local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
     local size = h and tonumber(h:read("*a"))
     if h then h:close() end
@@ -5967,6 +6206,8 @@ end
 local function handle_api_attachment_chunk(filename, chunk_n)
     filename = sanitize_filename(filename)
     local path = paths.attachments .. "/" .. filename
+    -- a link: refused; anything else: read as before
+    if upload.refuse_link(path, filename) then return 403, nil, nil end
     local f = io.open(path, "rb")
     if not f then return 404, nil, nil end
     local offset = chunk_n * DOWNLOAD_CHUNK_SIZE
@@ -6513,11 +6754,15 @@ local function handle_request(rt, client)
                 fn = path:match("^/api/attachments/(.+)/chunk/(%d+)$")
                 local cn = tonumber(path:match("/chunk/(%d+)$"))
                 local s, ct, c = handle_api_attachment_chunk(fn, cn)
-                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+                -- bytes: sent; 403: a link (#404a); anything else: not there
+                if ct then send_raw_response(resp, s, ct, c)
+                else send_response(resp, s, {error = s == 403 and "symbolic links are not served" or "not found"}) end
             elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
                 fn = path:match("^/api/attachments/(.+)$")
                 local s, ct, c = handle_api_get_attachment(fn)
-                if ct then send_raw_response(resp, s, ct, c) else send_response(resp, s, {error = "not found"}) end
+                -- bytes: sent; 403: a link (#404a); anything else: not there
+                if ct then send_raw_response(resp, s, ct, c)
+                else send_response(resp, s, {error = s == 403 and "symbolic links are not served" or "not found"}) end
             elseif method == "DELETE" and path:match("^/api/attachments/(.+)$") then
                 fn = path:match("^/api/attachments/(.+)$")
                 local s, r = handle_api_delete_attachment(fn); send_response(resp, s, r)
