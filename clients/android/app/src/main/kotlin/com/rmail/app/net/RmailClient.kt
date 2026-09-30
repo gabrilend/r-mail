@@ -599,7 +599,8 @@ class RmailClient(
      * POST /api/upload/resume — resume an interrupted upload.
      * Server responds with upload_id, server_path, and list of missing chunk indices.
      */
-    fun uploadResume(filename: String, numChunks: Int, chunkChecksums: Map<Int, String>): UploadResumeResult? {
+    fun uploadResume(filename: String, numChunks: Int, chunkChecksums: Map<Int, String>,
+                     totalChecksum: String): UploadResumeResult? {
         return try {
             val body = JSONObject().apply {
                 put("filename", filename)
@@ -607,6 +608,11 @@ class RmailClient(
                 val cs = JSONObject()
                 chunkChecksums.forEach { (k, v) -> cs.put(k.toString(), v) }
                 put("chunk_checksums", cs)
+                // SHA-256 of the whole zip (the pieces joined in order).  The
+                // daemon checks each piece against chunk_checksums as it
+                // arrives and the joined whole against this (#404c); it
+                // refuses a resume without it.
+                put("total_checksum", totalChecksum)
             }
             val (status, respBody) = post("/api/upload/resume", body)
             if (status != 200) return null
@@ -754,14 +760,21 @@ class RmailClient(
                 return null  // no input and no cached chunks
             }
 
-            // Step 2: compute per-chunk checksums
+            // Step 2: compute per-chunk checksums, and the checksum of the
+            // whole zip by feeding the same pieces, in order, through one
+            // digest.  Computed from the piece files rather than the zip so
+            // that a resumed upload (whose zip is long deleted) has it too.
             val checksums = mutableMapOf<Int, String>()
+            val whole = java.security.MessageDigest.getInstance("SHA-256")
             for (i in 0 until numChunks) {
-                checksums[i] = com.rmail.app.crypto.Crypto.sha256Hex(chunkFile(i).readBytes())
+                val bytes = chunkFile(i).readBytes()
+                checksums[i] = com.rmail.app.crypto.Crypto.sha256Hex(bytes)
+                whole.update(bytes)
             }
+            val totalChecksum = whole.digest().joinToString("") { "%02x".format(it) }
 
             // Step 3: ask server which chunks are missing (resume-aware)
-            val resume = client.uploadResume(filename, numChunks, checksums) ?: return null
+            val resume = client.uploadResume(filename, numChunks, checksums, totalChecksum) ?: return null
             val missing = resume.missing
             var finalPath: String? = resume.serverPath
 

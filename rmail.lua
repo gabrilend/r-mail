@@ -6327,7 +6327,23 @@ end
 -- a "photo.jpg" that was an archive.  (`upload` is declared further up, with
 -- the naming rule it shares with received attachments.)
 
--- Assemble, unpack and file a completed upload.  Returns the final path.
+-- {{{ upload.discard
+-- Drop an upload for good -- its pieces and its record -- and hand back
+-- the reason, logged, for the caller to return.  Used when the assembled
+-- upload is refused: the pieces matched the checksums the phone gave, so
+-- sending them again would give the same refusal.
+function upload.discard(upload_id, uploads, reason)
+    local u = uploads[upload_id]
+    os.execute("rm -rf " .. shell_quote(u.upload_dir))
+    uploads[upload_id] = nil
+    save_state("uploads.json", uploads)
+    log("phone upload of %s refused: %s id=%s", u.filename, reason, upload_id)
+    return nil, reason
+end
+-- }}}
+
+-- Assemble, check, unpack and file a completed upload.  Returns the final
+-- path, or nil and the reason.
 function upload.finish(upload_id, uploads)
     local u = uploads[upload_id]
     local zip = u.upload_dir .. "/assembled.zip"
@@ -6339,16 +6355,43 @@ function upload.finish(upload_id, uploads)
     end
     f:close()
 
+    -- The whole must match the phone's whole-file checksum (#404c).  Each
+    -- piece was checked on arrival, so a mismatch means the pieces the
+    -- phone described are not the zip it meant.
+    if sha256_file(zip) ~= u.total_checksum then
+        return upload.discard(upload_id, uploads, "the assembled upload does not match its checksum")
+    end
+
     local tmp = u.upload_dir .. "/unpacked"
     local head = (read_file_binary(zip) or ""):sub(1, 4)
-    if head == "PK\3\4" and tools.unzip then
-        -- One entry, the file itself; -p writes it without trusting any
-        -- path stored inside the archive.
-        os.execute(tools.unzip .. " -p " .. shell_quote(zip) .. " > " .. shell_quote(tmp) .. " 2>/dev/null")
+    if head == "PK\3\4" then
+        -- A zip, which is what the phone sends: it must hold exactly one
+        -- entry, a regular file (#404c).  More entries used to be joined
+        -- end to end into one file; a folder or link entry has no file
+        -- content to give.
+        local entries, why = upload.list_entries(zip)
+        if not entries then
+            return upload.discard(upload_id, uploads, "the upload is not a readable zip: " .. why)
+        end
+        if #entries ~= 1 then
+            return upload.discard(upload_id, uploads,
+                string.format("the upload holds %d entries; a phone upload is one file", #entries))
+        end
+        if entries[1].kind ~= "-" then
+            return upload.discard(upload_id, uploads, "the upload's one entry is not a regular file")
+        end
+        -- -p writes the content without trusting any path stored in the
+        -- zip.  Its exit status is checked: the shell creates `tmp` before
+        -- unzip runs, so the file existing proves nothing.
+        if not upload.succeeded(tools.unzip .. " -p " .. shell_quote(zip) .. " > " .. shell_quote(tmp)) then
+            os.remove(tmp)
+            return upload.discard(upload_id, uploads, "unzip could not unpack the upload")
+        end
     else
+        -- Not a zip: filed as it is.  The phone always zips; this keeps a
+        -- plain upload (from some other client) a plain file.
         os.rename(zip, tmp)
     end
-    if not file_exists(tmp) then return nil, "could not unpack upload" end
 
     local final, existed = upload.final_path(sanitize_filename(u.filename), tmp)
     if not final then return nil, "no free name for " .. u.filename end
@@ -6361,14 +6404,43 @@ function upload.finish(upload_id, uploads)
     return final
 end
 
+-- {{{ upload.checksums_from
+-- The checksums a phone upload must declare (#404c), read from a start or
+-- resume request:
+--   chunk_checksums  object {"0": hex, "1": hex, ...}, one per piece
+--   total_checksum   hex, SHA-256 of the pieces joined in order (the zip)
+-- Returns (pieces table keyed by the piece number as a string, total), or
+-- nil and the reason.  Missing or malformed is refused: an upload whose
+-- pieces cannot be checked is not taken.
+function upload.checksums_from(data, num_chunks)
+    local given = data.chunk_checksums
+    if type(given) ~= "table" then return nil, "chunk_checksums is required" end
+    local pieces = {}
+    for i = 0, num_chunks - 1 do
+        local hex = given[tostring(i)]
+        if not upload.is_sha256(hex) then
+            return nil, "chunk_checksums has no valid checksum for piece " .. i
+        end
+        pieces[tostring(i)] = hex
+    end
+    if not upload.is_sha256(data.total_checksum) then
+        return nil, "total_checksum is required (64 hex digits)"
+    end
+    return pieces, data.total_checksum
+end
+-- }}}
+
 -- POST /api/upload/start — register a new phone-to-server attachment upload.
+-- The phone uses resume instead; start takes the same checksums.
 function upload.start(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
-    if not num_chunks or num_chunks < 1 or num_chunks > 100000 then
+    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > 100000 then
         return 400, {error = "invalid num_chunks"}
     end
+    local pieces, total = upload.checksums_from(data, num_chunks)
+    if not pieces then return 400, {error = total} end
     local upload_id  = uuid()
     local upload_dir = paths.uploads .. "/" .. upload_id
     os.execute("mkdir -p " .. shell_quote(upload_dir))
@@ -6378,6 +6450,8 @@ function upload.start(data)
         num_chunks = num_chunks,
         upload_dir = upload_dir,
         created_at = os.time(),
+        chunk_checksums = pieces,
+        total_checksum  = total,
     }
     save_state("uploads.json", uploads)
     log("phone upload started: %s (%d chunks) id=%s", filename, num_chunks, upload_id)
@@ -6397,6 +6471,19 @@ function upload.chunk(upload_id, chunk_n, body)
     if chunk_n < 0 or chunk_n >= u.num_chunks then
         return 400, {error = "chunk index out of range"}
     end
+    -- Each piece is checked against the checksum the phone declared before
+    -- it is written (#404c).  A record without checksums was made before
+    -- they were required; the phone resumes before sending, which adds
+    -- them, so this only meets a client that skips resume.
+    if type(u.chunk_checksums) ~= "table" then
+        return 409, {error = "this upload has no checksums on record; resume it first"}
+    end
+    if sha256_of_bytes(body) ~= u.chunk_checksums[tostring(chunk_n)] then
+        -- damaged or not the piece described: refused, nothing written
+        log("phone upload %s: piece %d does not match its checksum -- refused", u.filename, chunk_n)
+        return 400, {error = "piece " .. chunk_n .. " does not match its checksum"}
+    end
+    -- matches: stored
     write_file_binary(u.upload_dir .. "/chunk-" .. tostring(chunk_n), body)
     for i = 0, u.num_chunks - 1 do
         if not file_exists(u.upload_dir .. "/chunk-" .. tostring(i)) then
@@ -6417,10 +6504,11 @@ function upload.resume(data)
     if not data or not data.filename then return 400, {error = "missing filename"} end
     local filename   = sanitize_filename(data.filename)
     local num_chunks = tonumber(data.num_chunks)
-    if not num_chunks or num_chunks < 1 or num_chunks > 100000 then
+    if not upload.whole_number(num_chunks) or num_chunks < 1 or num_chunks > 100000 then
         return 400, {error = "invalid num_chunks"}
     end
-    local checksums = data.chunk_checksums or {}
+    local pieces, total = upload.checksums_from(data, num_chunks)
+    if not pieces then return 400, {error = total} end
 
     local uploads = load_state("uploads.json")
     local upload_id, u
@@ -6440,22 +6528,25 @@ function upload.resume(data)
             created_at = os.time(),
         }
         uploads[upload_id] = u
-        save_state("uploads.json", uploads)
     end
+    -- The checksums of this resume are the ones on record from now on.
+    -- If the phone zipped the file again, they differ from the old ones,
+    -- and the pieces on disk are checked against the new ones just below.
+    u.chunk_checksums, u.total_checksum = pieces, total
+    save_state("uploads.json", uploads)
 
     -- Which chunks the server already has, verified against the checksums
     local missing = {}
     for i = 0, num_chunks - 1 do
         local chunk_path = u.upload_dir .. "/chunk-" .. tostring(i)
         if file_exists(chunk_path) then
-            local expected = checksums[tostring(i)] or checksums[i + 1]
-            if expected and expected ~= "" then
-                local actual = sha256_of_bytes(read_file_binary(chunk_path) or "")
-                if actual ~= expected then
-                    os.remove(chunk_path)  -- bad chunk, request re-upload
-                    missing[#missing + 1] = i
-                end
+            local actual = sha256_of_bytes(read_file_binary(chunk_path) or "")
+            if actual ~= pieces[tostring(i)] then
+                -- on disk but not the piece described: re-upload it
+                os.remove(chunk_path)
+                missing[#missing + 1] = i
             end
+            -- on disk and matching: kept
         else
             missing[#missing + 1] = i
         end

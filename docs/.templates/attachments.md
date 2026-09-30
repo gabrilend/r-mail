@@ -132,6 +132,12 @@ receiving daemon checks it before anything reaches `attachments/`:
   had to pack the file anew starts over).  Every piece but the last must
   be exactly that length, and pieces smaller than 4 KiB are refused, so a
   sender cannot declare a vast number of tiny pieces.  (#404b)
+- **Files sent up from your phone are checked the same way.**  The phone
+  declares the checksum of every piece and of the whole zip before it
+  sends; each piece is checked as it arrives, the whole when it is
+  complete.  The zip must hold exactly one regular file, and if unzip
+  cannot unpack it the upload is refused rather than filed half-done.
+  (#404c)
 
 ### In-progress visibility
 
