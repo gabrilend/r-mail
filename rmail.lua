@@ -6567,9 +6567,14 @@ function upload.finish(upload_id, uploads)
             return upload.discard(upload_id, uploads, "unzip could not unpack the upload")
         end
     else
-        -- Not a zip: filed as it is.  The phone always zips; this keeps a
-        -- plain upload (from some other client) a plain file.
-        os.rename(zip, tmp)
+        -- Not a zip: refused.  Everything that crosses the network travels
+        -- zipped, so that one checked path handles it and every zip danger
+        -- is met in one place (owner, 2026-09-29: "we want to successfully
+        -- and completely defeat every single one of the zip dangers, so
+        -- let's try and zip everything we send over the network. Less
+        -- bandwidth.").  The phone always zips; a plain upload used to be
+        -- filed as it was.
+        return upload.discard(upload_id, uploads, "the upload is not a zip; phone uploads travel zipped")
     end
 
     local final, existed = upload.final_path(sanitize_filename(u.filename), tmp)

@@ -26,6 +26,8 @@
 #   broken zip          a zip whose content is damaged (its outer checksum
 #                       matches, so only unzip can tell): refused, and no
 #                       half-file is filed
+#   not a zip           a plain file: refused -- everything that crosses
+#                       the network travels zipped (owner, 2026-09-29)
 #
 # Usage:
 #   scripts/test-phone-upload-checks.sh          # use the enclosing checkout
@@ -140,6 +142,11 @@ print("section broken zip")
 id_s, ans = send_all("letter.txt", fc.read_file(WORK .. "/broken.zip"))
 print(id_s == 500 and tostring(ans.error):find("could not unpack") and "ok a damaged zip is refused" or
       ("-- it answered " .. tostring(id_s) .. " " .. json.encode(ans)))
+
+print("section not a zip")
+id_s, ans = send_all("plain.jpg", fc.read_file(WORK .. "/one/photo.jpg"))
+print(id_s == 500 and tostring(ans.error):find("not a zip") and "ok an upload that is not a zip is refused" or
+      ("-- it answered " .. tostring(id_s) .. " " .. json.encode(ans)))
 LUA
 stop_receiver
 
@@ -151,7 +158,7 @@ if cmp -s "$ATT/photo.jpg" "$WORK/one/photo.jpg"; then
 else
     note_fail "the honest upload did not arrive whole"
 fi
-for name in pair.txt only letter.txt; do
+for name in pair.txt only letter.txt plain.jpg; do
     if [ -e "$ATT/$name" ]; then
         note_fail "the refused upload $name was filed"
     else

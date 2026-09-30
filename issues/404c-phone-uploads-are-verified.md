@@ -53,9 +53,12 @@ The daemon (`rmail.lua`, the `upload` table):
   #404a), then runs `unzip -p` and reads its exit status
   (`upload.succeeded`).  Any refusal goes through `upload.discard`: the
   upload's pieces and record are removed, the reason is logged, and the
-  last piece is answered 500 with the reason.  A non-zip upload is still
-  filed as it is (the phone always zips; this keeps a plain upload
-  plain).
+  last piece is answered 500 with the reason.  An upload that is not a
+  zip is refused. It used to be filed as it was. The owner (2026-09-29):
+  *"we want to successfully and completely defeat every single one of the
+  zip dangers, so let's try and zip everything we send over the network.
+  Less bandwidth."* Every upload goes through one checked path, and the
+  phone always zips anyway.
 
 ### Before this issue (the problems it solved)
 
