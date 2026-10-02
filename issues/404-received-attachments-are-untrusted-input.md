@@ -74,8 +74,9 @@ daemon has checked it:
 | 404c | phone-uploads-are-verified | 404a | per-chunk and whole-file checksums, one entry, checked unzip |
 | 404d | files-changing-while-packed-are-packed-again | None | compare size and time before and after packing |
 | 404e | attachment-ids-and-consent-are-checked-first | 404b | ids must look like ids; no chunk before consent |
+| 404f | arriving-pieces-wait-on-disk | None | the pending folder defaults to a folder on disk, not `/tmp` (RAM on many systems); added 2026-10-02 |
 
-Execution order: `404a → 327 → 404b → 404c → 404d → 404e`.  404a and 327
+Execution order: `404a → 327 → 404b → 404c → 404d → 404e → 404f`.  404a and 327
 share the new unpacking step; 404b and 404e both change the chunk
 handler, so they go one after the other.
 
