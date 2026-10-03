@@ -35,10 +35,11 @@ the metadata the crypto can't hide.
 
 ## What leaks by default
 
-- **Timing.** Every outbox change triggers a sync cycle (and an
-  `inotify` wake-up) that turns into a TCP connection within
-  seconds.  An observer watching your uplink sees "Alice sent
-  something" with clocked precision.
+- **Timing.** Every outbox change wakes the daemon (`inotify`), and
+  the message goes out as soon as that contact's own timer is due —
+  30 seconds after the last exchange when all is well, longer after
+  failures (#377).  An observer watching your uplink sees "Alice sent
+  something" to within that window.
 - **Size.** The ciphertext length on the wire is the plaintext
   length plus a small fixed overhead (nonce + tag).  Big messages
   produce big packets.
@@ -86,9 +87,11 @@ esac
 for contact in $(sed -n 's/^\([^.][^.]*\)\.ip.*/\1/p' ~/mail/contacts | sort -u); do
     [ "$contact" = "$(whoami)" ] && continue
     outbox="$HOME/mail/outbox/heartbeat-to-$contact"
+    # An outbox file is to: lines, a blank line, then the body; there is
+    # no subject header (the file name is the subject).
     cat <<EOF > "$outbox"
 to: $contact
-subject: heartbeat
+
 --- heartbeat $(date +%s) $(head -c 16 /dev/urandom | base64) ---
 EOF
 done
@@ -96,25 +99,33 @@ done
 printf '%s' "$3"  # pass the tick message through
 ```
 
-On the receiving side, an `on_update` hook silently absorbs
-heartbeats so they don't clutter the inbox:
+On the receiving side, each contact's heartbeat arrives once as a message
+(`inbox/heartbeat-to-<you>`) and from then on as updates to that one file,
+so it never piles up.  An `on_update` hook can keep the file small and
+constant, so the inbox shows nothing changing:
 
 ```sh
 #!/bin/sh
-# on_update hook on the receiver
-if printf '%s' "$3" | head -1 | grep -q '^--- heartbeat'; then
-    rm "$2"  # delete the inbox copy immediately
-    exit 0   # stdout empty → rmail keeps original (about to be deleted)
-fi
-printf '%s' "$3"
+# on_update hook on the receiver: $2 = inbox path, $3 = new body
+case "$2" in
+    */heartbeat-to-*) printf 'heartbeat\n' ;;  # stdout replaces the body
+    *) printf '%s' "$3" ;;
+esac
 ```
+
+Deleting the file from the hook does not work: the daemon writes the
+updated body to that path after the hook returns.  Deleting it by hand
+tells the sender you deleted it, which removes you from that heartbeat
+message.
 
 **Pairing up.** Cover traffic works best when *both* sides run it,
 so the observer sees traffic in each direction on the same
 schedule.  Agree with your contact before enabling.
 
-**Cost.** One packet per contact per sync cycle.  At the default
-sync interval (minutes), that's negligible bandwidth.
+**Cost.** At most one packet per contact each time that contact's
+timer comes due (every 30 seconds at best), which is small.  An update
+made while the contact is not due is not sent later (#409), so the
+stream follows each contact's timer, not your tick.
 
 **What it doesn't hide.** The *relationship* — that you have Bob
 as a contact at all.  An observer still sees your daemon making
@@ -181,16 +192,12 @@ printf '%s' "$3" | sed '/^--- padding ---$/,$d'
 
 ### Messages larger than the top bucket
 
-rmail caps bodies at 128 KB to keep `$3` inside the shell's
-argument-length limit.  If a real message is bigger, attach it
-instead — the zip-chunked attachment pipeline handles large content
-natively and uses its own chunking, so the observer sees many
-fixed-size chunks rather than one giant packet.  The on_send hook
-could automate this: detect oversize body, write it to a temp
-file, rewrite the outbox to have an `attach:` line and a short
-stub body, then delete the temp file after the attachment is
-queued.  (Tracked as future work in issue #349 for the daemon-
-level version of this.)
+A body over 128 KB is sent as an attachment automatically (#349): the
+recipient gets a short stub body and a consent form, and the content
+travels through the chunked attachment pipeline, so the observer sees
+many fixed-size chunks rather than one giant packet.  This keeps `$3`
+inside the shell's argument-length limit for new messages.  An edit
+(update) has no cap and is sent as one body.
 
 ### Coordinate with your heartbeat
 
@@ -313,21 +320,22 @@ printf '%s' "$3"
 Refuse attachments by extension or content-type.  Pairs well with
 the consent prompt — don't accept the transfer in the first place.
 
+A consent form fires no hook, so this runs on a timer (cron, a systemd
+timer) and reads the form's `File:` line:
+
 ```sh
 #!/bin/sh
-# Standalone: reject executables by extension in the consent prompt.
-# Wire this into the attachment-consent helper flow — see
-# helpers/raccept.sh and helpers/rdeny.sh.
-filename="$2"
-case "$filename" in
-    *.exe|*.bat|*.scr|*.cmd|*.ps1)
-        helpers/rdeny.sh "$3"  # $3 is the consent file path
-        ;;
-    *)
-        helpers/raccept.sh "$3"
-        ;;
-esac
+# Reject executables by extension; run every minute or so.
+for form in ~/mail/inbox/*-consent-to-download-form; do
+    [ -f "$form" ] || continue
+    filename=$(sed -n 's/^  File: *//p' "$form")
+    case "$filename" in
+        *.exe|*.bat|*.scr|*.cmd|*.ps1) helpers/rdeny.sh "$form" ;;
+    esac
+done
 ```
+
+(Declining does not yet stop the sender offering the file again — #406.)
 
 ### Audit log
 
@@ -351,8 +359,9 @@ reach) to make tampering detectable.
 
 ### Auto-consent from trusted contacts
 
-Skip the consent prompt for attachments from specific contacts.
-See `scripts/hooks/on_receive.sh` and the auto-consent example in
+Skip the consent prompt for attachments from specific contacts.  A
+consent form fires no hook (not `on_receive` either), so this is a small
+script on a timer — see the auto-consent example in
 [helper-scripts.md](helper-scripts.md#raccept-sh--accept-a-package-request).
 
 ### Encrypted backup on receipt

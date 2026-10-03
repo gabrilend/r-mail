@@ -95,24 +95,28 @@ The opposite of `raccept.sh`: removes the `accept` line, leaving only `deny`.
 helpers/rdeny.sh <consent-file>
 ```
 
-**Automating consent in hooks:** wire `raccept` and `rdeny` into an
-`on_receive` hook to auto-accept from trusted contacts:
+**Automating consent:** a consent form does not fire any hook (it is not a
+received message), so `on_receive` never sees it.  Instead, run a small
+script on a timer (cron, a systemd timer) that looks for forms in the inbox.
+The first line of a form names the sender ("alice wants to send you an
+attachment."):
 
 ```sh
 #!/bin/sh
-# on_receive hook: auto-accept from alice, deny from gary
-sender="$1"
-file="$2"
-
-case "$file" in
-    *-consent-to-download-form)
-        case "$sender" in
-            alice) helpers/raccept.sh "$file" ;;
-            gary)  helpers/rdeny.sh "$file" ;;
-        esac
-        ;;
-esac
+# auto-consent: accept from alice, deny from gary; run every minute or so
+for form in ~/mail/inbox/*-consent-to-download-form; do
+    [ -f "$form" ] || continue
+    sender=$(head -n 1 "$form" | cut -d' ' -f1)
+    case "$sender" in
+        alice) helpers/raccept.sh "$form" ;;
+        gary)  helpers/rdeny.sh "$form" ;;
+    esac
+done
 ```
+
+(Note that declining does not yet stop the sender offering the file again —
+#406 — so a denied sender's forms keep coming, and this script keeps
+denying them.)
 
 ---
 
