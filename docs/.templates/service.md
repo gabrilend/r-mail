@@ -201,11 +201,13 @@ in {
 }
 ```
 
-Use the auto-generated version (`rmail.nix` in the project root) — it has your
-paths and port pre-filled. Copy it into place:
+Use the auto-generated version — `<service name>.nix` in the project root,
+e.g. `rmail-home-you-mail.nix` (see "Running multiple instances" for how the
+service name is made); it has your paths and port pre-filled. The installer
+prints the exact commands at the end; they are:
 
 ```sh
-sudo cp rmail.nix /etc/nixos/rmail.nix
+sudo cp rmail-home-you-mail.nix /etc/nixos/rmail-home-you-mail.nix
 ```
 
 Add it to your imports in `/etc/nixos/configuration.nix`:
@@ -213,17 +215,22 @@ Add it to your imports in `/etc/nixos/configuration.nix`:
 ```nix
 imports = [
   ./hardware-configuration.nix
-  ./rmail.nix
+  ./rmail-home-you-mail.nix
   # ... any other imports you have
 ];
 ```
 
-Then rebuild:
+Then rebuild, and follow the log — the service writes to a file in `/tmp`
+named after the service, not to the journal:
 
 ```sh
 sudo nixos-rebuild switch
-journalctl -u rmail -f
+tail -f /tmp/rmail-home-you-mail.log
 ```
+
+The daemon also keeps its own rotating log in RAM,
+`/tmp/rmail-progress/log-<mailbox path, slashes to dashes>` (5 MB plus one
+older copy; the `log_file` setting moves it).
 
 ---
 
@@ -282,7 +289,8 @@ old shared config directory forced, and it is gone.
    heard anything, and nothing reported an error.
 
 4. **Its own mail directory** — `inbox/`, `outbox/`, `contacts` and `.state/`
-   are all relative to the `mail` setting in its config.
+   are all inside the folder that holds its config file (#382: the mailbox is
+   the installation; there is no `mail` setting any more).
 
 ### Starting a daemon by hand
 
@@ -298,10 +306,10 @@ every command in this section failed as a result.
 
 ### Which mailbox the helper scripts talk to
 
-The `config` symlink in the project root points at whichever mailbox was
-installed first, and later installs leave it alone rather than repointing it.
-Helper scripts run from the project root use that one. To reach another
-mailbox, name its config file.
+There is no default mailbox: the installer makes no `config` link in the
+project root. Name the mailbox (or its config or contacts file) when you run a
+helper script, e.g. `helpers/rfield.sh ~/notes/rmail/contacts alice phone` or
+`scripts/validate-router-settings.sh ~/notes/rmail`.
 
 If both instances are behind the same router, each needs its own port forwarding
 rule to direct traffic to each specific instance — see the Ports section in
