@@ -45,7 +45,9 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
-There is no history for deleted messages. If you'd like such functionality, check out the [scripting hooks](docs/.templates/scripting-tutorial.md), which enable whatever behavior you'd like, including backing up old messages.
+Editing works one way: change the text of your outbox file and the new version is sent to every recipient (a "living message"). Only the author's edits travel. A recipient who edits their inbox copy keeps that change to themselves, and the author's next edit overwrites it. An edit is currently sent once: a contact that is unreachable, or not yet due for a sync, when you edit never receives that version (issue #409).
+
+There is no history for deleted messages. The [scripting hooks](docs/.templates/scripting-tutorial.md) run when a message is received, sent or updated, and when the *other* side deletes one. `on_delete` does not run for your own deletions and is given only the other party's name, so it cannot back up a message you delete.
 
 ### Attachments
 
@@ -69,11 +71,12 @@ to: bob
 Here's the photo from yesterday. Sorry bob, you don't get to see it.
 ```
 
-Before any data is transferred, the recipient gets a consent request in their inbox:
+Before any data is transferred, the recipient gets a consent request in their inbox, a file named `<message>-<file>-consent-to-download-form`:
 
 ```
 alice wants to send you an attachment.
 
+  Attached to:   photos-from-yesterday
   File:          photo.jpg
   Expected size: 3.2 MB
   Available:     47.3 GB on this drive
@@ -85,13 +88,15 @@ accept
 deny
 ```
 
-Leave either `accept` or `deny` to make your choice. Once accepted, the file is transferred in compressed chunks and appears in `~/mail/attachments/` when complete. Interrupted transfers resume automatically on the next sync cycle.
+Leave either `accept` or `deny` to make your choice. Once accepted, the file is packed into a zip (stored, not compressed), transferred in chunks, and appears in `~/mail/attachments/` when complete.
+
+Known problems, each with an open issue: declining does not stop the offer — the sender offers the file again, with a new form, every time it syncs with you (#406); cancelling or refusing a transfer is sent as deleting the whole message, which removes you from it (#407); and when one recipient finishes, the file is no longer offered to recipients not yet reached (#408). Interrupted transfers resume automatically on the next sync cycle.
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/.templates/attachments.md](docs/.templates/attachments.md).
 
 ## Dependencies
 
-- **Lua** 5.1+ (5.4 recommended)
+- **Lua**: LuaJIT, or Lua 5.3 or 5.4 (5.4 recommended). Lua 5.1 and 5.2 cannot run the daemon: it uses `goto`, and the zip library refuses to load there.
 - **LuaSocket** — TCP networking for Lua
 - **OpenSSL** — AES-256-GCM encryption
 - **zip library** — attachment packing and unpacking, in plain Lua, carried in `libs/` (the shared my-libs/zip; no `zip` or `unzip` programs are needed to run rmail, only for its tests)
@@ -145,7 +150,13 @@ port = 8025
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
 
-The generated config file contains a comment above every available key explaining what it does.
+The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size` — see [attachments](docs/.templates/attachments.md)) and three more:
+
+- `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
+- `allow_peer_address_requests` — whether a contact may ask what address this mailbox has on file for it (used by phones after an IP change; default on).
+- `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
+
+Quotes around a value and a leading `~` are only understood for hook paths and `log_file`; elsewhere they are taken literally.
 
 ### Contacts file
 
@@ -244,6 +255,8 @@ tcp dport 8025 accept
 sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 ```
 
+That is enough for contacts reaching you over the internet. The daemon also listens for UDP on the same port and uses the multicast group 239.192.82.77 to find mailboxes on your own network, and it sends UDP probes to every address in your /24. Open UDP on the same port as well if you want mailboxes on one network to find each other.
+
 Note that your router AND your OS must have an open port in their firewalls. There are two firewalls.
 
 To verify that the port is open, run this from a computer on the network:
@@ -258,15 +271,15 @@ To verify the daemon is reachable:
 curl http://localhost:8025/
 ```
 
-This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly.
+This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly. Note that this plain-text answer is given to anyone who connects, so it currently reveals the mailbox's name (issue #410 removes it).
 
-Once the firewall is open, run the connectivity check to verify your router settings:
+Once the firewall is open, run the connectivity check to verify your router settings, naming your mailbox (or its config file):
 
 ```sh
-./scripts/validate-router-settings.sh
+./scripts/validate-router-settings.sh ~/mail
 ```
 
-This checks whether your router supports hairpin NAT (needed for contacts on the same router to talk to each other) and whether UPnP is enabled in the router settings (a security concern). It reads your port from the config file automatically.
+This checks whether your router supports hairpin NAT (needed for contacts on the same router to talk to each other) and whether UPnP is enabled in the router settings (a security concern). It reads your port from that mailbox's config file; without the argument it stops.
 
 ### Automatic port forwarding (UPnP / NAT-PMP)
 
@@ -287,7 +300,7 @@ If you cannot access your router's admin panel (shared housing, restrictive ISP,
 
 3. Restart rmail. It tries UPnP first, then NAT-PMP. If successful, the mapping is renewed every 30 minutes.
 
-**Security check:** On every startup, rmail probes your router for UPnP and NAT-PMP. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to all your contacts advising them not to send sensitive information until you fix it.
+**Security check:** On every startup — even with `auto_port_forward` off — rmail checks your router for UPnP and NAT-PMP. The check is not passive: when UPnP answers, rmail adds a test port mapping (a port from 60000 up) and removes it again. The check needs `upnpc` and `natpmpc` installed and does nothing without them. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to your contacts (not your own devices) advising them not to send sensitive information until you fix it, and a later notice once it is resolved.
 
 **Disabling UPnP/NAT-PMP on your router** (recommended):
 
@@ -313,17 +326,18 @@ All connections use AES-256-GCM encryption. Every message delivery and deletion 
 The protocol:
 - Each packet is `[4-byte length][12-byte random nonce][ciphertext][16-byte GCM auth tag]`
 - The AES key is `SHA256(token)` — a 32-byte key derived from the contact's token
-- The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in cleartext — only destination IP and port are visible to an observer.
+- The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in the encrypted traffic — only destination IP and port are visible to an observer. Two exceptions: the plain-text health check (`GET /`) answers anyone with the mailbox's name (issue #410), and nothing stops a recorded packet from being sent again later (no replay protection).
+- Your own devices (contacts marked `own`, such as your phone) are sent the whole contacts file, every contact's token included.
 
 `rmail_crypto.so` (compiled from source by `./scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
 
 ## Dynamic IP
 
-If your ISP changes your public IP, the daemon detects it automatically. On each startup it checks your public IP using multiple services (`ifconfig.me`, `icanhazip.com`, `api.ipify.org`, `checkip.amazonaws.com`). If a change is detected, it verifies with a second service before acting — so a single service returning a bad result won't trigger a false update.
+If your ISP changes your public IP, the daemon detects it automatically. It asks DNS services (OpenDNS, Cloudflare and Google) for your public IP at startup and again every 24 to 48 hours (after an hour, if none answered). If a change is detected, it verifies with a second service before acting — so a single service returning a bad result won't trigger a false update.
 
-Once confirmed, the daemon notifies all your contacts. If a contact is offline, the notification is retried on each sync cycle until they acknowledge it. Their daemons update your entry in their contacts file and drop a notification in their inbox so they know what happened.
+Once confirmed, the daemon notifies all your contacts. If a contact is offline, the notification is retried on that contact's sync timer until they acknowledge it. Their daemons update your entry in their contacts file and leave a hidden note, `.address-update-<name>` in their inbox, which is removed after the next successful send.
 
-On first startup it just saves the current IP without notifying anyone.
+Every startup announces your current addresses to all your contacts, the first one included.
 
 ## Hooks
 
@@ -334,14 +348,18 @@ Hooks let you run scripts in response to message events. Configure them in your 
 | `on_send`       | recipient  | subject    | message body       | replaces body |
 | `on_receive_raw`| sender     | subject    | message body       | replaces body |
 | `on_receive`    | sender     | subject    | path to inbox file | ignored       |
+| `on_update`     | sender     | path to inbox file | new body   | replaces body |
 | `on_delete`     | other party| —          | —                  | ignored       |
 | `on_package`    | sender     | filename   | path to saved file | ignored       |
 
-- **`on_send`** — runs once per recipient. message only sends after the script finishes. stdout replaces the body for that recipient only.
-- **`on_receive_raw`** — runs to completion before the message is written. stdout replaces the saved body.
+- **`on_send`** — runs once per recipient, and again for every edit sent and for mail to yourself (`$1` is then your own name). The message only sends after the script finishes. stdout replaces the body for that recipient only.
+- **`on_receive_raw`** — runs to completion before the message is written. stdout replaces the saved body. It does not run for edits (updates).
 - **`on_receive`** — runs in the background after the message is on disk.
-- **`on_delete`**  — runs in the background when a message is deleted from inbox or outbox.
+- **`on_update`** — runs when an edited version arrives; any non-empty stdout replaces the new body. Its exit status is not checked.
+- **`on_delete`**  — runs, and the daemon waits for it, when the *other* side deletes: a recipient deleting your message, or the author deleting one you received; also when you delete an inbox file. Not when you delete your own outbox file or remove a `to:` line.
 - **`on_package`** — runs in the background after an attachment is fully received and saved.
+
+A hook path is relative to the folder of the config file, may start with `~`, and `""` turns the hook off.
 
 Hooks are a powerful feature — any executable works, in any language. For full documentation and examples in bash, Lua, and C, see [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md).
 
@@ -363,7 +381,7 @@ Hooks are a powerful feature — any executable works, in any language. For full
 7. Did you wait long enough for the daemon to try sending the messages again?
 8. Is there a script on the `on_send` hook that is stuck in a loop, exiting with an error, or outputting an empty body to stdout?
 
-If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on the next sync cycle.
+If the port isn't open or forwarded, the connection will either time out (packets silently dropped) or be refused. Either way, the message stays in your outbox and the daemon retries on that contact's timer, which waits longer after each failure: 30 seconds at first, then 6 minutes more per failed attempt, up to 2 hours.
 
 **Attachment stuck waiting** — check the recipient's inbox for a consent file. The transfer won't start until they delete the `deny` line and leave `accept` for their daemon to read.
 
