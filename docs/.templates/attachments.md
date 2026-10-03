@@ -2,8 +2,25 @@
 
 rmail transfers files using a consent-first, chunked protocol. Every attachment
 goes through the same pipeline regardless of size: the recipient is asked before
-any bytes are transferred, and the file arrives in compressed chunks that
-can be interrupted and resumed.
+any bytes are transferred, and the file arrives in chunks of a zip (stored,
+not compressed) that can be interrupted and resumed.
+
+The message's text is held back until every attached path exists: a path
+that is missing gets a `// MISSING ATTACHMENT: <path>` line under its
+`attach:` line, and the message waits.  Deleting a message never deletes
+the files it brought (#355).  A received file whose name is taken is saved
+as `name-2.ext`, `name-3.ext`, …; a file identical to one already there is
+kept once.
+
+Limits: 4 GiB per file and per zip, 65,535 entries per zip (ZIP64 is not
+read or written), at most 100,000 pieces per transfer.
+
+> **Known problems** (open issues): declining does not stop the offer —
+> the sender offers the file again, with a new form, every time it syncs
+> with you (#406); cancelling or refusing a transfer is sent to the sender
+> as deleting the whole message, which removes you from it (#407); and
+> when one recipient finishes, the sender removes the `attach:` line, so
+> recipients not yet reached never get the file (#408).
 
 ---
 
@@ -20,7 +37,9 @@ attach: /path/to/photo.jpg
 Here's the photo from yesterday.
 ```
 
-Both alice and bob get `photo.jpg`. To send a file to only some recipients,
+Both alice and bob are offered `photo.jpg` (but see #408 above: today, once
+one of them finishes, the other is no longer offered it). To send a file to
+only some recipients,
 place the `attach:` line between their `to:` line and the next one:
 
 ```
@@ -43,11 +62,12 @@ The original file is never modified or deleted.
 ## The consent flow
 
 Before any data is transferred, the recipient sees a consent request appear in
-their inbox:
+their inbox, a file named `<message>-<file>-consent-to-download-form`:
 
 ```
 alice wants to send you an attachment.
 
+  Attached to:   photos-from-yesterday
   File:          photo.jpg
   Expected size: 3.2 MB
   Available:     47.3 GB on this drive
@@ -73,18 +93,16 @@ limit is cancelled and nothing is kept.  (#327)
 
 ### After your decision
 
-If you **accept**: the transfer begins automatically on the next sync cycle.
-When complete, the consent file is replaced with a confirmation:
+If you **accept**: the form becomes a progress file ("Sending: alice's
+attachment photo.jpg is being transferred.", then a line per chunk; see
+below), and the transfer begins when the sender is next due to sync with
+you.  When the file is complete it is saved in `~/mail/attachments/` and
+the form is removed.
 
-```
-Transfer complete:
-alice's attachment photo.jpg has arrived.
-Saved to: ~/mail/attachments/photo.jpg
-```
-
-If you **decline**: the consent file is replaced with a notice, and the
-sender's daemon removes the `attach:` line from their outbox file and drops
-a declined notice in their own inbox.
+If you **decline**: the form is removed, and the sender's daemon deletes its
+packed copy and drops a `declined-<file>` notice in its own inbox.  It does
+not remove the `attach:` line, so today the file is offered again, with a
+new form, the next time it syncs with you (#406).
 
 If you **delete the consent file entirely**: this is treated as a decline.
 
@@ -176,13 +194,14 @@ receiving daemon checks it before anything reaches `attachments/`:
 ### In-progress visibility
 
 While a transfer is running, the consent file in your inbox is updated after each
-chunk arrives:
+chunk arrives.  It is now a link into `/tmp/rmail-progress/` (in RAM, #328),
+so the frequent rewrites never touch your disk:
 
 ```
 Receiving photo.jpg from alice — 87 / 200 chunks (43%)
 Average: 4.2 seconds per chunk.
 
-Delete this file to cancel and clean up partial downloads.
+To cancel: delete this file, or add a line that reads: deny
 ```
 
 ### Interrupted transfers
@@ -192,10 +211,19 @@ already arrived. The sender resumes from where it left off on the next sync
 cycle — no re-negotiation, no new consent request needed.
 
 Whether partial chunks survive a reboot depends on `attachment_pending_dir`:
-- **`/tmp`** (default): the OS clears partial downloads on reboot. The sender
-  will restart from the beginning on reconnect.
-- **A persistent path** (e.g. `~/mail/attachments`): chunks survive reboots
-  and the transfer resumes exactly where it left off.
+- **`/tmp`** (default): on many systems `/tmp` is in RAM, so a reboot clears
+  partial downloads and the sender restarts from the beginning.  While a
+  file arrives it can take room in RAM about three times over (the pieces,
+  the joined zip, the unpacked files).  #404f proposes a folder on disk
+  inside the mailbox as the default.
+- **A persistent path**: chunks survive reboots and the transfer resumes
+  exactly where it left off.  Write it in full (`/home/you/mail/.pending`):
+  `~` is not expanded for this setting, and quotes are kept.  Avoid
+  `attachments/` itself — the packed zips and temporary files would then
+  show up in the phone's file list.
+
+Pieces of a transfer that is never finished, and abandoned phone uploads,
+are never cleaned up.
 
 ---
 
@@ -215,8 +243,8 @@ carol  awaiting consent
 
 Remove a recipient's line to cancel their transfer only — the file is still
 sent to the other recipients and the outbox message is preserved. Remove the
-entire section (or delete the `transfers` file) to cancel all recipients for
-that file.
+entire section to cancel all recipients for that file.  Deleting the
+`transfers` file cancels nothing: the daemon writes it again.
 
 Deleting the outbox file also works and is more drastic: it sends a deletion
 notice to all recipients, cancels any pending consent requests, stops any
@@ -232,11 +260,16 @@ file is updated in-place with a progress report each time a chunk arrives:
 Receiving photo.jpg from alice — 5 / 7 chunks (71%)
 Average: 2.5 seconds per chunk.
 
-Delete this file to cancel and clean up partial downloads.
+To cancel: delete this file, or add a line that reads: deny
 ```
 
-Delete that file to cancel. The sender's daemon is notified automatically and
-stops sending. Partial chunks are cleaned up on both sides.
+Delete that file (or add a `deny` line) to cancel. Partial chunks are
+cleaned up on both sides.  The sender's daemon is told — but today the
+cancel is sent as "delete this message", so the sender also removes you
+from the message itself: its `to:` line for you goes, you get no later
+edits, and if you were its last recipient the sender's outbox file is
+deleted (#407).  The same happens when your daemon refuses a transfer
+(oversize, a damaged zip).
 
 ---
 
@@ -248,13 +281,18 @@ stops sending. Partial chunks are cleaned up on both sides.
 | `attachment_pending_dir`  | `/tmp`                  | where in-progress chunks are stored  |
 | `attachment_chunk_size`   | `5242880` (5 MB)        | bytes per chunk                      |
 
-These are set in your mailbox's `config` file. The config file has a comment above
-each key explaining it.
+These are set in your mailbox's `config` file.  The generated config file does
+not list them; add them by hand.  Write values plainly: quotes are kept as
+part of the value and `~` is not expanded for these keys, and a quoted chunk
+size silently falls back to the default.  Keep `attachment_chunk_size` below
+about 37 MB: a chunk travels as base64 in one request, and requests over
+50 MB are refused, so a larger chunk would never arrive.  Files sent up from
+the phone always use 256 KiB pieces.
 
-### Message body size limit
+### Large message bodies
 
-Message bodies (the text in your outbox file, below the headers) are capped at
-128 KB. At 80 characters per line, that's roughly 1,600 lines of text — more
-than enough for any normal message. If you somehow exceed it, the daemon writes
-an error to your inbox and won't retry that message. Use an `attach:` line
-instead for large content.
+A message body (the text in your outbox file, below the headers) over 128 KB
+(131,072 bytes) is sent as an attachment instead: the recipient gets a short
+stub body and a consent form for the text, named after the message (#349).
+Only if packing that attachment fails is an error written to your inbox.  An
+edit to a message is sent as it is, with no size cap.
