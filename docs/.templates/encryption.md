@@ -77,8 +77,10 @@ See "Mitigating traffic analysis" below for what you can do today via hooks.
 
 ### How the receiver knows who sent it
 
-rmail doesn't send your name in cleartext. Instead, the receiving daemon tries
-to decrypt the message using each contact's key, one at a time.
+rmail's messages carry no name in cleartext. Instead, the receiving daemon tries
+to decrypt the message using each contact's key, one at a time.  (One
+exception today: the plain-text health check, `GET /`, answers anyone who
+connects with the mailbox's name — #410 removes it.)
 
 The "seal" (authentication tag) is what tells it whether decryption worked.
 Here's how that check works: when the sender encrypts, AES-GCM produces a
@@ -113,7 +115,13 @@ Someone watching the network between two rmail daemons sees:
 They **cannot**:
 - Read the message content.
 - Change a message without the receiver noticing.
-- Send fake messages without knowing the token.
+- Send new fake messages without knowing the token.
+
+They **can** send a recorded packet again later, unchanged: rmail does not
+keep track of the packets it has seen (no counters, no times inside the
+seal).  A replayed packet opens and is acted on — a deletion, an address
+change, or a message the receiver has since deleted, which then arrives
+again.
 
 ### What rmail does NOT protect against
 
@@ -157,10 +165,13 @@ They **cannot**:
 - **Rotate tokens** if you're concerned one may have been compromised. Both
   sides need to update their contacts file at the same time.
 
-- **Tokens live only in your contacts file.** rmail doesn't duplicate them
-  into any state file, cache, or log. If you want to audit that for yourself,
-  `grep` your token string across `~/mail/` — it should appear exactly once,
-  in `contacts`.
+- **Tokens live in your contacts file — and on your own devices.** rmail
+  doesn't duplicate them into any state file, cache, or log on the server; a
+  `grep` for your token across `~/mail/` should find it exactly once, in
+  `contacts`.  But every contact marked `own = true` (your phone) is sent the
+  whole contacts file, every token included, and keeps a copy.  A save from
+  the phone writes its copy back, which today removes every comment from
+  `contacts` (#411).
 
 ---
 
@@ -228,6 +239,11 @@ The receiver's `on_receive_raw` hook strips the padding:
 # on_receive_raw hook: $1=sender $2=subject $3=body, stdout replaces body
 echo "$3" | sed '/^---padding---$/,$d'
 ```
+
+`on_send` also runs for every edit, but `on_receive_raw` does not run for
+edits (updates), so an edited message arrives with its padding in it.  An
+`on_update` hook with the same `sed` line strips it there (`$3` is the new
+body; its stdout replaces it).
 
 ### IP address hiding
 
@@ -363,7 +379,8 @@ trusted endpoint, the encryption on the wire doesn't save you.
 5. Forward your rmail port on **both** routers:
    - Primary router: external port -> second router's WAN IP
    - Second router: external port -> Pi's LAN IP
-6. Verify with `scripts/validate-router-settings.sh`.
+6. Verify with `scripts/validate-router-settings.sh ~/mail` (name the mailbox
+   or its config file; it reads the port from there).
 7. Consider setting up the read-only root filesystem (see below).
 
 ### Verifying remote integrity
@@ -380,12 +397,18 @@ deliberate tampering — a serious attacker preserves the protocol exactly.
 Two approaches that actually work:
 
 **Read-only root filesystem (prevention, strongest).** Alpine Linux supports
-running with a read-only root partition. The rmail binary, libraries, and
-config live on the read-only partition. Only the mail directory (inbox,
-outbox, attachments, contacts file) is on a separate writable partition. If
-an attacker exploits rmail, they can read and write messages, but they
-*cannot modify the rmail code itself or install additional software* — the
-filesystem won't allow it. A reboot restores the original state completely.
+running with a read-only root partition. The rmail program and its libraries
+live on the read-only partition.  The mailbox (inbox, outbox, attachments,
+contacts) is on a separate writable partition — and since the mailbox became
+the installation (#382), so are its `config` and the **hook scripts** it
+names, which are programs rmail runs.  The daemon also rewrites `contacts`
+itself, so the mailbox cannot be read-only.  If an attacker exploits rmail,
+they can read and write messages and they *can* change or add a hook script,
+which then runs with rmail's rights; they cannot modify the rmail code itself
+or install software on the read-only side.  To keep hooks out of reach, keep
+them on the read-only partition and point the config at them by absolute
+path (a hook path may be absolute; relative paths are read from the config's
+folder).  A reboot restores the read-only side completely.
 This is the same approach used by Android and ChromeOS to prevent persistent
 compromise of the operating system.
 
@@ -469,7 +492,8 @@ bastard took my wallet" heh what a rascal. I didn't know squirrels could do that
 |-------|-----------|------------|
 | Wire encryption | AES-256-GCM, random nonces | Length header in cleartext leaks approximate plaintext size (see #366) |
 | Authentication | Trial decryption with shared token | Only proves "knows the token" |
-| Metadata | No unencrypted headers | IP addresses and timing visible |
+| Metadata | No unencrypted headers in messages | IP addresses and timing visible; the plain-text health check names the mailbox (#410) |
+| Replay | None | A recorded packet can be sent again and is acted on |
 | At rest | None (plaintext on disk) | Use full-disk encryption on the host |
 | Host isolation | Up to you | Dedicated device + separate network is ideal |
 | Integrity | Read-only root + external heartbeat monitoring | Internal self-checks can be subverted |

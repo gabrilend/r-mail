@@ -156,7 +156,7 @@ The generated config file contains a comment above most keys explaining what it 
 - `allow_peer_address_requests` — whether a contact may ask what address this mailbox has on file for it (used by phones after an IP change; default on).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
 
-Quotes around a value and a leading `~` are only understood for hook paths and `log_file`; elsewhere they are taken literally.
+A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
 ### Contacts file
 
