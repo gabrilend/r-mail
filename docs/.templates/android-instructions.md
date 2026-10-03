@@ -114,17 +114,20 @@ screen to add another one. Or don't, your loss.
 ### Fill in the connection details
 
 1. **Home router IP** — Your home router's public IP address (the one your
-   contacts use to reach you). If your phone is currently on the same WiFi as
-   your home server, the app will try to detect this automatically.
+   contacts use to reach you). If your phone is on the same WiFi as your home
+   server, tap **Detect public IP (asks ifconfig.me)** — the app asks that
+   outside service (or icanhazip.com) only when you tap it.
 
 2. **Device token** — The token you added to the contacts file on your home
    computer in the `myphone.token = "..."` line. Type it exactly as it appears
    (without the quotes — the app adds those).
 
 3. **Port** — The port your daemon listens on. If you don't remember it, tap
-   **Detect port**. This scans for your daemon using the token you entered.
-   Detection only works when your phone is on the same WiFi network as your
-   home server.
+   **Detect port**. It first tries every port from 1024 to 65535 on the host
+   you entered (which may be your public IP, so this crosses the internet),
+   then, if your phone is on your home network, the common rmail ports on
+   every address of that network (x.x.x.1–254), using the token you entered
+   to recognise your daemon.  It can take a while.
 
 4. Tap **Connect**.
 
@@ -186,14 +189,20 @@ The main screen has two rows of tabs at the bottom:
 
 The top bar has:
 
-- **Back arrow** (left) — return to the mailbox list.
+- **The mailbox's name** (left, underlined) — tap it to return to the
+  mailbox list.  (A back arrow appears only inside the contact editor, where
+  it goes back to Contacts.)
 - **Sync button** (right) — manually trigger a sync. The spinning icon means
-  a sync is in progress.
-- **Three-dot menu** (right) — access Contacts and Settings.
+  a sync is in progress; a warning sign means the last sync failed (tap to
+  retry).
+- **+** (right) — on Outbox, write a new message; on Contacts, add a
+  contact; on Files, put files from the phone into Files and sync them up.
+
+Contacts and Settings are tabs at the bottom, beside the others.
 
 ### Composing a message
 
-Tap the **pencil button** (floating, above the tabs) to compose.
+Tap the **Write** tab, or **+** on the Outbox tab, to compose.
 
 - **To** — select a recipient from the dropdown (populated from your contacts
   file). Tap **+** to add more recipients.
@@ -232,15 +241,19 @@ Work through these in order — each step rules out a category of problems.
 
 On the home computer, check if the rmail process is running:
 
+The service is named after the mailbox: `rmail-` plus the mailbox's path with
+slashes as dashes, e.g. `rmail-home-you-mail` for `/home/you/mail` (the
+installer prints it).
+
 ```sh
 # systemd (most Linux distros, NixOS)
-systemctl status rmail
+systemctl status rmail-home-you-mail
 
 # runit (Void Linux, some Alpine setups)
-sv status rmail
+sv status rmail-home-you-mail
 
 # OpenRC (Alpine Linux, Gentoo)
-rc-service rmail status
+rc-service rmail-home-you-mail status
 
 # manual check (works everywhere)
 ps aux | grep rmail
@@ -264,7 +277,8 @@ http://YOUR_PUBLIC_IP:YOUR_PORT/
 For example: `http://184.3.201.206:8025/`
 
 You should see something like `{"ok":true,"name":"yourname"}`. If you see
-this, the connection works.
+this, the connection works.  (Anyone who connects sees that answer, name
+included — #410 removes the name.)
 
 **If it times out or refuses to connect:**
 
@@ -353,20 +367,61 @@ The contacts file syncs from the home server. If it's empty:
 - Check that the recipient's daemon is running and reachable (see step 3, but
   for their IP/port).
 - Check that port forwarding is set up on the recipient's router.
-- Look at the daemon logs on your home server for errors:
+- Look at the daemon logs on your home server for errors.  Whatever starts
+  the service, its output goes to a file in `/tmp` named after the service,
+  and the daemon keeps its own log in `/tmp/rmail-progress/`:
   ```sh
-  journalctl -u rmail -f                  # systemd
-  tail -f /var/log/rmail/current          # runit
-  tail -f /var/log/rmail.log              # OpenRC
+  tail -f /tmp/rmail-home-you-mail.log
+  tail -f /tmp/rmail-progress/log-home-you-mail
   ```
 
 ### 9. Detect port doesn't find anything?
 
-The port scanner only works when your phone is on the **same WiFi network** as
-the home server. It probes the local network directly, avoiding router issues.
+The port scanner first tries every port from 1024 up on the host you entered,
+then, from your home WiFi, the common rmail ports on every address of the
+local network.  The local part only works when your phone is on the **same
+WiFi network** as the home server; it probes the network directly, avoiding
+router issues.
 
 If it still doesn't find anything:
 - Double-check that the daemon is running (step 1).
 - Make sure the token you entered matches exactly (step 4).
 - Try entering the port manually — you can find it in the config file on the
   home computer.
+
+---
+
+## Permissions, and what the app does without asking
+
+The app asks Android for four permissions:
+
+| Permission | Why |
+|---|---|
+| Internet | talk to your home server |
+| Network state | check whether the phone is online and which network it is on (setup) |
+| Notifications | show "New message" notifications; asked for at run time on Android 13 and later |
+| Start at boot | declared, but not used by the app itself (its background sync library brings its own) |
+
+It asks for **no storage permission**: saving a file to the phone uses
+Android's own save mechanisms (the media store on Android 10+, a "Save as"
+dialog on 8–9), choosing a folder uses Android's folder picker, and taking a
+photo opens your camera app.  Other apps can share files of any type to rmail.
+The app is excluded from Android backups and device-to-device transfers, so a
+new phone does not copy its tokens.  There is no foreground service and no
+battery-optimisation exemption: background sync runs every 15 minutes at
+most (the shortest period Android allows), whenever Android lets it.
+
+**Notification detail** (Settings): `full` (sender and subject), `sender`,
+`none` (a notification with no preview), or `off`.
+
+**Consent forms** can be answered from the phone: open the form in the inbox
+and accept or deny; the answer is sent to your home server.
+
+**Tokens:** the home server sends the phone the whole contacts file, every
+contact's token included.  Saving contacts from the phone writes the phone's
+copy back, which today removes every comment from the contacts file (#411).
+
+**Times:** messages keep the time the home server gave them; the lists are
+sorted by file name, not time.  Files sent up from the phone carry no time
+and are dated when they arrive; names the phone makes for new messages use
+the phone's local time, without a time zone.
