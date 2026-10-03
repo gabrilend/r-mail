@@ -65,7 +65,10 @@ A message's file date is carried across every hop a message file makes:
 - **Phone download.** `GET /api/file/inbox/<name>` and
   `GET /api/file/outbox/<name>` return the file's time in an `X-Mtime`
   response header. The Android client stamps its local copy with it
-  (`setLastModified`), so the phone's list sorts the same way.
+  (`setLastModified`).  (Corrected 2026-10-02 by the documents-against-code
+  audit, `notes/audit-docs-against-code-2026-10-02.md`: the phone's lists
+  are sorted by file name, not by time, so the stamped time does not
+  change their order.)
 - **Older peers.** A sender that omits `mtime`, or a phone that omits
   `X-Mtime`, gets the old behaviour: the file is dated "now". No error is
   raised. (The owner's rules treat a silent fallback as a warning, so
@@ -74,14 +77,18 @@ A message's file date is carried across every hop a message file makes:
   outside 2001-09-09 .. 2100-01-01 (epoch 1000000000 .. 4102444800), is
   dropped and the file keeps "now".
 - **Attachments** do not go through this mechanism. Between daemons an
-  attachment travels as a zip archive. Zip records each file's
-  modification time, `unzip` restores it by default, and the receiver
-  files the extracted entry with a rename, which keeps the time. So
-  daemon-to-daemon attachments keep their date as a side effect of the
-  archive format. Attachments uploaded from the phone
-  (`/api/upload/start` then `PUT /api/upload/<id>/chunk/<n>`) carry no
-  time header. If they
-  arrive unzipped they are dated at upload. See open questions.
+  attachment travels as a zip archive, packed and read by rmail's own zip
+  library since #405 (no `zip` or `unzip`).  The packer stores each file's
+  modification time in the zip's extended-timestamp field (32 bits, so it
+  wraps in 2038; the reader picks the wrap at or before the time of
+  arrival) and the DOS time field (UTC, 1980–2107); the reader sets it on
+  the extracted file, and the receiver files it with a rename, which keeps
+  the time.  So daemon-to-daemon attachments keep their date.  Attachments
+  uploaded from the phone (`/api/upload/start` then
+  `PUT /api/upload/<id>/chunk/<n>`) are zipped by Java's `ZipEntry` with no
+  extended time and carry no time header, so they are dated at upload.
+  (Corrected 2026-10-02 from the documents-against-code audit; this
+  section said `unzip` restored the time.)  See open questions.
 
 ## Intended Behavior
 
