@@ -46,7 +46,9 @@ replaces the message body. For all others, stdout is ignored.
 
 **on_receive_raw** fires before the message is written to disk. Whatever your
 script prints to stdout becomes the body that gets saved. If your script prints
-nothing (or exits non-zero), the original body is kept. This hook is synchronous
+nothing, the original body is kept.  Its exit status is not checked: a script
+that fails part-way but has printed something replaces the body with that.
+It does not run for edits (see `on_update`). This hook is synchronous
 — rmail waits for it before writing. Use it for filtering, transformation, or
 security analysis on data that hasn't touched the filesystem yet.
 
@@ -61,19 +63,36 @@ you don't need to block delivery and can't transform the message anyway.
 Each call is independent — `$3` is the body as it will be sent to `$1`, and
 stdout replaces it for that recipient only. rmail calls the hook separately
 for each recipient with fresh arguments, so each transformation is isolated.
-Also synchronous. Printing nothing passes the body through unchanged.
+Also synchronous. Printing nothing passes the body through unchanged.  It
+also runs for every edit sent (each update) and for mail to yourself, where
+`$1` is your own name.
 
-**on_delete** fires when a message is deleted from either inbox or outbox. `$1`
-is the name of the other party — the sender for inbox deletions, the recipient
-for outbox deletions.
+**on_delete** fires when the *other* side deletes: a recipient deleting a
+message you sent (`$1` is the recipient), the author deleting one you
+received (`$1` is the author), and when you delete an inbox file.  It does
+not fire when you delete your own outbox file or remove a `to:` line.  It
+gets only the other party's name — no file name and no message id — and for
+an inbox deletion the file is already gone, so it cannot back the message
+up.  rmail waits for it to finish.
 
 **on_update** fires when a living message is updated — that is, when the sender
 edits an outbox file and the new body arrives at your end. `$2` is the path to
 the existing inbox file (still holding the old content), `$3` is the new body.
 Whatever your script prints to stdout becomes the body that gets saved, just
-like `on_receive_raw`. Synchronous. If no `on_update` hook is configured, the
+like `on_receive_raw` (printing nothing keeps the new body; the exit status
+is not checked). Synchronous. If no `on_update` hook is configured, the
 update is applied directly. Use it for diff logging or edit rejection (print
 the old body to reject an update).
+
+Only the author's edits travel: an edit you make to an inbox file stays on
+your side and is overwritten by the author's next update.  An update is
+currently sent once — a contact unreachable or not yet due when the author
+edits never receives that version (#409).
+
+Hook paths: a relative path is read from the folder holding the config file
+(`./hooks/on_receive.sh` means this mailbox's copy, #382), a leading `~` is
+your home folder, an absolute path is used as it is, and `""` turns the hook
+off.
 
 **on_package** fires after a received attachment is fully assembled and saved.
 `$1` is the sender's name, `$2` is the filename (useful for filetype detection),
@@ -318,8 +337,10 @@ single string even if it contains spaces, newlines, or quotes.
 For `on_receive` and `on_package` where `$3` (or `$1` for `on_package`) is a
 file path, open it with `fopen(argv[3], "r")`.
 
-**Returning data:** write to `stdout`. Return 0 for success. Non-zero exit
-causes rmail to log a warning and keep the original body unchanged.
+**Returning data:** write to `stdout`. rmail does not look at the exit
+status: anything printed replaces the body (for the hooks whose stdout is
+used), and printing nothing keeps the original.  To reject safely, print
+nothing — or, for `on_update`, print the old body.
 
 ---
 
@@ -476,9 +497,11 @@ creating new outbox messages addressed to other contacts.
   ```
   Then in config: `on_receive_raw = ~/mail/hooks/wrap`. Recompile
   after editing the source.
-- Message bodies are capped at 128 KB. Larger content must be sent as an
-  attachment — this keeps `$3` in `on_receive_raw` and `on_send` a manageable
-  size that won't hit OS argument length limits.
+- A message body over 128 KB is sent as an attachment automatically (a stub
+  body and a consent form; #349), which keeps `$3` in `on_receive_raw` and
+  `on_send` a manageable size that won't hit OS argument length limits.  An
+  edit (update) has no such cap, so `on_update`'s and `on_send`'s `$3` can be
+  larger for an edited message.
 - The `helpers/` directory handles common tasks you'd otherwise reimplement
   in every hook: adding recipients, inserting attachments, accepting/denying
   package requests, reading contact fields. Most hook scripts end up calling
