@@ -33,22 +33,24 @@ an unencrypted identity header.
 Inside the encrypted frame, the plaintext is HTTP-style:
 
 ```
-METHOD /path HTTP/1.0\r\n
+POST /path HTTP/1.1\r\n
+Host: <ip>:<port>\r\n
+Content-Type: application/json\r\n
 Content-Length: N\r\n
+Connection: close\r\n
 \r\n
 body
 ```
 
-Responses follow the same format with a status line:
+Responses follow the same format with a status line (`HTTP/1.1 200 OK`).
+The daemon keeps a connection open for further frames from the same
+caller.  JSON bodies use `Content-Type: application/json`.
 
-```
-HTTP/1.0 200 OK\r\n
-Content-Length: N\r\n
-\r\n
-body
-```
+Limits: a frame is 28 bytes to 64 MiB; a request body over 50 MB is refused.
 
-JSON bodies use `Content-Type: application/json`.
+Nothing protects against replay: a recorded frame stays valid and can be
+sent again later (a `/delete`, an `/update-address`, or a `/deliver` of a
+message the receiver has since deleted).
 
 ---
 
@@ -59,8 +61,15 @@ JSON bodies use `Content-Type: application/json`.
 **`POST /deliver`** — deliver a message or attachment payload:
 
 ```json
-{"type": "message", "subject": "hello", "message_id": "uuid", "body": "text"}
+{"type": "message", "subject": "hello", "message_id": "uuid", "body": "text",
+ "mtime": 1790000000}
 ```
+
+`mtime` is the sender's outbox-file modification time (seconds since 1970);
+the receiver sets it on the inbox file, clamped to 2001-09-09 … 2100-01-01
+(a missing or out-of-range value becomes "now").  An `update` (an edited
+message) carries the same fields.  `auto_body` marks a large body sent as an
+attachment (see attachments, "Large message bodies").
 
 **`POST /delete`** — notify of a deletion:
 
@@ -68,13 +77,25 @@ JSON bodies use `Content-Type: application/json`.
 {"message_id": "uuid"}
 ```
 
-**`POST /update-address`** — notify of an IP change:
+(Today a receiver's attachment cancellation is also sent as `/delete` with the
+message's id, which the sender cannot tell from a deletion — #407.)
+
+**`POST /update-address`** — announce this mailbox's addresses (every start-up,
+and after an IP change):
 
 ```json
-{"ip": "203.0.113.1", "port": 8025}
+{"ip": "203.0.113.1", "port": 8025, "ips": ["203.0.113.1"], "local_ips": ["192.168.1.20"]}
 ```
 
+`ip` and `port` are kept for older peers; `ips` and `local_ips` are the full
+sets (a configured `hostname` first).
+
 **`GET /peer-address`** — returns the caller's stored IP:port (for IP recovery).
+Refused when `allow_peer_address_requests = false`.
+
+**`GET /deps`**, **`GET /deps/<name>`**, **`GET /install-script`** — the
+dependency list, one dependency, and the installer, for a contact building
+rmail.
 
 ### Own-device only (contacts with `own = true`)
 
@@ -90,14 +111,29 @@ These require the caller's contact entry to have `own = true` set.
 
 **`GET /api/attachments`** / **`GET /api/attachments/<f>`** — list/download attachments.
 
-**`POST /api/upload/start`** / **`PUT /api/upload/<id>/chunk/<n>`** — chunked upload.
+**`GET /api/attachments/<f>/info`** / **`GET /api/attachments/<f>/chunk/<n>`** —
+an attachment's size and checksums, and one piece of it (the phone's resumable
+download).
 
-**`GET /api/myaddress`** — returns the daemon's public IP, port, name, and LAN IP.
+**`DELETE /api/attachments/<f>`** — delete a received attachment.
+
+**`POST /api/consent`** — answer a consent form from the phone.
+
+**`POST /api/log`** — the phone writes a line into the daemon's log.
+
+**`POST /api/upload/start`** / **`POST /api/upload/resume`** /
+**`PUT /api/upload/<id>/chunk/<n>`** — chunked upload (256 KiB pieces), resumable.
+
+**`GET /api/myaddress`** — returns the daemon's public IP (and IPv6), port, name, and LAN IP.
+
+The phone is sent the whole contacts file, every contact's token included.
 
 ### Unauthenticated (plaintext, no encryption)
 
-**`GET /`** — health check. Returns `{"ok":true,"name":"yourname"}` in plain HTTP.
-Used by `validate-router-settings.sh` to test connectivity.
+**`GET /`** — health check. Returns `{"ok":true,"name":"yourname"}` in plain HTTP
+to anyone who connects, so it reveals the mailbox's name (#410 removes it).
+Used by `validate-router-settings.sh` to test connectivity (it only needs an
+answer).
 
 ### Message types
 
@@ -106,8 +142,11 @@ Every `/deliver` call includes a `type` field:
 | `type`                | Direction         | Description                          |
 |-----------------------|-------------------|--------------------------------------|
 | `message`             | sender -> receiver | normal message delivery              |
+| `update`              | sender -> receiver | a new version of a message (the author edited it) |
 | `attachment_request`  | sender -> receiver | consent request before file transfer |
 | `attachment_response` | receiver -> sender | accept or decline a consent request  |
+| `attachment_chunk`    | sender -> receiver | one piece of an accepted attachment  |
+| `chunk_failed`        | either             | answered `ok`, nothing else          |
 
 Missing or unknown `type` values are rejected with 400.
 
@@ -115,20 +154,26 @@ Missing or unknown `type` values are rejected with 400.
 
 ## Sync timing
 
-The daemon checks for inbox changes on an adaptive timer:
+Each contact has its own timer (#377):
 
-- Starts at **5 minutes**
-- Had work: interval **shrinks** (floor: MIN_INTERVAL)
-- No work: interval **grows** (ceiling: MAX_INTERVAL)
+- **Floor 30 seconds.**  A contact is due 30 s after a successful exchange.
+- **Each failed cycle adds 6 minutes** (360 s), up to a **ceiling of 2 hours**.
+- **±30 seconds** of random jitter on every wait.
+- A contact that connects to us is due **at once**; a contact with nothing
+  queued goes back to the floor; **every contact is due at start-up**.
 
-Outbox changes are detected immediately via Linux inotify — no timer needed.
+A change in the outbox is noticed at once (inotify on Linux, kqueue on the
+BSDs and macOS) and starts a sync pass, but each contact is still only sent
+to when its own timer is due (#396 is open about this), and attachment pieces
+pass through the same gate.
 
-This means the daemon is responsive when you're actively messaging and backs
-off when idle.
+Other timings: connecting to a contact gives up after 8 s; receiving waits
+10 s, sending 30 s; DNS answers are kept 60 s; an automatic port mapping is
+renewed every 30 minutes (NAT-PMP lifetime 1 hour); the public IP is checked
+every 24–48 hours (an hour later if no provider answered).  `rmail.lua <mailbox>
+--once[=SECONDS]` runs one round of syncing for 60 s by default (up to 600 s
+more while transfers finish) and exits.
 
-Attachment chunk transfers bypass the sync timer — once a transfer is in
-progress, chunks are sent as fast as the connection allows within a single
-sync pass.
-
-A sync is also triggered automatically when a file is created, modified, or
-deleted in the outbox directory (via Linux inotify).
+The phone syncs in the background every 15 minutes (the shortest period
+Android allows), and in the foreground uses the same 30 s / +6 min / 2 h
+back-off.
