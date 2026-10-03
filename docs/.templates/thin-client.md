@@ -63,7 +63,7 @@ See the main [README](../README.md) for daemon setup.
 
 ```sh
 cd clients/linux
-./install.sh
+./install-thin-client-linux.sh
 ```
 
 The install script checks for each dependency (Lua, OpenSSL, etc.) and
@@ -80,7 +80,7 @@ If you don't have a C compiler:
 
 ```sh
 cd clients/macos
-./install.sh
+./install-thin-client-macos.sh
 ```
 
 Requires Xcode Command Line Tools (provides `clang`):
@@ -99,7 +99,7 @@ brew install openssl lua
 
 ```cmd
 cd clients\windows
-install.bat
+install-thin-client-windows.bat
 ```
 
 Requires MinGW (provides `gcc`). Install via:
@@ -113,7 +113,7 @@ OpenSSL for Windows:
 If OpenSSL is installed but the script can't find it, set the path:
 ```cmd
 set OPENSSL_DIR=C:\Program Files\OpenSSL-Win64
-install.bat
+install-thin-client-windows.bat
 ```
 
 The install script runs from `cmd.exe` — no PowerShell required.
@@ -144,7 +144,7 @@ Or run interactively (prompts for host, port, token):
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--host` | (required) | Home daemon IP or hostname |
-| `--port` | 8025 | Home daemon port |
+| `--port` | asked for | Home daemon port.  Without the flag the client asks for it (pressing Enter gives 8025), so give it on the command line when the client runs unattended, as a service |
 | `--token` | (required) | Device token (must match contacts file on home) |
 | `--dir` | `~/mail-remote` | Local mailbox directory |
 | `--interval` | 300 | Seconds between sync cycles (for incoming mail) |
@@ -273,12 +273,19 @@ in the home daemon's contacts file for your device entry.
 
 ### "sync error" but connection works
 
-Check the home daemon's logs (`tail -f /tmp/rmail.log`). The daemon logs
-all API requests with status codes.
+Check the home daemon's logs: the service's output goes to
+`/tmp/<service name>.log` (e.g. `/tmp/rmail-home-you-mail.log`), and the
+daemon's own log to `/tmp/rmail-progress/log-<mailbox path, slashes to
+dashes>`. The daemon logs all API requests with status codes.
 
 ### No file watcher (interval-only sync)
 
 If the install script couldn't build the platform watcher (inotify/kqueue/
 ReadDirectoryChangesW), the client falls back to interval-only sync.
 Outbox changes won't be detected immediately — they'll sync on the next
-interval tick. Re-run `install.sh --force` to retry building the watcher.
+interval tick. Re-run the platform's installer with `--force`
+(`install-thin-client-linux.sh --force`, `install-thin-client-macos.sh --force`,
+`install-thin-client-windows.bat --force`) to retry building the watcher.
+
+The thin client sends and keeps no file times: files it fetches are dated
+when they arrive.
