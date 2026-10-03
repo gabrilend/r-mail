@@ -184,7 +184,9 @@ to do with them.
 ## Why does the Android app need a home computer?
 
 When you send a message from your phone, it goes outward — your phone connects to
-the recipient's computer. That works fine. The tricky part is receiving.
+your own home computer, which then delivers it to the recipient's computer. The
+phone only ever talks to its home computer. Sending outward like that works
+fine. The tricky part is receiving.
 
 For your computer to receive messages, it needs an open port: it sits there listening,
 and senders connect to it. But your phone can't do this. Here's why.
