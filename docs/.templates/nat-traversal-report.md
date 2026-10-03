@@ -339,26 +339,29 @@ The mapping is created for the port specified in your mailbox's `config` file (`
 
 ```json
 {
-  "protocol": "upnp",
-  "external_port": 8025,
-  "internal_port": 8025,
-  "created": 1700000000
+  "protocol": "natpmp",
+  "port": 8025,
+  "lifetime": 3600,
+  "created_at": 1700000000
 }
 ```
 
+(A UPnP mapping has no `lifetime` field.)
+
 ### Security check: UPnP/NAT-PMP detection
 
-This is the more important feature. On every startup, regardless of the `auto_port_forward` setting, rmail probes for UPnP and NAT-PMP on the local network:
+This is the more important feature. On every startup, regardless of the `auto_port_forward` setting, rmail checks for UPnP and NAT-PMP on the local network, using the `upnpc` and `natpmpc` programs (without them installed, the check does nothing):
 
-1. Send an SSDP discovery multicast (UPnP)
-2. Send a NAT-PMP external address request to the default gateway
+1. UPnP: if the router answers discovery, rmail **adds a test mapping** (a port from 60000 to 63999, chosen from the clock) and deletes it again.  UPnP counts as enabled only if adding it worked.  So the check is not passive: it opens a port on your router for a moment, every start.
+2. NAT-PMP: a request to the default gateway; an answer counts as enabled.
 
-If either responds, it means the router has these protocols enabled. This is a security concern even if rmail isn't using them — any other device or malware on the LAN can. So rmail:
+If either is enabled, the router has these protocols on. This is a security concern even if rmail isn't using them — any other device or malware on the LAN can. So rmail:
 
-- Logs a warning: "UPnP is enabled on your router. Any device on your LAN can open ports. Consider disabling it."
-- Notifies contacts (via a one-time advisory message) so they know your network configuration
+- Logs a warning: "router has UPnP enabled -- this is a security risk" (or NAT-PMP, or both).
+- Notifies contacts — not your own devices (`own = true`) — with a one-time advisory message.
+- Once the protocols are off again, sends the contacts it warned a `SECURITY-RESOLVED` message saying so.
 
-The security check runs on every startup and cannot be disabled. It uses a one-time warning file to avoid repeatedly notifying contacts.
+The security check runs on every startup and cannot be disabled. It remembers whom it warned, to avoid repeatedly notifying contacts.
 
 
 ## Part 8: Recommendations
