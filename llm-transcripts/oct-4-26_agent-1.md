@@ -1,7 +1,15 @@
 # Conversation Summary: 44efc473-3b08-4771-8b15-67e610ded2ae
 
-Generated on: 2026-10-04 13:44:23
+Generated on: 2026-10-04 14:02:58
 Models: claude-opus-5-5
+
+## Contents
+
+1. 2026-10-04 13:47, after Request 2 - I'm answering your four questions from
+   the last round: the discovery test fails because this machine's firewall
+   drops the packets, and six built issues are now completed and committed.
+   Next, I need your answers to my seven open questions, starting with whether
+   to split the half-built address-announcement issue.
 
 --------------------------------------------------------------------------------
 
@@ -459,6 +467,208 @@ Understood, nothing to clean up.
    also try its own address? The catch is that it would then hear its own
    packet, and a mailbox that shares a token with a contact would read its own
    packet as that contact's.
+
+--------------------------------------------------------------------------------
+
+### User Request 3
+
+> One catch remains: both daemons started at 6:40 this morning, before today's
+> fixes were committed at 10:38. A running program keeps the version it loaded
+> at startup, so they are still running the old code. They pick up the fixes,
+> including the "busy" answer, when you restart them
+> (kuvalu-mail and kuvalu-notes in your service list). There's no mixed-version
+> problem beyond that.
+
+can we build a script that restarts-all-mailboxes and has a list at the top of
+the script (or taken as arguments) of all the service names it should restart?
+Then it runs the appropriate service restarting commands. It's important that
+it's a variable at the top of the script (can we gitignore specific lines? No,
+probably not... Hmmm...) so that users can restart their own list of mailboxes
+if they do an update. And we should include calling that script into the
+"update" script. Also, maybe we should do like we do with the documentation, and
+have a script template with an empty list, and if you run it without a list of
+entries it says "type the name of each mailbox, and push enter after each name.
+When you're done, provide a blank name, or push enter twice, double-click
+style." and then it populates the instantiated script file, which was created
+from the template during the installation phase, if it didn't already exist.
+This script should go in the program directory, not in the mailboxes. And I
+guess we can have the template have each type of service to restart, but we'd
+only need to put one of them into the built script.
+
+  - The test starts two throwaway mailboxes on this computer, on ports 59391
+    and 59392. They find each other by sending a packet to a multicast group,
+    an address that any program on the network can sign up to listen on.
+
+I don't think we should allow multicast groups, because they break the security
+model. If multiple people can listen on a network, then a compromised system
+could listen to that multicast address without "claiming" the port number with
+the OS, who then receives it from the router and only the router. The router has
+to send one port to exactly one address, always.
+
+> 2. The multiple-addresses issue: you've removed all the damaged contact lines,
+> so should I remove that unbuilt part from the issue? If it was the last thing
+> open, the issue could then be completed. I haven't checked yet whether
+> anything else in it is unbuilt.
+
+sure.
+
+> 6. Reading discovery packets right away: should the discovery socket be added
+> to the list of things that wake the main loop, so a neighbour gets an answer
+> within a second instead of at the next round?
+
+what are discovery packets? Why do we need them?
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 3
+
+> Your answer is all the multiple-addresses issue needed. I'm recording that the
+> cleanup was decided against, and why, and then completing it.
+
+*[commit] 396eab2c0 in r-mail - Multiple addresses per contact: complete, with the load-time cleanup decided against*
+
+> The multiple-addresses issue is done. Next is the restart script. I'm reading
+> how the installer sets up services and where the update script is.
+
+> I haven't found an update script yet. The only match so far is a mailbox hook
+> called `on_update`, so I'm checking what that is.
+
+> Two existing issues might overlap: one about mailboxes being self-contained
+> installations, and one about service names. Reading both.
+
+> I have the design. Before writing the issue I'm checking which phase covers
+> installing.
+
+> Now writing the issue for the restart script:
+
+> The issue is written and passes the checker. Now the template. It holds all
+> four restart methods, one folded block each, and the builder keeps only one.
+
+> Now the installer step and the ignore line:
+
+> All 17 cases pass on the first run. Before trusting that, I'll look at the
+> actual output: the script built for this machine, and what the prompt looks
+> like on screen.
+
+> The built script has only the runit block, git ignores it, and its list is
+> empty. Your service guide should mention the script, so I'm finding the right
+> spot in it.
+
+> The guide is updated. Now the issue's current-behavior section: everything is
+> built except the update-script step, which is waiting on your answer.
+
+> The restart script is done for now. I'm reading the existing issue about
+> dropping network auto-detection, since it may already plan to remove
+> discovery.
+
+> That issue already plans to remove discovery completely. I'm reading the rest
+> of it for anything still undecided.
+
+> Issue #418 already plans to delete all of it. Your objection to multicast is a
+> new reason, so I'm adding it there along with what today's investigation
+> found.
+
+I built the restart script and tested it, but haven't committed it yet. Its
+issue is still open because rmail has no update script to call it from.
+Discovery packets are a workaround the project already plans to remove, for
+reasons that include your multicast objection.
+
+## The restart-all-mailboxes script
+
+- **Template:** `scripts/.templates/restart-mailboxes.sh` is tracked by git. It
+  has the list at the top, and one folded block for each service manager: runit,
+  systemd, OpenRC and NixOS.
+- **Builder:** `scripts/make-restart-script.sh <manager>` builds
+  `restart-mailboxes.sh` in the program folder from the template. It keeps only
+  that manager's block and fills in the folder path. If a built copy already
+  exists it is left alone, so your list survives re-installs. `--force` rebuilds
+  it and empties the list.
+- **Git:** it can't ignore single lines, only whole files, so your guess was
+  right. The built script is in `.gitignore` and the template is tracked, the
+  same way the docs work.
+- **Installer:** builds the script once it knows the service manager, if no copy
+  exists yet.
+- **Running it:**
+  - With no arguments it restarts everyone in the list.
+  - `./restart-mailboxes.sh kuvalu-notes` restarts only that one, once, and
+    leaves the list alone.
+  - With an empty list it asks: "Type the service name of each mailbox, pressing
+    enter after each one. When you're done, give a blank name (press enter
+    twice)." It then saves the names into its own list line.
+- **Checks:** every name is checked before anything restarts, so a typo can't
+  leave half the mailboxes on the new code. Three seconds after restarting, it
+  asks whether each service is running again, and fails if any isn't.
+- **Root:** runit, OpenRC, NixOS and systemd system services are restarted
+  through `sudo`. systemd user services don't need it.
+- **Tests:** `scripts/test-restart-mailboxes.sh` runs 17 cases against stand-in
+  service commands that only record what they're asked to do. All pass.
+- The service guide has a new section describing it.
+
+This machine's copy is built (runit, empty list) but I haven't run it, because
+it needs your sudo password. To restart your two mailboxes onto today's code,
+run it once from a terminal and type `kuvalu-mail`, `kuvalu-notes`, then a blank
+line.
+
+## What discovery packets are
+
+Both your mailboxes sit behind one home router, so the outside world sees them
+at one public address, 97.120.253.166. A contact entry usually holds that public
+address. When a mailbox connects to its own public address from inside the
+house, the packet goes out to the router and has to be turned around and sent
+back in. Many routers won't do that turnaround. The test log shows it: "timeout
+connecting to 97.120.253.166:59392" after 8 seconds.
+
+Discovery was the workaround. A mailbox that notices a contact shares its own
+public address sends an encrypted "are you here? I'm at 192.168.1.100, port N".
+It sends that to a multicast group and also to every address from .1 to .254 on
+the local network. Whichever mailbox's shared password opens the packet records
+the sender's local address, answers "here, I'm at 192.168.x.x", and connections
+from then on use the local address.
+
+**We no longer need them.** Since the address-announcement work, a contact can
+carry a local-address line, written by hand or announced automatically to a
+contact on the same local network. An open issue already plans to delete
+discovery completely: the multicast, the scan of all 254 addresses, and the
+network socket they use. I added your objection to that issue, along with
+today's findings:
+
+- the mailboxes fail to join the group at boot and never retry;
+- discovery packets are only read at the start of a sync round;
+- the firewall drops the machine's own multicast packet when it comes back in.
+
+**One correction on the security point.** Multicast set to stay on the local
+network never leaves your house, and routers don't pass it in from the internet.
+Your port forward still sends 8025 to exactly one machine. What it breaks is the
+inside of the house: any device on your network can join the group and hear the
+packets. The 254-address scan is just as bad, since it hands the same packet to
+every device. The packets are encrypted, but their arrival still tells any
+listener that an rmail mailbox is at 192.168.1.100, on which port, and how often
+it syncs. Deleting discovery removes both.
+
+## Also done
+
+The multiple-addresses issue is complete and committed. The cleanup of damaged
+contact lines is recorded as decided against, with your reason.
+
+## Questions
+
+1. **Delete discovery now?** That removes the multicast, the 254-address scan,
+   the network socket they use, and the failing test. It also converts any
+   old-style `lan_ip` contact lines into the newer local-address lines.
+2. **What is "the update script"?** None exists. Options, most likely first:
+   - (a) a new `update.sh` in the program folder that pulls the new code,
+     rebuilds the libraries if their sources changed, then runs
+     `restart-mailboxes.sh`;
+   - (b) the installer runs the restart at its end, since re-running it is the
+     closest thing to an update today;
+   - (c) updating stays `git pull`, plus a printed reminder to restart.
+
+   The restart-script issue stays open until this is answered, which is why it
+   isn't committed.
+3. **Should the installer add the service it just created to the restart list?**
+   Right now the list starts empty and the first run asks, as you described.
+   Adding it automatically would mean the list is never empty on a machine where
+   you installed through the installer.
 
 --------------------------------------------------------------------------------
 

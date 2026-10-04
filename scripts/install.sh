@@ -167,7 +167,7 @@ _parse_bool() {
 # Option keys the installer recognises.  Value keys need a string, yn keys
 # take a boolean.  Used by show_help and the CLI parser.
 OPT_VALUE_KEYS="mail_dir name port service_name"
-OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service"
+OPT_YN_KEYS="compile_lua compile_openssl compile_luasocket compile_upnp compile_natpmp compile_zip setup_service user_service restart_mailboxes"
 
 show_help() {
     cat <<'HELP'
@@ -204,6 +204,9 @@ Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
   --setup-service         Set up rmail to start automatically
   --user-service          When setting up a service, use a user-level one
                           (no root required)
+  --restart-mailboxes     At the end, restart every mailbox listed in
+                          restart-mailboxes.sh so each runs this version
+                          (uses sudo except for systemd user services)
 
 Fully unattended example:
   scripts/install.sh --silent --yes \
@@ -1737,10 +1740,15 @@ if [ "$INIT_SYSTEM" = "unknown" ]; then
     fi
 fi
 
+# Whether this run wrote a service for this mailbox; if so, its name goes
+# on the restart list (#622).
+SERVICE_SET_UP=false
+
 if [ "$INIT_SYSTEM" = "unknown" ]; then
     info "Could not detect init system — skipping service setup"
     info "See README.md for service file examples"
 elif ask_yn setup_service "Set up rmail to run as a service?"; then
+    SERVICE_SET_UP=true
     # Refuse to write over a service that belongs to a different mailbox.
     #
     # This check lives here rather than in the earlier scan because this is
@@ -1960,6 +1968,21 @@ SERVICE
     esac
 fi
 
+# The script that restarts every mailbox after an update (#622).  Built
+# once per machine from its template, for the service manager found
+# above; a copy that already exists holds the owner's list of mailboxes
+# and is kept.  Built whether or not this run set up a service, because
+# the mailboxes it restarts may have been set up by earlier runs.  With
+# no service manager found there is no restart method to build it with.
+# A service this run set up is added to the list, so a machine set up
+# by the installer never has an empty one.
+if [ "$INIT_SYSTEM" != "unknown" ]; then
+    "$ROOT/scripts/make-restart-script.sh" "$INIT_SYSTEM" "$ROOT"
+    if $SERVICE_SET_UP; then
+        "$ROOT/restart-mailboxes.sh" --add "$RMAIL_SERVICE"
+    fi
+fi
+
 # ============================================================
 # DOCS GENERATION — expand docs/.templates/*.md with real install paths
 # ============================================================
@@ -2024,4 +2047,37 @@ echo "  libs/rmail_inotify.so  — outbox file-change watcher"
 if $NAT_INSECURE; then
     echo ""
     warn "NOTE: insecure NAT protocols detected on your router (see warnings above)"
+fi
+
+# ============================================================
+# RESTART — every mailbox on the list picks up the program as it is now
+# ============================================================
+# Re-running the installer is how rmail is updated today, and a running
+# daemon keeps the program it started with until its service restarts
+# (#622).  So the last step offers to restart every listed mailbox.
+#
+# It is asked, not done unasked, because restarting goes through sudo for
+# every service manager but a systemd user service, and this installer
+# otherwise never escalates privileges (see SERVICE SETUP).  --yes says
+# yes; --no-restart-mailboxes skips it.
+#
+# Not offered when a listed service is not installed: on runit, OpenRC,
+# NixOS and a systemd system service, a service this run wrote is only
+# installed once the owner runs the commands printed above.  That is
+# said, with what to run afterwards, rather than treated as an error.
+if [ -x "$ROOT/restart-mailboxes.sh" ]; then
+    echo ""
+    if "$ROOT/restart-mailboxes.sh" --check; then
+        if ask_yn restart_mailboxes "Restart every listed mailbox now, so each runs this version? (uses sudo)"; then
+            "$ROOT/restart-mailboxes.sh"
+        else
+            info "Not restarted.  Each mailbox keeps running the version it started with"
+            info "until you run: $ROOT/restart-mailboxes.sh"
+        fi
+    else
+        # the check said why: a list still empty, or a service not yet
+        # installed
+        info "Not restarting (see the line above).  Once that is resolved, run"
+        info "    $ROOT/restart-mailboxes.sh"
+    fi
 fi

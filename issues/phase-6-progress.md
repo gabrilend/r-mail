@@ -26,6 +26,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#616](completed/616-install-usb-portable.md) — Generate a portable rmail *mailbox* drive**  The generator exists: `scripts/make-mailbox-drive.sh` writes a runnable mailbox onto a drive — the mailbox with its own config, hooks and launchers (`sync-with-contacts.sh` for one visit, `auto-sync.sh` to stay live until unplugged, #409), and the program...
 - **[#618](completed/618-deploy-rmail-to-flash-drive.md) — Generate a portable rmail *installer* drive**  The generator exists: `scripts/make-installer-drive.sh` writes an installer drive — `install.sh` at its root (which runs the copy of `scripts/install.sh` it carries), a README, and the source tree without build products.
 - **[#621](completed/621-re-sort-phases-and-re-describe-the-architecture.md) — Re-sort the issues into nine phases and re-describe the whole architecture as blueprints**  Issues are numbered `{phase}{id}`, and a phase is meant to group related functionality, foundations first (the owner's rules: "The phases should correspond to sections of the software, clusters of functionality and major methodologies").
+- **[#622](completed/622-restart-all-mailboxes-after-an-update.md) — Restart every mailbox on the machine after an update**  Built 2026-10-04.
 
 ## Open
 

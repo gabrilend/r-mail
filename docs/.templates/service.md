@@ -292,6 +292,39 @@ old shared config directory forced, and it is gone.
    are all inside the folder that holds its config file (#102: the mailbox is
    the installation; there is no `mail` setting any more).
 
+### Restarting every mailbox after an update
+
+One checkout serves every mailbox, so updating the checkout updates them all —
+but only once each is restarted. A running daemon keeps the program it loaded
+when it started.
+
+```sh
+/home/you/programs/email/restart-mailboxes.sh                # every listed mailbox
+/home/you/programs/email/restart-mailboxes.sh kuvalu-notes   # just this one, this once
+```
+
+The list of service names sits at the top of that script, and belongs to this
+machine: the script is built by the installer from
+`scripts/.templates/restart-mailboxes.sh`, for this machine's service manager
+only, and git ignores it. Each time the installer sets up a mailbox's service
+it adds that name to the list (`restart-mailboxes.sh --add NAME` does the same
+by hand). Run with the list empty, it asks for each mailbox's service name (one
+per line, a blank line to finish) and saves them into the script.
+
+Re-running the installer is how rmail is updated, so its last step offers to
+restart every listed mailbox (`--restart-mailboxes` / `--no-restart-mailboxes`
+answer it in advance). It is not offered while a listed service is not yet
+installed — on runit, OpenRC, NixOS and a systemd system service, a service
+the installer writes is installed by the commands it prints for you to run.
+`restart-mailboxes.sh --check` asks the same question by hand. Every name is checked before anything is restarted, and each
+service is checked to be running afterwards. Restarting a runit, OpenRC,
+NixOS or systemd system service goes through `sudo`; a systemd user service
+does not need it.
+
+To rebuild it (say, after changing service manager):
+`scripts/make-restart-script.sh --force <runit|systemd|openrc|nixos>`. That
+empties the list.
+
 ### Starting a daemon by hand
 
 The daemon takes one positional argument: the path to a config file.

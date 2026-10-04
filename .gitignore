@@ -28,6 +28,10 @@ config
 /*-run
 /*-init
 
+# This machine's restart script, built from scripts/.templates/ (#622).
+# Its list of mailbox services belongs to this machine alone.
+/restart-mailboxes.sh
+
 # Build temp files
 .build-tmp/
 
