@@ -111,7 +111,7 @@ class MainActivity : ComponentActivity() {
                             filename = filename, vm = vm,
                             onBack = { navController.popBackStack() },
                             onReply = { sender, subject, body ->
-                                // #358: Reply seeds the composer with the
+                                // #816: Reply seeds the composer with the
                                 // sender as recipient, Re: prefix on the
                                 // subject, and the quoted body the Read
                                 // screen already built.
@@ -124,7 +124,7 @@ class MainActivity : ComponentActivity() {
                                 navController.popBackStack()
                             },
                             onForward = { subject, body ->
-                                // #358: Forward seeds with an empty
+                                // #816: Forward seeds with an empty
                                 // recipient slot, Fwd: prefix on the
                                 // subject (deduped so repeated forwards
                                 // don't stack "Fwd: Fwd: Fwd:"), and the

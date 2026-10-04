@@ -61,6 +61,7 @@ The blueprint #new-delta, not #new-deltas, and its file new-delta.md.
 The blueprint: issues/101-beta.md, and issues/completed/102-gamma.md.
 The server answers HTTP 404 when it has nothing.
 Ranges: #100–101 were one piece of work.
+Its folder path: see issues/102.
 DOC
     printf 'we talked about #100 today\n' > "$P/llm-transcripts/talk.md"
     cp "$P/llm-transcripts/talk.md" "$WORK/talk.before"
@@ -97,6 +98,7 @@ expect_line "$P/docs/guide.md" "The blueprint #103, not #new-deltas, and its fil
 expect_line "$P/docs/guide.md" "See #101 and #100, and issue 205." "#number and 'issue number' were rewritten, each once"
 expect_line "$P/docs/guide.md" "The blueprint: issues/100-beta.md, and issues/completed/205-gamma.md." "links by file name were rewritten"
 expect_line "$P/docs/guide.md" "The server answers HTTP 404 when it has nothing." "an HTTP 404 was left alone"
+expect_line "$P/docs/guide.md" "Its folder path: see issues/205." "a path naming only the number was rewritten"
 if cmp -s "$P/llm-transcripts/talk.md" "$WORK/talk.before"; then ok "the transcript was not touched"; else note_fail "the transcript was rewritten"; fi
 if grep -q "docs/guide.md:5 (101)" "$WORK/out"; then
     ok "the bare number in a range was reported for a person to check"

@@ -25,7 +25,7 @@ printf '// carol: we only had her old address\ncarol.ip    = "127.0.0.1"\ncarol.
 heading "What this machine knows of itself"
 t0=$(now_ms)
 start_daemon home
-wait_for 40 '[ -f "$BOX_home/.state/public_ip" ] || grep -q "listening on" "$DEMO_WORK/home.log"'
+wait_for 40 '[ -f "$BOX_home/.state/public_ip" ]'
 wait_for 20 '[ -f "$BOX_home/.state/public_ip" ]'
 t1=$(now_ms)
 for f in public_ip lan_ip public_ipv6; do

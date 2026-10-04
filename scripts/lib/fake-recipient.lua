@@ -61,6 +61,8 @@ local function write(path, text)
 end
 -- }}}
 
+local frame_bytes = 0 -- size on the wire of the request being handled
+
 -- {{{ local function event
 -- Every event also says how big the request's frame was on the wire
 -- (`frame`, bytes): what someone watching the network sees.
@@ -79,7 +81,6 @@ end
 -- }}}
 
 local offered = {}   -- attachment id -> true, for cancels
-local frame_bytes = 0 -- size on the wire of the request being handled
 local shapes  = {}   -- attachment id -> {total = n}
 
 -- {{{ local function owed

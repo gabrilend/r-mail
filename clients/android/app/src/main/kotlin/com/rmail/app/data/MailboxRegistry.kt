@@ -150,7 +150,7 @@ class MailboxRegistry(private val context: Context) {
     }
 }
 
-/** Same ranges as the daemon's is_private_ipv4 (#388). */
+/** Same ranges as the daemon's is_private_ipv4 (#409). */
 fun isPrivateIpv4(addr: String): Boolean {
     val parts = addr.split(".")
     if (parts.size != 4) return false

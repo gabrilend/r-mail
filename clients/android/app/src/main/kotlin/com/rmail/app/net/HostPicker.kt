@@ -7,7 +7,7 @@ import java.net.NetworkInterface
 import java.net.Socket
 
 /**
- * Chooses which of a mailbox's addresses to connect to (#388).
+ * Chooses which of a mailbox's addresses to connect to (#409).
  *
  * Local addresses come first, but only those on the phone's own /24 — the
  * same rule the daemon uses.  Private ranges are reused on every network, so

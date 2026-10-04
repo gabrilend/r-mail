@@ -3,7 +3,7 @@
 #
 # The phone keeps the contacts in a plain sorted form with no comments,
 # and sends the whole of it back after an edit.  Until 2026-10-04 (issue
-# #411) the daemon wrote that over the contacts file, so one save from the
+# #504) the daemon wrote that over the contacts file, so one save from the
 # phone erased every comment, blank line and the person's own order.  Now
 # the daemon works out which contacts changed and edits only their lines.
 #

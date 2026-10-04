@@ -167,7 +167,7 @@ the same moment each waited out the other's timeout.
 
 ## Sync timing
 
-Each contact has its own timer (#377):
+Each contact has its own timer (#115):
 
 - **Floor 30 seconds.**  A contact is due 30 s after a successful exchange.
 - **Each failed cycle adds 6 minutes** (360 s), up to a **ceiling of 2 hours**.
@@ -177,7 +177,7 @@ Each contact has its own timer (#377):
 
 A change in the outbox is noticed at once (inotify on Linux, kqueue on the
 BSDs and macOS) and starts a sync pass, but each contact is still only sent
-to when its own timer is due (#396 is open about this), and attachment pieces
+to when its own timer is due (#119 is open about this), and attachment pieces
 pass through the same gate.
 
 Other timings: connecting to a contact gives up after 8 s; receiving waits

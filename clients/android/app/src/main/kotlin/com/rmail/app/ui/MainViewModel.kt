@@ -36,7 +36,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val globalSettings = Settings(application)
 
-    // #318: exposes readerColumns as observable Compose state so the
+    // #809: exposes readerColumns as observable Compose state so the
     // Read screen recomposes when the user taps the +/- buttons.
     private val _readerColumns = MutableStateFlow(globalSettings.readerColumns)
     val readerColumns: StateFlow<Int> = _readerColumns
@@ -80,13 +80,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var serverLanIp: String? = null
 
-    /** A client for whichever of the mailbox's addresses answers (#388). */
+    /** A client for whichever of the mailbox's addresses answers (#409). */
     private suspend fun clientFor(config: MailboxConfig): RmailClient {
         val host = withContext(Dispatchers.IO) { HostPicker.pick(config, serverLanIp) }
         return RmailClient(host, config.port, config.token)
     }
 
-    // #358: Pending compose draft delivered from ReadScreen (forward /
+    // #816: Pending compose draft delivered from ReadScreen (forward /
     // reply actions).  InboxScreen consumes it when it appears, fills
     // draftRecipients/draftSubject/draftBody, and clears the pending
     // value.  Null means "nothing queued."
@@ -94,12 +94,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val recipients: List<String>,
         val subject: String,
         val body: String,
-        // #321: when non-null, the composer is in *edit* mode for this
+        // #812: when non-null, the composer is in *edit* mode for this
         // outbox filename — Send becomes Save, the back gesture asks
         // for confirmation, and on save we overwrite this file rather
         // than generating a fresh name.
         val editingOutboxFilename: String? = null,
-        // #321: existing `attach: ...` lines from the outbox file
+        // #812: existing `attach: ...` lines from the outbox file
         // being edited, preserved verbatim through the save round-trip.
         val attachLines: List<String> = emptyList()
     )
@@ -112,7 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return d
     }
 
-    // #322: "I just hit Send" animation state.  The composable watches
+    // #813: "I just hit Send" animation state.  The composable watches
     // `sendingBar` and phases itself: dots countdown → hold-at-3 until
     // sync completes → slide off + success/failure text → gone.
     //
@@ -151,7 +151,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var pollingJob: Job? = null
 
-    // Polling cadence is no longer a fixed interval (#377 on the daemon side).
+    // Polling cadence is no longer a fixed interval (#115 on the daemon side).
     // The old 10s timer was a testing value that was never reverted: chatty
     // against a server with nothing to say, and no slower at all against one
     // that is unreachable, so a phone off-network retried every 10s forever.
@@ -304,7 +304,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         catch (_: Exception) { null }
     }
 
-    // #358: the sender of an inbox message lives in sync-state, not in
+    // #816: the sender of an inbox message lives in sync-state, not in
     // the message body.  Used by ReadScreen's Reply flow to pre-address
     // the composer.  The sync-state map is keyed by message id, so we
     // scan by filename.
@@ -317,7 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (_: Exception) { "" }
     }
 
-    // #357: enumerate things on this device that the home server doesn't
+    // #815: enumerate things on this device that the home server doesn't
     // have a known-good copy of yet.  Used by the delete-mailbox
     // confirmation dialog so the user can see what they might lose by
     // severing the connection now.
@@ -339,7 +339,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return items
     }
 
-    // #357: removeMailbox is defined further down alongside the other
+    // #815: removeMailbox is defined further down alongside the other
     // registry-mutation helpers (updateMailbox etc.) — same body as
     // the one I had here originally.  Removed the duplicate.
 

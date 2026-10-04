@@ -143,7 +143,7 @@ fun InboxScreen(
     var draftSubject by remember { mutableStateOf("") }
     var draftBody by remember { mutableStateOf("") }
 
-    // #321: edit-mode tracking.  Declared before the pendingDraft
+    // #812: edit-mode tracking.  Declared before the pendingDraft
     // LaunchedEffect that writes to them.  When editingOutboxFilename
     // is non-null, the composer is editing that file (Send becomes
     // Save, back asks to confirm, the saved file overwrites this
@@ -162,7 +162,7 @@ fun InboxScreen(
         draftBody != editingSnapshot.third
     )
 
-    // #358 / #321: pick up a forward/reply/edit draft queued by
+    // #816 / #812: pick up a forward/reply/edit draft queued by
     // ReadScreen, seed the composer state with it, and jump to the
     // Write panel.  When the draft is tagged as an edit
     // (editingOutboxFilename != null), also enable the save/back-
@@ -192,7 +192,7 @@ fun InboxScreen(
     // Settings modified tracking
     var settingsModified by remember { mutableStateOf(false) }
 
-    // #315: duplicate-subject warning dialog.  Keeps the draft intact
+    // #814: duplicate-subject warning dialog.  Keeps the draft intact
     // so the user can tweak the subject and resend.
     var duplicateSubjectWarning by remember { mutableStateOf<String?>(null) }
 
@@ -300,7 +300,7 @@ fun InboxScreen(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    // #359: only show the ← arrow when it truly means
+                    // #817: only show the ← arrow when it truly means
                     // "back one step" — i.e. the contact-editor sub-view.
                     // At the top level, tapping the mailbox name (title)
                     // jumps to the mailbox list; an arrow there misled
@@ -319,10 +319,10 @@ fun InboxScreen(
                     if (showContactEditor) {
                         Text(label)
                     } else {
-                        // #359: title doubles as the "go to mailbox list"
+                        // #817: title doubles as the "go to mailbox list"
                         // tap target.  A subtle underline signals it's
                         // interactive without shouting about it.
-                        // #321: when in edit mode with unsaved changes,
+                        // #812: when in edit mode with unsaved changes,
                         // intercept the tap and ask before leaving.
                         Text(
                             label,
@@ -383,7 +383,7 @@ fun InboxScreen(
                         }
                     }
                     if (currentPanel == Panel.WRITE) {
-                        // #319: the old "+" (clear-form) action was removed.
+                        // #810: the old "+" (clear-form) action was removed.
                         // With an empty draft it looked like it did nothing,
                         // and with a filled draft it silently wiped work —
                         // both surprising.  Users who want a fresh draft can
@@ -392,7 +392,7 @@ fun InboxScreen(
                         IconButton(onClick = {
                             val validRecipients = draftRecipients.filter { it.isNotBlank() }
                             if (validRecipients.isEmpty()) return@IconButton
-                            // #321: in edit mode we overwrite the
+                            // #812: in edit mode we overwrite the
                             // existing outbox file; otherwise we
                             // generate (or sanitise) a new filename
                             // and apply the duplicate-subject guard.
@@ -418,7 +418,7 @@ fun InboxScreen(
                             sb.append(draftBody)
                             vm.saveOutboxFile(filename, sb.toString())
                             vm.uploadAttachmentsInBackground(filename, draftAttachments.map { it.uri })
-                            // #322: only trigger the sending animation
+                            // #813: only trigger the sending animation
                             // for fresh sends.  An edit is "save +
                             // sync"; the daemon's living-messages
                             // mechanism does the right thing without
@@ -525,9 +525,9 @@ fun InboxScreen(
             } // end if (!isKeyboardOpen)
         }
     ) { padding ->
-        // #321: discard-changes confirmation.  Triggered by either the
+        // #812: discard-changes confirmation.  Triggered by either the
         // device back gesture (BackHandler) or tapping the underlined
-        // mailbox-name title (#359) while in edit mode with unsaved
+        // mailbox-name title (#817) while in edit mode with unsaved
         // edits.  Save → re-fires the Send/Save action; Discard →
         // clears edit state and leaves to the previous panel.
         androidx.activity.compose.BackHandler(
@@ -562,7 +562,7 @@ fun InboxScreen(
                 }
             )
         }
-        // #315: duplicate-subject dialog.  Shown when Send would produce
+        // #814: duplicate-subject dialog.  Shown when Send would produce
         // a filename that collides with an existing outbox file.  Draft
         // state is preserved; user picks Cancel (tweak the subject) or
         // Replace (overwrite the existing file deliberately).
@@ -618,7 +618,7 @@ fun InboxScreen(
                         modifier = Modifier.padding(8.dp), color = MaterialTheme.colorScheme.error)
                 }
             }
-            // #322: post-Send animation bar — renders only when there's
+            // #813: post-Send animation bar — renders only when there's
             // an in-flight send, shows dots counting down, then reports
             // "sent" (delivered) or "ready" (queued, will retry).
             SendingProgressBar(vm)
@@ -1399,7 +1399,7 @@ private fun SettingsPanel(
         ColorField("Text color", fgColor) { fgColor = it; markModified() }
         ColorField("Accent color", accentColor) { accentColor = it; markModified() }
 
-        // #357: destructive action — delete the mailbox from this device.
+        // #815: destructive action — delete the mailbox from this device.
         // Placed at the very bottom and wrapped in a confirmation dialog
         // that enumerates unsynced items so the user knows what (if
         // anything) they'd lose by disconnecting now.
@@ -1652,7 +1652,7 @@ private fun ComposePanel(
             thickness = 1.5.dp,
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 
-        // Body — #316: cursor-aware scroll.  We track the TextLayoutResult
+        // Body — #806: cursor-aware scroll.  We track the TextLayoutResult
         // via onTextLayout, and whenever the caret moves we ask the parent
         // scroller to bring a rect around the caret into view.  The rect
         // is inflated downward by a few line-heights so the requester keeps
@@ -2093,7 +2093,7 @@ private fun MessageListItem(
     }
 }
 
-// ── #322 Sending progress bar ──────────────────────────────────────────────
+// ── #813 Sending progress bar ──────────────────────────────────────────────
 //
 // Green bar slides in when the user hits Send.  A row of 15 dots empties
 // out left-to-right (randomised among positions 0..11) at 5 dots/sec,

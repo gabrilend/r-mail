@@ -3,7 +3,7 @@
 #
 # A contact's attachment arrives as numbered pieces ("chunks") of one zip.
 # Each piece says which one it is, how many there are, and carries a
-# checksum of itself and of the whole zip.  Until 2026-09-29 (issue #404b)
+# checksum of itself and of the whole zip.  Until 2026-09-29 (issue #311b)
 # the receiver believed each piece on its own: a piece with no checksum
 # skipped the check, the count could change from piece to piece, and a
 # piece numbered -3 or 2.5 was written to disk under that name.
@@ -32,7 +32,7 @@
 #                     and how many are held, and the file arrives whole.
 #                     There is no smallest piece -- the owner wants
 #                     messages under 1 KB carried as attachments -- so the
-#                     count is capped instead (2026-09-29, #404b)
+#                     count is capped instead (2026-09-29, #311b)
 #
 # Usage:
 #   scripts/test-chunk-rules.sh          # use the enclosing checkout

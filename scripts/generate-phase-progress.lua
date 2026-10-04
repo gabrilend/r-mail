@@ -27,7 +27,7 @@ DIR = DIR:gsub("/+$", "")
 local DASHBOARD = "/home/ritz/programming/ai-stuff/scripts/progress-dashboard.lua"
 local NOTES_MARK = "<!-- notes: kept when regenerated -->"
 
--- The nine phases (#402, 2026-10-04).  Foundations first: a phase stands
+-- The nine phases (#621, 2026-10-04).  Foundations first: a phase stands
 -- on the ones before it.
 local PHASES = {
     ["1"] = {"The daemon's core",
@@ -73,12 +73,41 @@ end
 -- {{{ local function summary
 -- The title and the first sentence of the Current Behavior section, both
 -- on one line, markdown kept as it is.
+-- The paragraph is the first one of prose: not a heading, a table, a
+-- list, code, a "Built:"-style label or a status line ("Completed ...").  From Current Behavior when the
+-- issue has one; older issues without it give their first prose anywhere.
+local function first_prose(section)
+    -- code blocks first: a blank line inside one would split it into
+    -- paragraphs that look like prose
+    section = section:gsub("```.-```", "")
+    local first_item
+    for para in (section .. "\n\n"):gmatch("(.-)\n%s*\n") do
+        local p = para:gsub("^%s+", "")
+        local lead = p:match("^[^\n]*") or ""
+        if p ~= "" and not lead:match("^#") and not lead:match("^|") and not lead:match("^```")
+           and not lead:match("^[%-%*] ") and not lead:match("^%d+%. ") and not para:match("^    ")
+           and not (lead:match("^[%w ]+:$") and #lead < 25) and not lead:match("^%*%*[^*]+:%*%*$")
+           and not lead:match("^Completed") and not lead:match("^FIXED") and not lead:match("^Open[%.,]")
+           and not lead:match("^%*%*Completed") then
+            return p
+        end
+        -- a section that is only a list: its first item, if nothing better
+        if not first_item and lead:match("^[%-%*] ") then first_item = lead:gsub("^[%-%*] ", "") .. " " .. (p:match("^[^\n]*\n([^%-%*][^\n]*)") or "") end
+    end
+    return first_item or ""
+end
+
 local function summary(text)
-    local title = text:match("^#%s*#?[%w]*%s*[—%-]+%s*([^\n]+)") or text:match("^#%s*([^\n]+)") or "?"
-    local body = text:match("\n## Current Behavior%s*\n(.-)\n## ") or text:match("\n## Current Behavior%s*\n(.*)$") or ""
-    body = body:gsub("\n%s*\n.*$", "")          -- first paragraph
-    body = body:gsub("%s+", " "):gsub("^%s+", "")
-    local first = body:match("^(.-[%.%!%?])%s") or body:match("^(.-[%.%!%?])$") or body
+    local title = text:match("^#%s+#?%d%d%d+%l?%s+[—%-]+%s+([^\n]+)")
+        or text:match("^#%s+#?new%-[%w%-]+%s+[—%-]+%s+([^\n]+)")
+        or text:match("^#%s+([^\n]+)") or "?"
+    local body = text:match("\n## Current Behavior%s*\n(.-)\n## ") or text:match("\n## Current Behavior%s*\n(.*)$")
+    local para = first_prose(body or "")
+    if para == "" then para = first_prose((text:gsub("^[^\n]*\n", ""))) end
+    -- a bold lead-in label ("**The offer.**  Once ...") is not the sentence
+    para = para:gsub("^%*%*[^*]+[%.:]%*%*%s+", "")
+    para = para:gsub("%*%*", ""):gsub("%s+", " "):gsub("^%s+", "")
+    local first = para:match("^(.-[%.%!%?])%s") or para:match("^(.-[%.%!%?])$") or para
     if #first > 260 then first = first:sub(1, 257) .. "..." end
     return title, first
 end
@@ -141,7 +170,8 @@ local function render(phase, issues, notes)
     end
     out[#out + 1] = NOTES_MARK
     out[#out + 1] = notes or ""
-    return table.concat(out, "\n"):gsub("\n*$", "\n")
+    -- (in parentheses: gsub also returns a count, which must not be written)
+    return (table.concat(out, "\n"):gsub("\n*$", "\n"))
 end
 -- }}}
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # make-mailbox-drive.sh — populate a USB drive with a running rmail mailbox.
 #
-# Implements issue #339.  The resulting drive is itself a runnable rmail
+# Implements issue #616.  The resulting drive is itself a runnable rmail
 # node: plug it into any Linux host whose router forwards the configured
 # port and run one of the mailbox's launchers -- sync-with-contacts.sh for
 # a single visit, auto-sync.sh to stay live until unplugged.  Unplug and
@@ -27,7 +27,7 @@
 # mailbox there, and the service file says which mailbox each daemon is
 # for.  This is the exception, and the reason is the medium rather than
 # the mailbox — there is no checkout on the far end of a USB cable, so
-# the drive brings one (#382).
+# the drive brings one (#102).
 #
 # What travels is an allowlist, not the whole tree minus exclusions:
 #
@@ -479,7 +479,7 @@ ok "wrote config: $MAILBOX_DIR/config"
 #                                     drive is unplugged or Ctrl-C.
 #
 # Both live inside the mailbox rather than at the drive root: the mailbox
-# is the installation (#382), and a mailbox copied off the drive should
+# is the installation (#102), and a mailbox copied off the drive should
 # still carry its way to run.
 #
 # Both run the daemon from a copy of source-code/ in a temporary directory

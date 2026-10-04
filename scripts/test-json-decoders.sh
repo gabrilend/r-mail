@@ -6,7 +6,7 @@
 # on the wire as JSON, read through the bundled library libs/dkjson.lua.
 # That library carries two decoders: one in plain Lua, and one built on
 # LPeg, a C library for matching text that is faster on large inputs.  It
-# picks one by itself when it loads.  Until 2026-09-29 (issue #403) its
+# picks one by itself when it loads.  Until 2026-09-29 (issue #104) its
 # check for LPeg crashed on every modern LPeg and it fell back to plain Lua
 # without a word; this test exists so that can never go unnoticed again.
 #

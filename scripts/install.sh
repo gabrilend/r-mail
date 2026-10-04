@@ -460,7 +460,7 @@ sed_escape_replacement() {
     # — doubles backslashes, escapes | and &.  Without this, a path
     # containing any of those characters either breaks the sed command or
     # gets interpreted (backref `&` becomes the matched text; `\n`
-    # becomes a newline).  See #344.
+    # becomes a newline).  See #611.
     printf '%s' "$1" | sed 's/[\\|&]/\\&/g'
 }
 
@@ -634,7 +634,7 @@ gen_random_port() {
 # The mailbox path is asked for first, because everything else about this
 # install is stored inside the mailbox and so cannot be looked up until we
 # know where it is.  There is no registry of mailboxes to consult for a
-# better default and deliberately so — see #382 — which means a re-run for
+# better default and deliberately so — see #102 — which means a re-run for
 # an existing mailbox needs its path typed, or passed with --mail-dir.
 RMAIL_MAIL=$(ask_value mail_dir "Mail directory" "${HOME}/mail") || exit 1
 RMAIL_MAIL=$(echo "$RMAIL_MAIL" | sed "s|^~|$HOME|")
@@ -646,7 +646,7 @@ MAIL_DIR="$RMAIL_MAIL"
 # every config in one shared directory and so had to build a unique
 # filename out of the mailbox path — slashes turned into dashes.  That slug
 # got reimplemented inside the daemon, the two copies drifted apart, and
-# #381 is the record of what that cost.  Here the directory the file sits
+# #612 is the record of what that cost.  Here the directory the file sits
 # in *is* the identifying information, which is a thing the filesystem is
 # already willing to guarantee.
 CONFIG_FILE="$MAIL_DIR/config"
@@ -669,7 +669,7 @@ fi
 # installer used to read every sibling config to check the port and the
 # identity name.  That required each mailbox to know where the others
 # lived, which stopped being possible — and stopped being desirable —
-# when configs moved inside their own mailboxes.  See #382.
+# when configs moved inside their own mailboxes.  See #102.
 #
 # The service locations of all five init systems are checked regardless
 # of which one is running here, because a machine that changed init
@@ -771,7 +771,7 @@ DEFAULT_PORT=$(gen_random_port)
 # contact named after itself.
 #
 # The daemon now refuses exactly that condition when it arises, naming
-# both readings (#381).  Checking the real thing at the moment it matters
+# both readings (#612).  Checking the real thing at the moment it matters
 # beats checking a proxy for it at install time, and it does not require
 # one mailbox to go reading another's files.
 while true; do
@@ -827,13 +827,13 @@ done
 # uniqueness is inherited from the filesystem rather than from the operator
 # remembering to pick a different name.
 #
-# This is the whole fix for #381.  Before it, every install generated a
+# This is the whole fix for #612.  Before it, every install generated a
 # service called "rmail", and installing a second mailbox silently replaced
 # the first one's service instead of adding to it.
 #
 # The config filename used to be built from this same slug, and is not any
 # more: a config lives in its own mailbox now, where the directory does the
-# distinguishing (#382).  A service name still needs it, because service
+# distinguishing (#102).  A service name still needs it, because service
 # names genuinely do share one namespace per machine — /etc/sv, or
 # /etc/systemd/system — and nothing else is available to tell two of them
 # apart.  This is the one place the slug still earns its keep.
@@ -916,7 +916,7 @@ port = $RMAIL_PORT
 # The scripts are this mailbox's own copies.  They used to be shared: every
 # mailbox on a machine pointed at one set of files in the checkout, so
 # editing a hook to change one mailbox's behaviour silently changed every
-# mailbox's behaviour.  Yours are yours (#382).
+# mailbox's behaviour.  Yours are yours (#102).
 #
 # The paths are relative to this config file, which is to say relative to
 # the mailbox, so they keep working if the mailbox is moved or copied to
@@ -1751,7 +1751,7 @@ elif ask_yn setup_service "Set up rmail to run as a service?"; then
     #
     # There is deliberately no fallback to an automatically chosen
     # alternative name. Quietly picking a different one would reintroduce
-    # exactly the class of surprise this whole change is about. (Re #381.)
+    # exactly the class of surprise this whole change is about. (Re #612.)
     if _clash=$(service_exists "$RMAIL_SERVICE"); then
         if ! grep -q "$CONFIG_FILE" "$_clash" 2>/dev/null; then
             err "A service named '$RMAIL_SERVICE' is already installed at:"
@@ -1967,7 +1967,7 @@ fi
 # paths.  Here we substitute real install paths and write the resulting
 # files to docs/ alongside the signpost (which is the one tracked file in
 # docs/ — everything else is a generated artefact).  See
-# issues/350-docs-templates-and-install-time-generation.md.
+# issues/614-docs-templates-and-install-time-generation.md.
 
 generate_docs() {
     local templates_dir="$ROOT/docs/.templates"
@@ -1984,7 +1984,7 @@ generate_docs() {
     fi
 
     # Escape replacement values so paths containing `|`, `\`, or `&` don't
-    # break the sed command or get interpreted as backreferences.  See #344.
+    # break the sed command or get interpreted as backreferences.  See #611.
     local esc_shebang esc_root esc_mail
     esc_shebang=$(sed_escape_replacement "$lua_shebang")
     esc_root=$(sed_escape_replacement "$ROOT")

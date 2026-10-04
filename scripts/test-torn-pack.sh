@@ -5,7 +5,7 @@
 # the file into a zip.  zip reads the file from start to end; if something
 # is still writing it, the zip holds the start of the old content and the
 # end of the new -- a file that never existed.  Until 2026-09-29 (issue
-# #404d) nothing noticed.
+# #311d) nothing noticed.
 #
 # Now the file's size and modification time (every file's, for a folder)
 # are taken before and after packing.  Any difference throws the zip away,
@@ -14,7 +14,7 @@
 #
 # This script runs two throwaway mailboxes.  The sender's `find` is a
 # stand-in placed first on its PATH: while a marker file exists, each
-# `find -H` (the packer's listing, #405) lists and then adds a line to the
+# `find -H` (the packer's listing, #309) lists and then adds a line to the
 # attachment -- a file being written
 # during packing, every time.  The checks:
 #
@@ -88,7 +88,7 @@ MARKER="$WORK/keep-writing"
 printf 'the first line\n' > "$SOURCE"
 touch "$MARKER"
 
-# The stand-in find (#405: packing is the shared zip library's, which lists
+# The stand-in find (#309: packing is the shared zip library's, which lists
 # the tree with `find -H` before reading it and again after): while the
 # marker exists, each `find -H` lists as usual and then writes to the
 # source -- a file being written during packing, every time.  rmail's other

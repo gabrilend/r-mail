@@ -4,7 +4,7 @@
 # A mailbox used to be a directory of mail plus pointers to things kept
 # somewhere else: its config in ~/.config/rmail/, and its hook scripts in the
 # git checkout, shared with every other mailbox on the machine.  Both now live
-# inside the mailbox they belong to.  See issues/382.
+# inside the mailbox they belong to.  See issues/102.
 #
 # The daemon does not.  One checkout runs every mailbox on a machine, and the
 # service file is what says which mailbox a given daemon serves.  Only a
@@ -222,7 +222,7 @@ fi
 # 3. Obsolete notify_ip_change line.
 #
 # It never gated announcing, only whether the receiving end wrote a
-# visible notice, and that notice is gone (#388): address changes are
+# visible notice, and that notice is gone (#409): address changes are
 # applied automatically.  The line is ignored; drop it so the config does
 # not suggest a switch that does nothing.
 

@@ -3,7 +3,7 @@
 #
 # A contact chooses the id of each attachment it offers, and the receiving
 # mailbox names a folder after it -- and removes that folder with rm -rf
-# when the transfer is cancelled.  Until 2026-09-29 (issue #404e) the id
+# when the transfer is cancelled.  Until 2026-09-29 (issue #311e) the id
 # was not looked at, so an id like ../../home/you pointed that removal at
 # the owner's home folder.  And pieces of an attachment were taken before
 # the owner had answered its consent form, so a contact could send the

@@ -41,7 +41,7 @@ class SyncManager(
         if (!config.isConfigured) return@withContext SyncResult.Error("Not configured")
 
         try {
-            // Local addresses on our own network first, then public ones (#388)
+            // Local addresses on our own network first, then public ones (#409)
             val host = com.rmail.app.net.HostPicker.pick(config, serverLanIp, fresh = true)
             val client = RmailClient(host, config.port, config.token)
             // ── 0. Upload attachments still on the phone ──────────────────
@@ -98,7 +98,7 @@ class SyncManager(
                 }
             }
 
-            // #386: every transfer below is durable the instant the server
+            // #804: every transfer below is durable the instant the server
             // acknowledges it, so the state recording it is committed right
             // then rather than batched into one write at the end of the
             // function. The old all-or-nothing commit meant any later failure
@@ -179,7 +179,7 @@ class SyncManager(
             // ── 4. Persist updated state ───────────────────────────────────
 
             // Final commit. Each step above already committed its own result
-            // (#386), so this catches only the bookkeeping that has no
+            // (#804), so this catches only the bookkeeping that has no
             // transfer of its own -- the removeInbox deletions and the
             // accepted-from-server contacts hash.
             store.writeSyncState(newState.toImmutable())
@@ -205,7 +205,7 @@ class SyncManager(
     /**
      * Translate raw Java/network exceptions into messages a user can read
      * without needing context about sockets.  Transient timeouts are the
-     * most common case (#320) — the server is alive but slow — so the
+     * most common case (#811) — the server is alive but slow — so the
      * message explicitly calls out "will retry" so the user isn't alarmed
      * when the red box appears and then disappears on the next cycle.
      */

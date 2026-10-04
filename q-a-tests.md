@@ -13,28 +13,28 @@ jump around.
 
 - [ ] Daemon fails to start if `rmail_inotify.so` is missing
 - [ ] Daemon starts cleanly and logs "outbox inotify watcher active"
-- [ ] Lua 5.4 `os.execute` return value handled correctly (#100)
-- [ ] Service logs write to `/tmp/rmail.log`, not to disk (#205)
+- [ ] Lua 5.4 `os.execute` return value handled correctly (#103)
+- [ ] Service logs write to `/tmp/rmail.log`, not to disk (#117)
 
 ## 2. Daemon config and hooks
 
-### Hook config format (#325)
+### Hook config format (#213)
 - [ ] Config uses empty string default instead of commented-out hook lines
 - [ ] Default orchestrator scripts exist in `scripts/hooks/`
 - [ ] Each default script has: argument table, scripting tutorial link, orchestrator hint
 - [ ] `${RMAIL_DIR}` resolves correctly in config values
 
-### Helper scripts (#326)
+### Helper scripts (#702)
 - [ ] `rfield.sh` exists in `helpers/`
 - [ ] Docs and scripting tutorial reference the helpers/ location
 
-### rto / rattach helpers (#330, #331)
+### rto / rattach helpers (#704, #705)
 - [ ] `rto.sh <file> <recipient>...` inserts `to:` lines after the existing header block
 - [ ] `rattach.sh <file> <path>...` inserts `attach:` lines after the existing header block
 - [ ] Empty/non-existent target file: helpers create it with just the new header lines
 - [ ] Existing `to:`/`attach:` ordering is preserved (new lines appended to block, not prepended)
 
-### raccept / rdeny helpers (#332)
+### raccept / rdeny helpers (#706)
 - [ ] `raccept.sh <consent-file>` leaves only the `accept` line in the consent file
 - [ ] `rdeny.sh <consent-file>` leaves only the `deny` line in the consent file
 - [ ] Daemon's `check_consent_pending()` acts on the resulting single-decision file
@@ -46,7 +46,7 @@ jump around.
 - [ ] Deleting or moving a file in the outbox triggers immediate sync
 - [ ] Sync cycle's own outbox modifications don't cause a feedback loop (drain works)
 
-### Duplicate filename prevention (#315)
+### Duplicate filename prevention (#814)
 - [ ] Daemon: same sender sends two messages with the same converted subject → each lands in inbox as a distinct file (second gets a `-<short-id>` suffix)
 - [ ] Daemon: different senders with the same subject → older `-from-<sender>` disambiguation still applies
 - [ ] Daemon: re-delivery of the *same* message_id (e.g. attachment-followup path) still merges into the existing inbox entry, no suffix added
@@ -55,19 +55,19 @@ jump around.
 - [ ] Dialog's Cancel preserves the draft intact
 - [ ] Dialog's Replace overwrites the existing outbox file deliberately
 
-### Living messages — edits propagate (#306)
+### Living messages — edits propagate (#207)
 - [ ] Edit outbox file body → all recipients receive updated content
 - [ ] SHA-256 checksum in outbox.json matches actual file body after edit
 - [ ] Update sent to each recipient independently
 - [ ] Removing a `to:` line triggers deletion on recipient side, not update
 - [ ] Recipient who deleted the message (404) gets removed from outbox.json state
 
-### On_update hook (#306)
+### On_update hook (#207)
 - [ ] `on_update` hook runs before inbox file is written
 - [ ] Hook receives: sender ($1), file path ($2), new body ($3)
 - [ ] Hook stdout replaces saved body; no hook = body applied directly
 
-### Delete/edit race conditions (#323)
+### Delete/edit race conditions (#210)
 - [ ] Interaction matrix built: sender sync first vs receiver sync first
 - [ ] All sender/receiver event combinations traced and validated
 - [ ] Receiver deletes inbox file, sender edits outbox → file is NOT "undeleted"
@@ -76,10 +76,10 @@ jump around.
 
 ## 4. Receiving messages (daemon inbox)
 
-### `attach:` paths (#101)
+### `attach:` paths (#203)
 - [ ] Paths with `~` expand to home directory
 
-### Outbox header robustness (#363)
+### Outbox header robustness (#202)
 - [ ] Blank line between `to:` and `attach:` does NOT terminate the header — attach still recognized, attachment gets queued
 - [ ] Whitespace-only line (spaces/tabs, no content) between header lines treated the same as a truly blank line
 - [ ] Multiple blank lines between header items still allowed
@@ -90,9 +90,9 @@ jump around.
 - [ ] Marker not duplicated on subsequent sync cycles (same `attach:` line, same missing file → one marker)
 - [ ] User fixing the path (making the file exist) lets the attachment proceed on the next sync cycle, and the daemon removes the `//` marker itself (log: `attach: found <path>, cleared its missing-attachment marker`) — on a message not yet delivered and on one already delivered
 - [ ] The same for a path written with `~` and for a path in quotes (`attach: "~/with space.jpg"`): marker names the expanded path without quotes; the quotes stay on the user's line
-- [ ] The fix does NOT reformat or remove blank lines the user intentionally put in their outbox file — file-on-disk only changes when glob expansion (#362) or a #363 marker needs to be written
+- [ ] The fix does NOT reformat or remove blank lines the user intentionally put in their outbox file — file-on-disk only changes when glob expansion (#204) or a #202 marker needs to be written
 
-### `attach:` glob expansion (#362)
+### `attach:` glob expansion (#204)
 - [ ] `attach: ~/photos/*.jpg` in an outbox file is rewritten in place to one `attach:` line per matching file, absolute paths, sorted
 - [ ] `*` matches only regular files — directories and dotfiles in the glob dir are skipped
 - [ ] `?` and `[...]` character classes work (e.g. `app-[0-9][0-9].log`, `report-0?.pdf`)
@@ -104,20 +104,20 @@ jump around.
 - [ ] When a transfer completes, `remove_attach_from_file` strips the specific expanded line, not the original glob (because the glob line no longer exists in the file)
 - [ ] Re-parsing an already-expanded file (with no globs left) produces no log output and no file write
 
-### Large payloads (#204)
+### Large payloads (#113)
 - [ ] Large message sends don't truncate (no partial send bug)
 
-### Chunk handling (#202)
+### Chunk handling (#303)
 - [ ] Chunk responses parse correctly
 
 ## 5. Attachments
 
-### Oversized transfer rejection (#327)
+### Oversized transfer rejection (#310)
 - [ ] Transfer aborted if cumulative bytes exceed declared expected size
 - [ ] Partial chunks cleaned up on abort
 - [ ] Sender notified of abort
 
-### Auto-body: oversized message bodies (#349)
+### Auto-body: oversized message bodies (#308)
 - [ ] Body ≤ 128 KB: normal deliver, no attachment pipeline involved
 - [ ] Body > 128 KB: daemon writes a copy under pending/ named after the subject, compresses, queues attachment_request with auto_body=true, sends stub as the message body
 - [ ] Stub body text mentions the attachment filename (e.g. "delivered as attachment my-note")
@@ -132,7 +132,7 @@ jump around.
 - [ ] Receiver's inbox stub text reads "delivered as attachment at <paths.attachments>/<subject>" with the receiver's own resolved path
 - [ ] Old daemons that ignore `auto_body` still see the sender's fallback stub text
 
-### list_files skips directories (#356)
+### list_files skips directories (#205)
 - [ ] `list_files` on a dir containing files + subdirs returns only files
 - [ ] Delete an inbox file and create a directory with the same name before next sync: sync_inbox still notifies the sender of the deletion
 - [ ] Consent/progress file overlaid by a same-named directory: handler treats the transfer as cancelled (expected)
@@ -142,20 +142,20 @@ jump around.
 - [ ] Inbox-dir warning makes clear the daemon didn't create the directory
 - [ ] Attachments-dir warning is generic (user-organised subfolders are legitimate)
 
-### Attachments survive inbox-message deletion (#355)
+### Attachments survive inbox-message deletion (#306)
 - [ ] Sender-initiated delete: inbox file removed, attachments in paths.attachments untouched
 - [ ] User-local delete (sync_inbox detects missing file): attachments untouched, sender still gets /delete notification
 - [ ] Self-delete (`self_delete_from_inbox`): attachments untouched
 - [ ] Android `/api/inbox/delete` from phone: attachments untouched
 - [ ] `on_delete` hook still fires on every delete path
 
-### Progress files in RAM (#328)
+### Progress files in RAM (#304)
 - [ ] Receiver's progress file stored in tmpfs with symlink from inbox
 - [ ] Deleting the progress file still cancels the transfer
 - [ ] Transfer resumes and recreates progress file after reboot
 - [ ] Sender's `transfers` file symlinked to `/tmp/rmail-transfers`
 
-### Consent form regeneration bug (#346)
+### Consent form regeneration bug (#305)
 - [ ] Consent form file is removed from inbox after the attachment it gated is delivered
 - [ ] Consent form file is removed from inbox after the recipient declines it
 - [ ] Sending a second attachment creates its own consent form (not a rewrite of the first)
@@ -170,23 +170,23 @@ jump around.
 
 ## 6. Sync and networking
 
-### Batch sync per contact (#324)
+### Batch sync per contact (#114)
 - [ ] Connection pre-check before running operations for each contact
 - [ ] Failed connection → all ops skipped, single log line (not N separate failures)
 - [ ] Successful connection → all pending ops run sequentially over same connection
 - [ ] Different contacts processed in parallel (coroutines)
 
-### LAN discovery (#102, #203)
+### LAN discovery (#415, #416)
 - [ ] UDP LAN discovery finds peers on same network
 - [ ] LAN discovery includes LAN IP in payload, multicast + subnet scan fallback
 
-### DNS hostnames in contacts (#311)
+### DNS hostnames in contacts (#405)
 - [ ] Contact with hostname in `.ip` field resolves and connects outbound
 - [ ] Inbound connection from hostname contact: resolve and match against connecting IP
 - [ ] Hostname resolution cached ~5 minutes
 - [ ] LAN peer cache resolves hostnames before comparing IPs
 
-### Multiple IPs per contact (#347)
+### Multiple IPs per contact (#408)
 
 **Phase 1 (shipped):**
 - [ ] `load_contacts` collects every `name.ip = …` line into `contact.ips` (list); `contact.ip` is set to the first entry
@@ -212,7 +212,7 @@ jump around.
 - [ ] Subsequent sync cycles after a promotion hit the new first address directly (no more fallback walk)
 - [ ] A malformed contacts file during promotion doesn't crash the sync cycle (pcall guard)
 
-### Per-IP ports (#347 Phase 4)
+### Per-IP ports (#408 Phase 4)
 - [ ] `alice.ip[1] = 192.168.1.5` + `alice.port[1] = 22` creates endpoint with addr `192.168.1.5`, port `22`
 - [ ] `alice.ip[2] = host.example.com` without `alice.port[2]` inherits `alice.port`
 - [ ] Default `alice.ip` + `alice.port` (unindexed) is always the first endpoint tried
@@ -226,22 +226,22 @@ jump around.
 - [ ] All batch call sites send via `endpoints = contact_endpoints(c)`
 - [ ] Retry fallback uses the per-endpoint port, not a shared port
 
-### IPv6 (#304)
+### IPv6 (#406)
 - [ ] IPv6 connections accepted alongside IPv4
 
-### Port forwarding (#302)
+### Port forwarding (#412)
 - [ ] Port forwarding uses correct LAN IP
 
-### IP recovery (#300)
+### IP recovery (#404)
 - [ ] IP recovery works after simultaneous IP change
 
-### Stale contacts after IP change (#312)
+### Stale contacts after IP change (#403)
 - [ ] (Design phase — no tests yet)
 
-### Simultaneous IP change (#313)
+### Simultaneous IP change (#807)
 - [ ] (Design phase — no tests yet)
 
-### Per-contact sync timers (#377) — implemented 2026-09-22
+### Per-contact sync timers (#115) — implemented 2026-09-22
 
 Settings as built: floor **30s**, additive **+360s** per failed cycle, **2h**
 ceiling, **±30s** jitter on every due time. No TTL — a permanently-failing op
@@ -276,7 +276,7 @@ RFC 5737 TEST-NET addresses and a live loopback peer pair:
 - [ ] A contact with no queued ops does not spin the main loop (op-less
       contacts are swept back to the floor; confirm no busy-wait)
 
-### Address-set announcement (#388) — phase 1 implemented 2026-09-22
+### Address-set announcement (#409) — phase 1 implemented 2026-09-22
 
 - [x] A contact holding a private address for us keeps it as the pinned
       default and gains our public/LAN addresses as `ip[N]`
@@ -291,7 +291,7 @@ RFC 5737 TEST-NET addresses and a live loopback peer pair:
       in the same second
 - [ ] Hostnames survive an address-set announcement (logic present, not yet
       exercised end to end)
-- [ ] A peer that predates #388 (sends `ip`/`port`, no `ips`) still works
+- [ ] A peer that predates #409 (sends `ip`/`port`, no `ips`) still works
       via the single-address fallback
 - [ ] IPv6 addresses round-trip through the set correctly
 - [x] `name.local-ip` / `local-ip[N]` parsed; a public value is ignored
@@ -319,7 +319,7 @@ RFC 5737 TEST-NET addresses and a live loopback peer pair:
 - [ ] Android: other calls between syncs reuse the address the last sync
       picked; a failed sync forgets it
 
-### Public IP recheck every 36h ±12h (#379) — implemented 2026-09-22
+### Public IP recheck every 36h ±12h (#410) — implemented 2026-09-22
 
 Changed from the originally-filed "once per day": the delay is drawn
 uniformly from **[24h, 48h)**, redrawn after every check. A wider-than-a-day
@@ -354,13 +354,13 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 
 ### Sync behavior
 - [ ] `saveOutboxFile()` triggers immediate sync
-- [ ] Error banner persists during sync, clears only on success (#305)
+- [ ] Error banner persists during sync, clears only on success (#825)
 
-### Error display (#317) — verified by code inspection
+### Error display (#808) — verified by code inspection
 - [x] "Failed to connect" error stays visible during sync attempt (no code path clears `_syncError` on sync start)
 - [x] Error clears only when sync succeeds (one of two explicit clears: success branch + mailbox switch)
 
-### "Read timed out" (#320)
+### "Read timed out" (#811)
 - [x] Root cause identified (10 s socket timeout too aggressive for a busy sync)
 - [x] Timeout raised to 30 s
 - [ ] Error message softened — timeout now shows "server didn't respond in time — will retry" on the red box instead of "Read timed out"
@@ -369,16 +369,16 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] Decryption failure shows a token-hint message
 - [ ] Unrecognised errors still surface the raw message (no silent swallowing)
 
-### Security (#314)
+### Security (#823)
 - [ ] Only rmail app code can write to outbox and trigger sync
 - [ ] No filesystem watcher that external apps could feed files into
 
 ## 8. Android — composing messages
 
-### Duplicate filename prevention (#315, Android side)
+### Duplicate filename prevention (#814, Android side)
 - [ ] Cannot save outbox file whose converted filename matches existing outbox file
 
-### Cursor-aware scrolling (#316 — closed 2026-04-14, second pass)
+### Cursor-aware scrolling (#806 — closed 2026-04-14, second pass)
 **Shipped floor:**
 - [ ] Typing in the compose body keeps the cursor visible above the keyboard through many wraps in a row
 - [ ] After each wrap, the new line is fully visible (not half-clipped by the keyboard)
@@ -392,7 +392,7 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - Delete reverses the per-character scroll in the same increments
 - Manual scroll resets the zone; typing resumes from new position
 
-### Sending progress animation (#322)
+### Sending progress animation (#813)
 - [ ] Green bar appears at the top of the Inbox panel after Send
 - [ ] Text starts as "sending…", 15 white dots visible
 - [ ] Dots disappear in random order from the left 12 positions (~5/sec)
@@ -405,7 +405,7 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 
 ## 9. Android — reading and editing outbox messages
 
-### Outbox edit redesign (#321)
+### Outbox edit redesign (#812)
 **Shipped:**
 - [ ] Tapping an outbox message opens it for reading (unchanged)
 - [ ] An Edit (pencil) icon in the top-bar opens the composer with `to:` lines, body, and existing `attach:` lines preserved
@@ -423,14 +423,14 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 
 ## 10. Android — reading inbox messages
 
-### 80-character monospace scaling (#318)
+### 80-character monospace scaling (#809)
 - [ ] Inbox message view uses monospace font scaled so 80 chars exactly fill the screen width (default)
 - [ ] `+` button in the top bar widens by 20 cols (80 → 100 → 120…); shrinks the rendered text
 - [ ] `–` button narrows by 20 cols (80 → 60 → 40…); enlarges the rendered text
 - [ ] Width preference persists across app restarts
 - [ ] +/- buttons hidden on outbox messages and consent files (only shown on regular inbox messages)
 
-### Delete mailbox (#357)
+### Delete mailbox (#815)
 - [ ] Settings panel shows a "Danger zone" section with a red "Delete mailbox" button
 - [ ] Tapping it opens a confirmation dialog
 - [ ] Dialog says the deletion is local-only and doesn't touch the home server
@@ -439,7 +439,7 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] Confirm removes the mailbox from the registry, deletes the on-device mailbox directory, and navigates back to the mailbox list
 - [ ] Cancel leaves everything unchanged
 
-### Reply / Forward (#358)
+### Reply / Forward (#816)
 - [ ] Opening an inbox message and tapping Reply switches to the Write panel with recipient = sender, subject = "Re: <original>", body = quoted original
 - [ ] Opening the overflow menu and tapping Forward switches to Write with recipient = empty, subject = "Fwd: <original>", body = quoted original
 - [ ] Re-forwarding a "Fwd: foo" message still yields "Fwd: foo" (no stacking)
@@ -447,12 +447,12 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] Forward from the outbox-read screen works identically (recipient empty, Fwd: subject, quoted body)
 - [ ] Reply on the outbox-read screen is a no-op (no own-message replies)
 
-### Tappable mailbox title (#359)
+### Tappable mailbox title (#817)
 - [ ] Top-level mailbox view has no "←" arrow in the top-left
 - [ ] The mailbox name (title) is underlined and tappable, jumping to the mailbox list
 - [ ] Inside the contact editor sub-view, the "←" arrow still appears and returns to the contacts panel
 
-### Orphan + button (#319)
+### Orphan + button (#810)
 - [ ] Write panel's top-bar no longer has a "+" button (only Send)
 - [ ] Outbox panel's "+" still jumps to the Write panel
 - [ ] Contacts panel's "+" still opens the contact editor
@@ -463,11 +463,11 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 
 ## 11. Android — contacts and settings
 
-### DNS hostnames (#311, Android side)
+### DNS hostnames (#405, Android side)
 - [ ] Setup screen accepts hostnames in IP field
 - [ ] Contacts editor accepts hostnames
 
-### Export mailbox (#378)
+### Export mailbox (#821)
 - [ ] "Export mailbox" appears in mailbox settings near "Delete mailbox",
       and is **outside** the red Danger zone (export is not destructive)
 - [ ] The mailbox picker's three-dot dialog shows "Export" on the left,
@@ -479,7 +479,7 @@ All three startup-only checks moved onto the timer, not just public IPv4.
       permission prompt
 - [ ] Exported files are visible in a file browser and can be opened by
       another app
-- [ ] Exported message mtimes match the original authoring time (#374),
+- [ ] Exported message mtimes match the original authoring time (#211),
       not the time of export
 - [ ] Export acts on the chosen mailbox only, never all mailboxes at once
 - [ ] Mail still lives in private `filesDir` after an export — export copies,
@@ -488,104 +488,104 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 ## 12. Install script
 
 ### Interactive prompts
-- [ ] Arrow keys move the cursor instead of inserting control characters (#333)
-- [ ] Every prompt can be supplied via CLI flag or env var; supplied values skip the prompt silently (#334)
-- [ ] On re-run, existing config values show as the default in `[ ]` brackets (#343)
+- [ ] Arrow keys move the cursor instead of inserting control characters (#602)
+- [ ] Every prompt can be supplied via CLI flag or env var; supplied values skip the prompt silently (#603)
+- [ ] On re-run, existing config values show as the default in `[ ]` brackets (#610)
 
 ### Environment reporting
-- [ ] Displayed Lua version matches the actual interpreter found, not a hardcoded string (#335)
-- [ ] `zip` / `unzip` detected on Arch Linux when installed; install hint shown otherwise (#337)
+- [ ] Displayed Lua version matches the actual interpreter found, not a hardcoded string (#604)
+- [ ] `zip` / `unzip` detected on Arch Linux when installed; install hint shown otherwise (#606)
 
 ### Firewall and copy
-- [ ] Firewall section explains what a port is and shows how to list open ports per-platform (#336)
-- [ ] "(recommended for reproducibility)" line removed from install output (#336)
-- [ ] "AES-256-GCM encryption is active - no configuration needed" line removed (#341)
-- [ ] Name prompt no longer claims the value is shown to contacts (#338)
+- [ ] Firewall section explains what a port is and shows how to list open ports per-platform (#605)
+- [ ] "(recommended for reproducibility)" line removed from install output (#605)
+- [ ] "AES-256-GCM encryption is active - no configuration needed" line removed (#608)
+- [ ] Name prompt no longer claims the value is shown to contacts (#503)
 
 ### Portability
-- [ ] Installer runs from a read-only/USB mount without writing to its own directory (#339)
-- [ ] Cross-platform entry points exist for Linux, macOS, and Windows/WSL (#339)
+- [ ] Installer runs from a read-only/USB mount without writing to its own directory (#616)
+- [ ] Cross-platform entry points exist for Linux, macOS, and Windows/WSL (#616)
 
 ### Config writing
-- [ ] Config file written as soon as required fields are collected (name, port, mail dir, …) (#340)
-- [ ] Mail-directory option is present and correct in the generated config (#343)
-- [ ] Re-running install with existing config: `mail` value appears as the `[bracket]` default (#343)
-- [ ] `set_config_value` appends a missing key and replaces a present one without touching other lines (#343)
-- [ ] `set_config_value` preserves comments and commented-out `# key = …` lines (#343)
-- [ ] Paths containing `|`, `\`, or `&` round-trip through both the config update and the docs-template expansion without mangling (#344)
-- [ ] Config filename is `~/.config/rmail/config-<slug>` where slug is the mail path with `/` → `-` (intentional, not a bug) (#344)
+- [ ] Config file written as soon as required fields are collected (name, port, mail dir, …) (#607)
+- [ ] Mail-directory option is present and correct in the generated config (#610)
+- [ ] Re-running install with existing config: `mail` value appears as the `[bracket]` default (#610)
+- [ ] `set_config_value` appends a missing key and replaces a present one without touching other lines (#610)
+- [ ] `set_config_value` preserves comments and commented-out `# key = …` lines (#610)
+- [ ] Paths containing `|`, `\`, or `&` round-trip through both the config update and the docs-template expansion without mangling (#611)
+- [ ] Config filename is `~/.config/rmail/config-<slug>` where slug is the mail path with `/` → `-` (intentional, not a bug) (#611)
 
 ### Service files point at the config, not the mailbox
 Most of this section is covered by `scripts/test-mailbox-selection.sh`;
 the first item is not, because it inspects what the installer generates.
 - [ ] Generated systemd/runit/openrc/NixOS service files pass the config path (not the mail dir) to rmail.lua
 - [ ] `rmail.lua <config-file>` starts the daemon using `mail = …` from the config
-- [ ] `rmail.lua <mail-dir>` is refused with a usage error naming the config form (#381)
-- [ ] A config planted at the old `~/.config/rmail/config-<slug>` path is not found from a directory argument (#381)
-- [ ] A relative `mail = .` resolves against the config file's own directory, not the working directory (#381)
+- [ ] `rmail.lua <mail-dir>` is refused with a usage error naming the config form (#612)
+- [ ] A config planted at the old `~/.config/rmail/config-<slug>` path is not found from a directory argument (#612)
+- [ ] A relative `mail = .` resolves against the config file's own directory, not the working directory (#612)
 - [ ] Error surfaced when config path is passed but the config has no `mail` line
 
-### The mailbox holds its own config, hooks and program (#382)
+### The mailbox holds its own config, hooks and program (#102)
 The daemon-side rows are covered by `scripts/test-mailbox-selection.sh`.
 The installer and migration rows are not — they need a real run.
-- [ ] A fresh install writes the config to `<mailbox>/config` as a real file, not a symlink, and creates no `~/.config/rmail/` (#382)
-- [ ] The mailbox served is the directory the config sits in; there is no `mail =` key in a newly generated config (#382)
-- [ ] A leftover `mail =` line from the old layout is ignored rather than obeyed, even when it names a different directory (#382)
-- [ ] A fresh install puts the six hook scripts in `<mailbox>/hooks/` and the config references them as `./hooks/<name>.sh` (#382)
-- [ ] Editing one mailbox's hook does not change another mailbox's behaviour, and does not modify the checkout (#382)
-- [ ] Relative hook paths resolve against the config's directory, not the working directory — verify by starting a daemon from an unrelated directory and confirming the hook fires (#382)
-- [ ] Re-running the installer on an existing mailbox leaves edited hooks alone and reports how many it kept (#382)
-- [ ] A fresh install puts NO program copy in the mailbox — no `program-files/`, and the service runs the checkout's `rmail.lua` (#382)
-- [ ] Generated service files for all five init systems run the checkout's `rmail.lua` with the mailbox's config as the argument (#382)
-- [ ] A mailbox keeps working after the checkout it was installed from is renamed or deleted (#382)
-- [ ] The installer no longer reads other mailboxes' configs for anything — verify with a second install while the first mailbox is unreadable (#382)
-- [ ] The port prompt warns when something is already listening on the chosen port, including a non-rmail program (#382)
-- [ ] With neither `ss` nor `netstat` installed, the port check says it could not run rather than passing silently (#382)
-- [ ] ~~IP-change notices default to off in a newly generated config (#382)~~ — setting removed (#388): changes are always announced and applied
-- [ ] `migrate-mailbox-layout.sh --dry-run` reports every change and writes nothing (#382)
-- [ ] Migration is idempotent: a second run keeps existing hooks, removes nothing twice, and refreshes only the program files (#382)
-- [ ] Migration leaves inbox, outbox, contacts, attachments and `.state/` untouched — compare file counts before and after (#382)
-- [ ] Migration warns when the old `mail =` line names a directory other than the mailbox being migrated (#382)
-- [ ] A portable drive generated after this change has the same mailbox layout as an installed one, with hooks in `hooks/` (#382)
-- [ ] The generated drive config contains no mount-point path anywhere, and the drive runs from a different mount point than it was made on (#382)
-- [ ] `validate-router-settings.sh` and `generate-docs.sh` both take a mailbox and neither reads `~/.config/rmail/` (#382)
-- [ ] Generated configs contain no shell-substitution damage — grep a fresh config for backtick artefacts, since the heredoc that writes it expands them (#382)
-- [ ] A generated drive carries only the allowlist: daemon, launcher, `deps/lua`, `libs/`, the two `.c` files, `BUILD-NOTES.txt`, `LICENSE`. No `install.sh`, no `scripts/hooks/`, no Android client, no docs, no transcripts (#382)
-- [ ] `make-mailbox-drive.sh` refuses to build a drive when the checkout has no compiled Lua at `deps/lua/bin/lua` (#382)
-- [ ] The generator verifies before finishing that the copied Lua loads the copied libraries, and refuses if not (#382)
-- [ ] The generator warns when the bundled Lua links readline, naming `install.sh --force` as the fix (#382)
-- [ ] After a Lua rebuild, `ldd deps/lua/bin/lua` shows only libc and libm — no readline, no ncurses (#382)
-- [ ] A running drive daemon uses the drive's own interpreter — check with `pgrep -af rmail.lua` that the path is a temporary copy (`$XDG_RUNTIME_DIR/rmail-*/deps/lua/bin/lua`) of the drive's, not a system lua (#382, #388)
-- [ ] Plugging a drive in announces nothing; only running a launcher does (#388)
-- [ ] `sync-with-contacts.sh` announces, sends the outbox, stays reachable 60s (or the given seconds), exits 0, and removes its temporary copy (#388)
-- [ ] `sync-with-contacts.sh abc` prints usage and exits 2 (#388)
-- [ ] `auto-sync.sh` runs until the drive is pulled, then exits cleanly ("mailbox ... is gone") and removes its temporary copy (#388) — verified with a simulated unplug; not yet with a real USB pull
-- [ ] Mail from a contact arrives within a `sync-with-contacts.sh` window after they had backed off (the announcement resets their timer) (#388)
-- [ ] A drive whose libraries cannot load stops with the architecture message, naming both the drive's and the host's, and does NOT try to recompile (#382)
-- [ ] `BUILD-NOTES.txt` names the two `cc` commands and the `make linux` that built what ships (#382)
-- [ ] A drive's `rmail_crypto.so` needs no `libcrypto` from the host — `ldd` shows libc only (#382)
-- [ ] The generator refuses to build a drive when no `libcrypto.a` can be found (#382)
-- [ ] A drive daemon logs "AES-256-GCM encryption enabled" and completes a send, proving the static crypto works and not merely links (#382)
-- [ ] A drive carries no `liblua.a`, no `luac`, and no Lua man pages — none are used at runtime (#382)
+- [ ] A fresh install writes the config to `<mailbox>/config` as a real file, not a symlink, and creates no `~/.config/rmail/` (#102)
+- [ ] The mailbox served is the directory the config sits in; there is no `mail =` key in a newly generated config (#102)
+- [ ] A leftover `mail =` line from the old layout is ignored rather than obeyed, even when it names a different directory (#102)
+- [ ] A fresh install puts the six hook scripts in `<mailbox>/hooks/` and the config references them as `./hooks/<name>.sh` (#102)
+- [ ] Editing one mailbox's hook does not change another mailbox's behaviour, and does not modify the checkout (#102)
+- [ ] Relative hook paths resolve against the config's directory, not the working directory — verify by starting a daemon from an unrelated directory and confirming the hook fires (#102)
+- [ ] Re-running the installer on an existing mailbox leaves edited hooks alone and reports how many it kept (#102)
+- [ ] A fresh install puts NO program copy in the mailbox — no `program-files/`, and the service runs the checkout's `rmail.lua` (#102)
+- [ ] Generated service files for all five init systems run the checkout's `rmail.lua` with the mailbox's config as the argument (#102)
+- [ ] A mailbox keeps working after the checkout it was installed from is renamed or deleted (#102)
+- [ ] The installer no longer reads other mailboxes' configs for anything — verify with a second install while the first mailbox is unreadable (#102)
+- [ ] The port prompt warns when something is already listening on the chosen port, including a non-rmail program (#102)
+- [ ] With neither `ss` nor `netstat` installed, the port check says it could not run rather than passing silently (#102)
+- [ ] ~~IP-change notices default to off in a newly generated config (#102)~~ — setting removed (#409): changes are always announced and applied
+- [ ] `migrate-mailbox-layout.sh --dry-run` reports every change and writes nothing (#102)
+- [ ] Migration is idempotent: a second run keeps existing hooks, removes nothing twice, and refreshes only the program files (#102)
+- [ ] Migration leaves inbox, outbox, contacts, attachments and `.state/` untouched — compare file counts before and after (#102)
+- [ ] Migration warns when the old `mail =` line names a directory other than the mailbox being migrated (#102)
+- [ ] A portable drive generated after this change has the same mailbox layout as an installed one, with hooks in `hooks/` (#102)
+- [ ] The generated drive config contains no mount-point path anywhere, and the drive runs from a different mount point than it was made on (#102)
+- [ ] `validate-router-settings.sh` and `generate-docs.sh` both take a mailbox and neither reads `~/.config/rmail/` (#102)
+- [ ] Generated configs contain no shell-substitution damage — grep a fresh config for backtick artefacts, since the heredoc that writes it expands them (#102)
+- [ ] A generated drive carries only the allowlist: daemon, launcher, `deps/lua`, `libs/`, the two `.c` files, `BUILD-NOTES.txt`, `LICENSE`. No `install.sh`, no `scripts/hooks/`, no Android client, no docs, no transcripts (#102)
+- [ ] `make-mailbox-drive.sh` refuses to build a drive when the checkout has no compiled Lua at `deps/lua/bin/lua` (#102)
+- [ ] The generator verifies before finishing that the copied Lua loads the copied libraries, and refuses if not (#102)
+- [ ] The generator warns when the bundled Lua links readline, naming `install.sh --force` as the fix (#102)
+- [ ] After a Lua rebuild, `ldd deps/lua/bin/lua` shows only libc and libm — no readline, no ncurses (#102)
+- [ ] A running drive daemon uses the drive's own interpreter — check with `pgrep -af rmail.lua` that the path is a temporary copy (`$XDG_RUNTIME_DIR/rmail-*/deps/lua/bin/lua`) of the drive's, not a system lua (#102, #409)
+- [ ] Plugging a drive in announces nothing; only running a launcher does (#409)
+- [ ] `sync-with-contacts.sh` announces, sends the outbox, stays reachable 60s (or the given seconds), exits 0, and removes its temporary copy (#409)
+- [ ] `sync-with-contacts.sh abc` prints usage and exits 2 (#409)
+- [ ] `auto-sync.sh` runs until the drive is pulled, then exits cleanly ("mailbox ... is gone") and removes its temporary copy (#409) — verified with a simulated unplug; not yet with a real USB pull
+- [ ] Mail from a contact arrives within a `sync-with-contacts.sh` window after they had backed off (the announcement resets their timer) (#409)
+- [ ] A drive whose libraries cannot load stops with the architecture message, naming both the drive's and the host's, and does NOT try to recompile (#102)
+- [ ] `BUILD-NOTES.txt` names the two `cc` commands and the `make linux` that built what ships (#102)
+- [ ] A drive's `rmail_crypto.so` needs no `libcrypto` from the host — `ldd` shows libc only (#102)
+- [ ] The generator refuses to build a drive when no `libcrypto.a` can be found (#102)
+- [ ] A drive daemon logs "AES-256-GCM encryption enabled" and completes a send, proving the static crypto works and not merely links (#102)
+- [ ] A drive carries no `liblua.a`, no `luac`, and no Lua man pages — none are used at runtime (#102)
 
 ### Recipients the daemon cannot resolve
 Also covered by `scripts/test-mailbox-selection.sh`.
-- [ ] A `to:` name that is both your own identity and a contact is refused, logged naming both readings, and marked `// AMBIGUOUS RECIPIENT` in the outbox file (#381)
-- [ ] That message stays in the outbox undelivered, and nothing appears in your own inbox (#381)
-- [ ] A `to:` name that is your own identity and *not* a contact still self-delivers to your inbox (#381)
-- [ ] A message to an unknown contact keeps its `// UNKNOWN CONTACT` marker and is not deleted by the outbox cleanup sweep (#381)
-- [ ] A `to:` line that is the last line of a file, with no trailing newline, gets its marker on a line of its own (#381)
+- [ ] A `to:` name that is both your own identity and a contact is refused, logged naming both readings, and marked `// AMBIGUOUS RECIPIENT` in the outbox file (#612)
+- [ ] That message stays in the outbox undelivered, and nothing appears in your own inbox (#612)
+- [ ] A `to:` name that is your own identity and *not* a contact still self-delivers to your inbox (#612)
+- [ ] A message to an unknown contact keeps its `// UNKNOWN CONTACT` marker and is not deleted by the outbox cleanup sweep (#612)
+- [ ] A `to:` line that is the last line of a file, with no trailing newline, gets its marker on a line of its own (#612)
 
 ### Dependencies
-- [ ] Installer prompts before installing project-local luasocket (#342)
-- [ ] System Lua + project-local luasocket: `LUA_PATH`/`LUA_CPATH` lets `require("socket")` resolve (#342)
+- [ ] Installer prompts before installing project-local luasocket (#609)
+- [ ] System Lua + project-local luasocket: `LUA_PATH`/`LUA_CPATH` lets `require("socket")` resolve (#609)
 
 ### Readability
-- [ ] Install script reads as plain, linear programming — not dense shell idioms (#345)
+- [ ] Install script reads as plain, linear programming — not dense shell idioms (#601)
 
-## 12b. State files are plaintext (#348 reversed)
+## 12b. State files are plaintext (#505 reversed)
 
-All PII-hashing from #348 steps 1–6 has been reverted; state files
+All PII-hashing from #505 steps 1–6 has been reverted; state files
 should be fully plaintext mirrors of contacts/inbox/outbox.
 
 - [ ] `cat .state/inbox.json` shows `"from": "<name>"` with plaintext contact names, no 64-hex hashes
@@ -596,7 +596,7 @@ should be fully plaintext mirrors of contacts/inbox/outbox.
 - [ ] `cat .state/pending-address.json` is keyed by plaintext contact names
 - [ ] Loading legacy `.state/` files written by pre-revert code still works: hashed `.to`/`.from` fields stay as hash strings in memory (no crash) and get rewritten to plaintext on the next save; hashed top-level keys in `nat_security_warned.json` / `pending-address.json` are resolved to plaintext or dropped on load via `unmigrate_hashed_keys`
 - [ ] Renaming a contact while outbox messages are in-flight produces an `unknown contact <name>` log line for the stale recipient (no auto-rename detection); documented recovery is `sed -i 's/"<old>"/"<new>"/g' .state/*.json`
-- [ ] After rename + sed fix, body edits (#306) propagate correctly to the renamed recipient on the next sync
+- [ ] After rename + sed fix, body edits (#207) propagate correctly to the renamed recipient on the next sync
 - [ ] No code path anywhere calls `hash_contact_name` except the `unmigrate_hashed_keys` legacy-state resolver
 - [ ] `hex_sha256` remains in use only by `canonical_contacts_hash` (protocol-level contacts digest) and `hash_contact_name` (legacy-state resolver)
 
@@ -604,13 +604,13 @@ should be fully plaintext mirrors of contacts/inbox/outbox.
 
 These have no test cases yet. Listed here so they aren't forgotten.
 
-- [ ] #301 — Monitor program (design phase)
-- [ ] #308 — Synced phone config (design phase)
-- [ ] #309 — Android script editor (depends on #308)
-- [ ] #310 — Periodics (depends on #308)
-- [ ] #329 — Thin client desktop viewer (design phase)
+- [ ] #713 — Monitor program (design phase)
+- [ ] #803 — Synced phone config (design phase)
+- [ ] #824 — Android script editor (depends on #803)
+- [ ] #707 — Periodics (depends on #803)
+- [ ] #711 — Thin client desktop viewer (design phase)
 
-### Attachment pipeline audit (#391) — implemented 2026-09-22
+### Attachment pipeline audit (#307) — implemented 2026-09-22
 
 - [x] New-recipient body held while an `attach:` path is missing; marker written, cleared once the file exists
 - [x] Held outbox file is not deleted by the "no recipients left" cleanup
@@ -635,7 +635,7 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [x] Received attachment with a name already in `attachments/` is saved as `name-2.ext`; identical content is not duplicated; folder attachments are not merged (harness)
 - [ ] Receive a real attachment from a contact whose name clashes with a file uploaded from the phone → both kept
 
-### Attachment source picker (#375) — implemented 2026-09-22
+### Attachment source picker (#820) — implemented 2026-09-22
 
 - [x] Files Upload opens the rmail "Add from: Gallery / File" dialog; Gallery then shows Android's app chooser (seen on device)
 - [ ] Files `+` and Upload behave identically (both add to Files, no message)
@@ -650,7 +650,7 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Android 8-9: one system "Save as" dialog per selected file
 - [ ] Saving the same file twice gives the system's own " (1)" name, not an overwrite
 
-### Setup (#392) — 2026-09-22
+### Setup (#826) — 2026-09-22
 
 - [ ] Public IP lookup happens only when "Detect public IP" is tapped (no ifconfig.me call on opening Setup)
 - [ ] Connect with a wrong port → "Couldn't reach…"; wrong token → "didn't accept this token"; token without own=true → "not as one of your own devices"; "Save anyway" appears after a failure

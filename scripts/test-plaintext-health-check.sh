@@ -3,7 +3,7 @@
 #
 # rmail answers a plain web request, `GET /`, without any key, so a person
 # can test from outside that their router forwards the port.  Until
-# 2026-10-04 (issue #410) that answer carried the mailbox's own name, so
+# 2026-10-04 (issue #106) that answer carried the mailbox's own name, so
 # anyone who could reach the port could learn whose mailbox it was.  The
 # name came along by accident when encryption moved from TLS into each
 # message; nothing ever read it.

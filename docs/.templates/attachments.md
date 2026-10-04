@@ -8,7 +8,7 @@ not compressed) that can be interrupted and resumed.
 The message's text is held back until every attached path exists: a path
 that is missing gets a `// MISSING ATTACHMENT: <path>` line under its
 `attach:` line, and the message waits.  Deleting a message never deletes
-the files it brought (#355).  A received file whose name is taken is saved
+the files it brought (#306).  A received file whose name is taken is saved
 as `name-2.ext`, `name-3.ext`, …; a file identical to one already there is
 kept once.
 
@@ -21,7 +21,7 @@ recipient's answer — **complete**, **declined**, **cancelled**,
 recipient only while they have no answer for it (or it was withdrawn and
 is back), so a file is never offered twice to someone who already has it
 or said no.  The answer belongs to the path, not to the bytes: what is
-sent is fixed when the file is first offered (#406, #408).
+sent is fixed when the file is first offered (#312, #314).
 
 ---
 
@@ -46,7 +46,7 @@ is offline while alice finishes, he is offered it when he comes back.  The
 when the first recipient is offered it, and every recipient gets that
 packed copy — even if you change or delete the file afterwards.  The copy
 is kept on disk, in the mailbox's pending folder, until every recipient has
-answered, and removed then (#408).  To send a changed file, attach it under
+answered, and removed then (#314).  To send a changed file, attach it under
 a new path, or remove the line and put it back (below).
 
 **Removing an `attach:` line withdraws the file.**  When a sync finds the
@@ -58,7 +58,7 @@ putting it back before a sync notices changes nothing.  Putting it back
 after a sync offers the file again to those it was withdrawn from — as a
 new offer, packed from what is at the path then.  Changing the path is
 withdrawing the old file and offering a new one: someone who declined the
-old file is offered the new one (#406).
+old file is offered the new one (#312).
 
 To send a file to only some recipients,
 place the `attach:` line between their `to:` line and the next one:
@@ -75,7 +75,7 @@ Alice and Sarah get the PDF, bob just gets the message body.
 The path can point to a file or a directory. Directories are zipped recursively,
 with their tree kept. If the path itself is a symbolic link, it is followed
 once; links inside a directory are sent as links (never followed), and the
-receiver turns each into a note (#405).
+receiver turns each into a note (#309).
 The original file is never modified or deleted.
 
 ---
@@ -110,7 +110,7 @@ The `Expected size` is the original uncompressed size, as reported by the
 sender.  It is enforced: a transfer may take at most that size × 1.1 plus
 4 KiB, both in the packed bytes that arrive and in the bytes the zip
 unpacks to (measured before anything is written).  A transfer over either
-limit is cancelled and nothing is kept.  (#327)
+limit is cancelled and nothing is kept.  (#310)
 
 ### After your decision
 
@@ -123,7 +123,7 @@ the form is removed.
 If you **decline**: the form is removed, and the sender's daemon records
 your answer and drops a `declined-<file>` notice in its own inbox.  That
 file is never offered to you again from that message; other recipients are
-not affected (#406).
+not affected (#312).
 
 If you **delete the consent file entirely**: this is treated as a decline.
 
@@ -132,7 +132,7 @@ If you **delete the consent file entirely**: this is treated as a decline.
 ## Transfer mechanics
 
 The sender packs the file into a zip once, with rmail's own packer (the shared
-zip library, #405; files are stored, not yet compressed), and splits it into chunks (default
+zip library, #309; files are stored, not yet compressed), and splits it into chunks (default
 5 MB each). Each chunk is sent as a separate request over the same AES-256-GCM
 encrypted channel as messages. The receiver responds to each chunk with a list of still-
 missing chunk indices, so chunks can be received in any order. The sender
@@ -142,7 +142,7 @@ If the file (or anything in the folder) is being written while it is
 packed, the half-old, half-new zip is thrown away and the log says so:
 `packing <path>: it changed while it was being packed -- will pack it again
 next cycle`.  It is packed again on a later cycle, once it holds still.
-(#404d)
+(#311d)
 
 Every chunk carries a SHA-256 checksum. Corrupted chunks are discarded and
 re-requested automatically.
@@ -170,10 +170,10 @@ receiving daemon checks it before anything reaches `attachments/`:
   in a received folder does not work, look for these notes; make the link
   yourself if it is one you want.  The zip reader never makes a link at
   all, so nothing can be written through one.  The phone is never served
-  a link from `attachments/`, even one you made by hand.  (#404a, #405)
+  a link from `attachments/`, even one you made by hand.  (#311a, #309)
 - **Checked whole before anything is made, and counted byte by byte.**
   Zips are read by rmail's own zip reader (the shared zip library in
-  `libs/`, #405), not by `unzip`.  Before a single byte is made it
+  `libs/`, #309), not by `unzip`.  Before a single byte is made it
   refuses:
   - a name that climbs out of the folder (`..`) or starts at the root;
   - a name with a control character;
@@ -185,7 +185,7 @@ receiving daemon checks it before anything reaches `attachments/`:
 
   It then counts every byte before it is made, so a zip that would
   unpack to more than the declared size plus 10% and 4 KiB stops at that
-  limit, with nothing past it written (`oversize-unpacked`, #327).  Any
+  limit, with nothing past it written (`oversize-unpacked`, #310).  Any
   refusal removes everything unpacked and cancels the transfer, and the
   record names the reason.
 - **No piece without its checksums, and no changing the count.**  Every
@@ -198,24 +198,24 @@ receiving daemon checks it before anything reaches `attachments/`:
   but no transfer may have more than 100,000 pieces, so a sender cannot
   declare a vast number of tiny ones.  Each answer lists at most 64 of the
   pieces still owed, with how many are held; the sender works through
-  them batch by batch.  (#404b)
+  them batch by batch.  (#311b)
 - **Files sent up from your phone are checked the same way.**  The phone
   declares the checksum of every piece and of the whole zip before it
   sends; each piece is checked as it arrives, the whole when it is
   complete.  The zip must hold exactly one regular file, whose size must
   fit the free space on the disk. If the zip reader cannot unpack it
   byte for byte, the upload is refused rather than filed half-done.
-  (#404c, #405)
+  (#311c, #309)
 - **Nothing before your yes, and no strange ids.**  A piece that arrives
   while the consent form is still unanswered (or after you declined) is
   refused and nothing is written.  The id a contact gives an attachment
   names a folder on your drive, so only ids shaped like rmail's own (hex
-  digits and dashes) are taken.  (#404e)
+  digits and dashes) are taken.  (#311e)
 
 ### In-progress visibility
 
 While a transfer is running, the consent file in your inbox is updated after each
-chunk arrives.  It is now a link into `/tmp/rmail-progress/` (in RAM, #328),
+chunk arrives.  It is now a link into `/tmp/rmail-progress/` (in RAM, #304),
 so the frequent rewrites never touch your disk:
 
 ```
@@ -238,7 +238,7 @@ The same folder holds the sender's packed copies (`rmail-<id>.zip`).  It
 used to be `/tmp`, which on many systems is RAM: a reboot cleared partial
 downloads, and a file arriving took room in RAM about three times over (the
 pieces, the joined zip, the unpacked files).  What keeps arriving pieces
-harmless is the checking above, not where they wait (#404f).  Being hidden,
+harmless is the checking above, not where they wait (#311f).  Being hidden,
 nothing in it shows among your attachments or on the phone.
 
 To keep them in RAM anyway, set `attachment_pending_dir` to a folder in
@@ -297,7 +297,7 @@ Delete that file (or add a `deny` line) to cancel. Partial chunks are
 cleaned up on both sides.  The sender's daemon is told with a message
 that names the attachment, not the message: it stops that one transfer and
 records *cancelled*, and the message itself is untouched — you stay on it
-and still get its edits (#407).  The same happens when your daemon refuses a
+and still get its edits (#313).  The same happens when your daemon refuses a
 transfer (oversize, a damaged zip).
 
 ---
@@ -322,6 +322,6 @@ the phone always use 256 KiB pieces.
 
 A message body (the text in your outbox file, below the headers) over 128 KB
 (131,072 bytes) is sent as an attachment instead: the recipient gets a short
-stub body and a consent form for the text, named after the message (#349).
+stub body and a consent form for the text, named after the message (#308).
 Only if packing that attachment fails is an error written to your inbox.  An
 edit to a message is sent as it is, with no size cap.

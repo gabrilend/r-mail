@@ -4,7 +4,7 @@
 # The owner's phone sends a file to its home mailbox by zipping it,
 # cutting the zip into pieces, telling the mailbox the checksum of every
 # piece (a "resume" request), and then sending the pieces the mailbox
-# does not have yet.  Until 2026-09-29 (issue #404c) the mailbox used the
+# does not have yet.  Until 2026-09-29 (issue #311c) the mailbox used the
 # piece checksums only to throw away stale pieces already on disk; a piece
 # arriving afterwards was stored unchecked, there was no checksum of the
 # whole, a zip of several files was joined end to end into one, and a

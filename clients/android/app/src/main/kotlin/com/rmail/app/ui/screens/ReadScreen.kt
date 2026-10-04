@@ -27,7 +27,7 @@ fun ReadScreen(
     vm: MainViewModel,
     isOutbox: Boolean = false,
     onBack: () -> Unit,
-    // #358: signatures carry enough context for the caller to seed a
+    // #816: signatures carry enough context for the caller to seed a
     // composer draft — sender (for Reply's "to:"), subject (for the
     // Re:/Fwd: prefix), and the pre-quoted body built by buildReply /
     // buildForward on this screen.
@@ -84,7 +84,7 @@ fun ReadScreen(
                 },
                 actions = {
                     if (!isOutbox && !msg.isConsent) {
-                        // #318: zoom controls (+ = bigger text = fewer cols,
+                        // #809: zoom controls (+ = bigger text = fewer cols,
                         // - = smaller text = more cols). Step 5 cols.
                         // Persisted as GlobalSettings.readerColumns.
                         IconButton(onClick = {
@@ -103,7 +103,7 @@ fun ReadScreen(
                         }
                     }
                     if (isOutbox) {
-                        // #321: Edit kicks off the in-place edit flow —
+                        // #812: Edit kicks off the in-place edit flow —
                         // parse this outbox file's headers and body,
                         // queue a PendingDraft tagged with this
                         // filename, pop back to the InboxScreen which
@@ -178,7 +178,7 @@ fun ReadScreen(
             )
         } else {
             Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-                // #318: monospace text sized so exactly `columns`
+                // #809: monospace text sized so exactly `columns`
                 // characters fit the container width.  BoxWithConstraints
                 // gives us the viewport's maxWidth; TextMeasurer gives us
                 // the real rendered width of a row of `columns` "M"s at a
@@ -213,7 +213,7 @@ fun ReadScreen(
                         lineHeight = scaled * 1.2f
                     )
                 }
-                // #321: removed the standalone "Update" button.  In its
+                // #812: removed the standalone "Update" button.  In its
                 // earlier incarnation it just retriggered the sync,
                 // which is also what every other touch on this screen
                 // (Edit, Reply, Forward) implicitly does and what the
@@ -276,7 +276,7 @@ private fun ConsentView(
     }
 }
 
-// #358: single helper that produces the "quoted original" portion of a
+// #816: single helper that produces the "quoted original" portion of a
 // reply or forward.  Recipients and subject are handled by the caller
 // (MainActivity wires the ReadScreen callbacks to seed the composer's
 // draftRecipients and draftSubject directly), so this only needs to
@@ -286,7 +286,7 @@ private fun buildQuoted(msg: MailMessage): String {
     return "\n\n$quoted"
 }
 
-// #321: parse an outbox file into its constituent parts so the
+// #812: parse an outbox file into its constituent parts so the
 // composer can reload it for editing.  Mirrors the daemon's
 // parse_outbox_file logic: contiguous to:/attach: lines at the top
 // are the header block, everything after the first non-header line

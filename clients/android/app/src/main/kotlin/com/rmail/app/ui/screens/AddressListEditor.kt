@@ -128,7 +128,7 @@ fun cleanAddressList(list: List<String>): List<String> =
 
 /**
  * Error for an entry in the local-address list, or null if it is fine.
- * Mirrors the daemon's rule (#388): local means private IPv4, because a
+ * Mirrors the daemon's rule (#409): local means private IPv4, because a
  * private address is only reachable from inside its own network.
  */
 fun localAddressError(addr: String): String? =

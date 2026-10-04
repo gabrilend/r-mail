@@ -2,7 +2,7 @@
 # test-edit-delivery.sh — check that an edited message reaches its recipient even when they could not be reached at the time
 #
 # When the author edits a message already sent, rmail sends the new
-# version as an "update".  Until 2026-10-04 (issue #409) the sender noted
+# version as an "update".  Until 2026-10-04 (issue #208) the sender noted
 # the edit as handled the moment it built the update, before sending it.
 # A recipient who was not due on their timer, or who was offline, missed
 # the edit for good and kept the old text.

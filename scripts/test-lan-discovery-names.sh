@@ -10,7 +10,7 @@
 # because that is the name every later lookup uses.  It used to be filed
 # under a name written inside the packet — the sender's name for itself —
 # so whenever the two names differed, the search found the other mailbox and
-# then forgot it (#393).  The packet no longer carries a name at all.
+# then forgot it (#417).  The packet no longer carries a name at all.
 #
 # This script starts two throwaway mailboxes in RAM, each naming the other
 # differently from how the other names itself, and checks each log says the

@@ -155,13 +155,21 @@ local function check_mapping(mapping, issues)
 end
 -- }}}
 
+local SKIP = {
+    ["scripts/renumber-issues.lua"] = true,
+    ["scripts/test-renumber-issues.sh"] = true,
+}
+
 -- {{{ local function text_files
 -- The project's text files, tracked or new, minus transcripts.  A file
 -- holding a zero byte is not text.
 local function text_files()
     local out = {}
     for _, rel in ipairs(lines_of("git -C " .. quote(DIR) .. " ls-files --cached --others --exclude-standard")) do
-        if not rel:match("^llm%-transcripts/") then
+        -- Left alone: the transcripts (a record of what was said); this
+        -- tool, its test and the mapping, whose numbers are examples and
+        -- old names on purpose.
+        if not rel:match("^llm%-transcripts/") and not SKIP[rel] then
             local body = read_file(DIR .. "/" .. rel)
             if body and not body:find("\0", 1, true) then out[#out + 1] = rel end
         end
@@ -239,8 +247,9 @@ local function rewrite(text, moves_by_old, own_key)
         if not m or after ~= "" then return nil end
         return "#" .. slot(m.new)
     end)
-    -- "issue 404", "issues 371", "Issue 404"
-    text = text:gsub("([Ii]ssues? )(%d%d%d+%l?)(%w?)", function(word, id, after)
+    -- "issue 404", "issues 371", "Issue 404", and a path to the folder
+    -- naming only the number, "issues/382"
+    text = text:gsub("([Ii]ssues?[ /])(%d%d%d+%l?)([%w%-]?)", function(word, id, after)
         local m = moves_by_old[id]
         if not m or after ~= "" then return nil end
         return word .. slot(m.new)
@@ -292,6 +301,9 @@ local function main()
         for _, p in ipairs(problems) do io.stderr:write("  " .. p .. "\n") end
         return 1
     end
+    -- the mapping names old numbers on purpose
+    local map_rel = MAPPING:sub(1, #DIR + 1) == DIR .. "/" and MAPPING:sub(#DIR + 2) or MAPPING
+    SKIP[map_rel] = true
     local moves_by_old = {}
     for _, m in ipairs(moves) do
         local issue = issues[m.old]

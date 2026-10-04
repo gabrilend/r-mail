@@ -26,7 +26,7 @@ class Settings(context: Context) {
         get() = prefs.getInt("accent_color", 0xFF00E5FF.toInt())  // cyan
         set(v) = prefs.edit { putInt("accent_color", v) }
 
-    // #318: monospace column width for the inbox message viewer.
+    // #809: monospace column width for the inbox message viewer.
     // Font size is computed so that `readerColumns` characters fit the
     // screen width.  Default 80 (classic terminal width).  User-
     // adjustable via +/- controls in the Read screen's top bar.

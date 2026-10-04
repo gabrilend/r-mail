@@ -3,7 +3,7 @@ package com.rmail.app.sync
 import kotlin.random.Random
 
 /**
- * Progressive sync backoff, mirroring the daemon's `ctimer` (#377).
+ * Progressive sync backoff, mirroring the daemon's `ctimer` (#115).
  *
  * The phone used to poll on a fixed 10s timer — a testing value that was
  * never reverted. That is wrong in both directions: far too chatty against a

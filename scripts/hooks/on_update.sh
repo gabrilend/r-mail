@@ -1,5 +1,5 @@
 #!/bin/sh
-# on_update — fires when a living message (see issue #306) is updated.
+# on_update — fires when a living message (see issue #207) is updated.
 #
 # Synchronous.  Args: $1 = sender, $2 = absolute path to the inbox
 # file that still holds the old body, $3 = the new body just arrived.

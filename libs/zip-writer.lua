@@ -1,6 +1,6 @@
 -- zip-writer.lua — packing a file or folder into a zip of our own
 -- (my-libs issue 801; built for rao-chat issue 216e, shared with rmail
--- #405).  Neither side calls the zip program any more (owner:
+-- #309).  Neither side calls the zip program any more (owner:
 -- "yes use our own packer in all cases").
 --
 -- It writes what zip-reader.lua accepts and nothing else, so one

@@ -34,6 +34,7 @@ show "$running daemon(s) running on this machine right now"
 
 heading "A portable mailbox, built into RAM"
 t0=$(now_ms)
+mkdir -p "$DEMO_WORK/drive"
 if "$DIR/scripts/make-mailbox-drive.sh" --name traveller --port 51999 --dest "$DEMO_WORK/drive" > "$DEMO_WORK/drive.out" 2>&1; then
     t1=$(now_ms)
     show "built in $((t1 - t0)) ms; what is on the drive:"

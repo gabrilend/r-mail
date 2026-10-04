@@ -20,14 +20,14 @@
 -- can only do one of two things: agree with where it already is, which
 -- is nothing, or disagree with it, which is a bug somebody now has to
 -- be told about.  A fact you cannot state wrongly needs no checking and
--- no error message.  See issues/382.
+-- no error message.  See issues/102.
 --
 -- The line before that was worse: the argument was the mailbox, and the
 -- daemon went looking for a config by rebuilding the installer's
 -- path-to-slug transform in a second place.  The two had to agree
 -- forever or a daemon quietly opened a config nobody named — and on a
 -- machine with two mailboxes, served the wrong one without saying so.
--- See issues/381.
+-- See issues/612.
 local ARG = arg and arg[1]
 local CONFIG_PATH, MAIL_ARG
 
@@ -119,13 +119,13 @@ local paths = {
 paths.uploads = paths.attachments .. "/.uploads"
 -- Where attachments wait while they travel: the pieces of one arriving
 -- (`.pending/<id>/`), and the packed copy of one being sent
--- (`rmail-<id>.zip`).  On disk, inside the mailbox, by default (#404f).
+-- (`rmail-<id>.zip`).  On disk, inside the mailbox, by default (#311f).
 -- It used to be /tmp, which on many systems -- the owner's included -- is
 -- RAM: an arriving file took room there up to three times over (pieces,
 -- joined zip, unpacked files) and vanished on a reboot, and the packed
--- copy every recipient must get (#408: attachments are fixed once offered)
+-- copy every recipient must get (#314: attachments are fixed once offered)
 -- vanished with it.  What keeps arriving pieces harmless is the checking
--- they go through (#404), not where they wait.  A setting can still put
+-- they go through (#311), not where they wait.  A setting can still put
 -- it in RAM.  Hidden, so nothing lists it among the received attachments.
 paths.pending = config.attachment_pending_dir or (paths.attachments .. "/.pending")
 
@@ -133,7 +133,7 @@ paths.pending = config.attachment_pending_dir or (paths.attachments .. "/.pendin
 -- after a reboot (transfer progress, consent progress) and the daemon's
 -- own log file.  Shared by every mailbox on the machine, so everything in
 -- it carries the mailbox path in its name.  See the progress-file helpers
--- (#328) for how the transfer files use it.
+-- (#304) for how the transfer files use it.
 local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
 
 -- The config parser leaves quotes on values, so `log_file = "/tmp/x.log"`
@@ -144,7 +144,7 @@ local TMPFS_PROGRESS_DIR = "/tmp/rmail-progress"
 -- With no setting, the log goes to RAM, named after the mailbox path the
 -- same way the transfers file is (/home/ritz/mail -> log-home-ritz-mail).
 -- It used to live in the mailbox's .state/ folder on disk; the owner moved
--- it (2026-09-23, #397) because it records every exchange with a contact
+-- it (2026-09-23, #121) because it records every exchange with a contact
 -- by name and time, and that record should not outlive a reboot.
 local function _log_file(v, mail_dir)
     if v == nil or v == false then
@@ -180,7 +180,7 @@ local cfg = {
     -- expects, the file is what a person reaching for `tail -f` expects.
     --
     -- The default is named after the mailbox rather than fixed because
-    -- a machine can hold several mailboxes (#382) and a shared path would
+    -- a machine can hold several mailboxes (#102) and a shared path would
     -- interleave two daemons' lines into one unreadable file.  Set
     -- `log_file` in the config to put it somewhere else, or to `""` to
     -- keep the journal copy only.
@@ -205,7 +205,7 @@ end
 -- matter who started the daemon or what working directory they left it
 -- in.  Resolving against the working directory would hand that answer to
 -- the service manager, and a hand-started daemon and a supervised one
--- would run different scripts from the same config.  See #382.
+-- would run different scripts from the same config.  See #102.
 local CONFIG_DIR_PATH = CONFIG_PATH:match("^(.*)/[^/]*$") or "."
 
 local function _hook_path(v)
@@ -347,7 +347,7 @@ end
 -- answer per kernel and no second choice if it fails.  A machine with
 -- neither stops here rather than quietly polling, because a daemon that
 -- looks like it is working and is a timer-tick behind is worse than one
--- that says what is missing.  See #384.
+-- that says what is missing.  See #620.
 local inotify, WATCHER_KIND
 do
     local ok_in, mod_in = pcall(require, "rmail_inotify")
@@ -417,7 +417,7 @@ local function set_file_mtime(path, epoch)
     os.execute("touch -m -d @" .. string.format("%d", epoch) .. " " .. shell_quote(path))
 end
 
--- ---- Progress-file helpers (#328) ---------------------------------------
+-- ---- Progress-file helpers (#304) ---------------------------------------
 --
 -- Some files get rewritten per-chunk during attachment transfer — the
 -- receiver's consent/progress file and the sender's `transfers` file.
@@ -510,7 +510,7 @@ end
 --
 -- DEPRECATED for new code: prefer `contact_hosts(contact)` and loop over
 -- the returned list (so every configured address gets its turn on
--- connection failure — see #347 Phase 2).  This single-address helper
+-- connection failure — see #408 Phase 2).  This single-address helper
 -- exists only for callers that need "just show me one address" (logs,
 -- UI summaries, one-shot probes).  The choice here matches the first
 -- entry in contact_hosts().
@@ -572,7 +572,7 @@ local function is_private_ipv4(addr)
     return false
 end
 
--- #388 address helpers live in one table: the main chunk is at Lua's
+-- #409 address helpers live in one table: the main chunk is at Lua's
 -- 200-local ceiling.  Declared here so load_contacts can classify; the
 -- address-set functions are added further down.
 local addrset = {}
@@ -653,7 +653,7 @@ end
 --   * shuffled_ip_services() picked the same "random" order every run,
 --     quietly defeating the comment that says it spreads load across
 --     resolvers so none gets pinned as primary;
---   * #379's daily IP probe would have drawn the same "random" time of day
+--   * #410's daily IP probe would have drawn the same "random" time of day
 --     on every boot -- exactly the fixed-schedule behaviour the requirement
 --     rules out.
 --
@@ -796,7 +796,7 @@ local function list_files(dir)
     -- the caller can read.  Without this, a user-created subdirectory
     -- in inbox/ whose name happened to match a consent/progress file
     -- would make consent_cancelled() see a failed read and cancel the
-    -- transfer (#356), and a dir whose name matched an in-flight
+    -- transfer (#205), and a dir whose name matched an in-flight
     -- message would block the delete-notify path in sync_inbox.
     --
     -- Directories found in a watched location are skipped *and*
@@ -842,7 +842,7 @@ local function list_files(dir)
     return files
 end
 
--- ---- The daemon reporting its own problems as mail (#382) ---------------
+-- ---- The daemon reporting its own problems as mail (#102) ---------------
 --
 -- A log line is not a delivery mechanism.  Nobody reads a service log to
 -- find out why their mail stopped, and on a machine with one service per
@@ -888,7 +888,7 @@ local function clear_problem(direction, problem_id)
     return true
 end
 
--- ---- Per-contact sync timers (#377) -------------------------------------
+-- ---- Per-contact sync timers (#115) -------------------------------------
 --
 -- The cadence used to be one global interval shared by every contact, moved
 -- by an aggregate did_work flag, with no per-contact failure backoff.  Two
@@ -996,7 +996,7 @@ function ctimer.mark_failure(name, now)
     end
 end
 
--- Inbound contact resets that contact's timer only (#377 requirement 3).
+-- Inbound contact resets that contact's timer only (#115 requirement 3).
 -- This is what gives two online peers push-like latency: when they talk to
 -- us we become due immediately, so our reply goes out on the next loop pass
 -- rather than up to two hours later.  Everyone else's backoff is untouched.
@@ -1017,7 +1017,7 @@ function ctimer.time_to_due(now)
     return math.max(0, soonest - now)
 end
 
--- ---- Per-cycle reachability tracking (#324) -----------------------------
+-- ---- Per-cycle reachability tracking (#114) -----------------------------
 --
 -- Without this, one offline contact produces N separate "failed to notify
 -- X" lines per sync cycle (one per queued op).  Each op site now reports
@@ -1096,7 +1096,7 @@ end
 -- Contacts text -> the contacts table every other part of the daemon uses.
 -- Separate from reading the file so that text which is not (yet) the file
 -- can be read the same way: a phone's save is checked by parsing the file
--- it would produce before that file is written (#411).
+-- it would produce before that file is written (#504).
 function contactfile.parse(text)
     local contacts = {}
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
@@ -1179,7 +1179,7 @@ function contactfile.parse(text)
             end
         end
     end
-    -- #388: local-ip / local-ip[N] are the contact's private addresses,
+    -- #409: local-ip / local-ip[N] are the contact's private addresses,
     -- kept apart from `ip` because they are only reachable from inside
     -- their network.  A public address here is a mistake we refuse rather
     -- than act on: it would be tried as "same LAN" from anywhere.  The
@@ -1282,7 +1282,7 @@ end
 
 -- All addresses for a contact, in preferred order.  Returns at least one
 -- entry if the contact has any address set; empty list otherwise.  Meant
--- for Phase 2 of #347 (retry-on-failure loops); callers that only need a
+-- for Phase 2 of #408 (retry-on-failure loops); callers that only need a
 -- single address should keep using contact_addr().
 local function contact_hosts(contact)
     if type(contact.ips) == "table" and #contact.ips > 0 then
@@ -1301,7 +1301,7 @@ end
 -- first and is immune to promotion; indexed endpoints follow and are
 -- subject to auto-reordering on fallback success.
 --
--- #388: a contact's local-ip entries go in front, but only those that share
+-- #409: a contact's local-ip entries go in front, but only those that share
 -- our own LAN.  Private ranges are reused on every network in the world, so
 -- trying 192.168.1.5 from a café would reach whatever the café put there.
 -- They carry no index, so a win on one never promotes or rewrites `ip`.
@@ -1322,7 +1322,7 @@ local function contact_endpoints(contact)
     if not contact.local_ips or #contact.local_ips == 0 then return base end
 
     local mine = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
-    -- The per-contact gate (#377) identifies a request by the first
+    -- The per-contact gate (#115) identifies a request by the first
     -- endpoint's contact_name, so ours must carry it too.
     local cname = base[1] and base[1].contact_name
     local out, seen = {}, {}
@@ -1521,7 +1521,7 @@ end
 -- List dot-prefixed regular files in a directory.
 --
 -- list_files() deliberately skips dotfiles, which is right for mail but
--- makes daemon-written notices invisible to it -- and #388 stores those as
+-- makes daemon-written notices invisible to it -- and #409 stores those as
 -- dotfiles precisely so `ls` shows mail rather than bookkeeping.  This is
 -- the deliberate way back in for the code that manages them.
 local function list_notices(dir)
@@ -1538,7 +1538,7 @@ local function list_notices(dir)
     return out
 end
 
--- ---- #388: address sets -------------------------------------------------
+-- ---- #409: address sets -------------------------------------------------
 --
 -- An announcement used to send one address and overwrite one field, which
 -- is lossy in a way that breaks working setups: a contact on our LAN holding
@@ -1546,7 +1546,7 @@ end
 -- direct route to a hairpin-NAT one.  The sender knows its own addresses but
 -- cannot know which of them is reachable from any given contact -- that
 -- depends on the contact's network position, which only the contact can
--- discover.  So send all of them and let #347's existing fallback and
+-- discover.  So send all of them and let #408's existing fallback and
 -- promotion machinery converge on whichever works.
 --
 -- `addrset` itself is declared up with is_private_ipv4.
@@ -1698,7 +1698,7 @@ function addrset.merge(existing_default, existing_indexed, announced)
 
     -- Their pinned default survives if it is one we may not replace: a
     -- hostname, or a private address whose reachability only they know.
-    -- Keeping it *first* keeps it the unindexed default, which #347 pins
+    -- Keeping it *first* keeps it the unindexed default, which #408 pins
     -- against promotion reordering.
     if existing_default and not addrset.ours_to_replace(existing_default) then
         push(existing_default)
@@ -1714,7 +1714,7 @@ end
 
 -- Normalise the contacts file:
 --   1. Scattered lines for the same contact are grouped together at the
---      position of that contact's first line (#347 auto-grouping).
+--      position of that contact's first line (#408 auto-grouping).
 --   2. The = signs within each grouped block are aligned.
 -- Runs at startup and whenever the contacts file changes.
 local function align_contacts()
@@ -1813,7 +1813,7 @@ local function save_state(name, data)
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
 end
 
--- ---- Reading state written while contact names were hashed (#348) -------
+-- ---- Reading state written while contact names were hashed (#505) -------
 --
 -- For a few weeks in spring 2026 some state files stored a hash of each
 -- contact's name instead of the name, on the theory that someone who could
@@ -1839,7 +1839,7 @@ local function hash_contact_name(name)
 end
 
 -- Reverse-migrate a state table whose keys were hashed contact names
--- under #348 step 1 (now reverted).  Legacy 64-hex keys resolved back
+-- under #505 step 1 (now reverted).  Legacy 64-hex keys resolved back
 -- to the plaintext name via the current contacts; hashes whose contact
 -- has been deleted since save are dropped (orphan notifications for
 -- removed contacts aren't useful).  States already keyed by plaintext
@@ -2210,7 +2210,7 @@ local function handle_deliver_message(data, sender)
     if not body then body = "" end
     local filename = sanitize_filename(subject)
     local target = INBOX .. "/" .. filename
-    -- #349: auto-body deliveries carry a stub body generated by the
+    -- #308: auto-body deliveries carry a stub body generated by the
     -- sender, but the sender doesn't know where OUR attachments live.
     -- Overwrite with a stub that names our own paths.attachments so
     -- the user can go straight to the file.
@@ -2228,7 +2228,7 @@ local function handle_deliver_message(data, sender)
             target = INBOX .. "/" .. filename
         elseif existing and existing["from"] == sender and
                existing.message_id ~= message_id then
-            -- #315: same sender, same sanitised subject, different
+            -- #814: same sender, same sanitised subject, different
             -- message.  The earlier deliver-attachments-to-existing
             -- check above fires only when message_ids match, so this
             -- branch is truly a collision between two separate
@@ -2299,7 +2299,7 @@ local function handle_deliver_update(data, sender)
             -- sync_inbox hasn't run yet to reconcile state, we must not
             -- recreate it here — that would silently undo the user's
             -- delete.  Return 404 so the sender treats this as "they
-            -- deleted" and cleans up its own state.  See #323 (race
+            -- deleted" and cleans up its own state.  See #210 (race
             -- between sender update and receiver local delete).
             if not file_exists(target) then
                 return 404, {error = "message not found"}
@@ -2321,7 +2321,7 @@ local function handle_deliver_update(data, sender)
     return 404, {error = "message not found"}
 end
 
--- #355: we intentionally do NOT cascade inbox-message deletions into
+-- #306: we intentionally do NOT cascade inbox-message deletions into
 -- attachment-file deletions.  Attachments are files the user owns —
 -- deleting a message shouldn't vapourise its PDF or photo.  The
 -- previous helper (delete_inbox_attachments) was removed along with
@@ -2330,10 +2330,10 @@ end
 -- message deletion.
 
 -- Delete a transfer's zip once no transfer holds it -- for an oversized
--- message body sent as an attachment (#349) only.  The packed copy of an
+-- message body sent as an attachment (#308) only.  The packed copy of an
 -- `attach:` file belongs to the outbox record, not to any one transfer:
 -- it is kept until every recipient has answered, so that a recipient
--- reached late gets the same bytes as the first (#408), and is removed by
+-- reached late gets the same bytes as the first (#314), and is removed by
 -- sync_outbox's release pass.  This used to delete it when the last
 -- *current* transfer finished, and the next recipient got a fresh packing
 -- of whatever was at the path by then.
@@ -2350,7 +2350,7 @@ local function release_zip(chunks, transfer)
     end
 end
 
--- {{{ outbox header scanning (#363)
+-- {{{ outbox header scanning (#202)
 -- The outbox header block is a run of to:/attach: lines at the top of the
 -- file, with blank lines and // comments allowed interleaved.  Blanks and
 -- comments are preserved verbatim (the user may have inserted them for
@@ -2472,7 +2472,7 @@ local function handle_delete(data, sender)
                 os.remove(INBOX .. "/" .. filename)
                 log("deleted from inbox: %s (by sender %s)", filename, sender)
             end
-            -- #355: attachments in paths.attachments intentionally left
+            -- #306: attachments in paths.attachments intentionally left
             -- alone; they're user-owned files.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
@@ -2547,15 +2547,15 @@ local function handle_update_address(data, sender)
     local applied_set = false
     local announced_changed = true
 
-    -- #388: a sender that announces its whole address set is authoritative
+    -- #409: a sender that announces its whole address set is authoritative
     -- about where it is, so take the set rather than a single field.  The
     -- old "leave a multi-IP contact entirely alone" rule existed because one
     -- address could not say which of N was superseded; a full set can.
     --
-    -- Private addresses are split out into `local-ip` (#388 follow-up).  A
+    -- Private addresses are split out into `local-ip` (#409 follow-up).  A
     -- private address is kept only if it shares our /24: anywhere else it
     -- names some other device on our own network, not the sender.  Peers
-    -- from #388 phase 1 put their LAN address in `ips`; the same rule sorts
+    -- from #409 phase 1 put their LAN address in `ips`; the same rule sorts
     -- it into the right place.
     local my_lan = (read_file(STATE .. "/lan_ip") or ""):match("^%s*(.-)%s*$")
     local announced, announced_local, local_seen = {}, {}, {}
@@ -2678,9 +2678,9 @@ local function handle_update_address(data, sender)
 
     if not applied_set then
 
-    -- Single-address fallback, for peers that predate #388.
+    -- Single-address fallback, for peers that predate #409.
     --
-    -- If the contact is configured with multiple IPs (#347), the user is
+    -- If the contact is configured with multiple IPs (#408), the user is
     -- managing that list explicitly.  A single address update can't know
     -- which of the N addresses was superseded, so leave all of them alone
     -- and just take the port update if any.
@@ -2953,7 +2953,7 @@ local resolve_lan_host = nil
 -- Hook for connection timeout. Set by main() to trigger LAN discovery on failure.
 local on_connection_timeout = nil
 
--- ---- Answering while we wait on our own requests (#387, in part) ------------
+-- ---- Answering while we wait on our own requests (#120, in part) ------------
 --
 -- A sync cycle runs on the main thread, and while it waits on its requests
 -- nothing else is handled.  Two daemons that each had something to send
@@ -2975,7 +2975,7 @@ local on_connection_timeout = nil
 --   a plain "GET "                     the health answer, as always
 -- Nothing is *processed* during a cycle: handlers write records the cycle
 -- holds in memory, and processing a request mid-cycle could lose its
--- changes.  The rest of #387 -- serving requests while a cycle waits -- is
+-- changes.  The rest of #120 -- serving requests while a cycle waits -- is
 -- still open.
 --
 -- Kept in ctimer (it is about who we are dialing and when), not in new
@@ -3199,7 +3199,7 @@ local function http_post_batch_raw(requests)
     return results
 end
 
--- ---- #377: the per-contact gate ----------------------------------------
+-- ---- #115: the per-contact gate ----------------------------------------
 --
 -- Every outbound op in the daemon funnels through here, which makes this the
 -- one place the per-contact timers can be enforced.  The alternative -- a
@@ -3268,6 +3268,8 @@ local function http_post_batch_with_fallback(requests)
             -- address ops later in the same cycle, spreading work that should
             -- have gone out together across several cycles.
             local reached = (r.ok or r.status or r.busy) and true or false
+            -- and a busy contact is not "unreachable" in the cycle's summary
+            if r.busy then note_contact_result(cname, true) end
             if ctimer.outcome[cname] == nil or reached then
                 ctimer.outcome[cname] = reached
             end
@@ -3278,7 +3280,7 @@ local function http_post_batch_with_fallback(requests)
 end
 
 
--- ---- attach: glob expansion (#362) --------------------------------------
+-- ---- attach: glob expansion (#204) --------------------------------------
 --
 -- A user-written "attach:" line may contain shell-style glob metachars
 -- (`*`, `?`, `[...]`) in the filename component.  parse_outbox_file
@@ -3329,7 +3331,7 @@ end
 
 -- The path an `attach:` line names, as written: the text after the colon,
 -- trimmed, with one layer of matching double or single quotes taken off
--- (#363 part c) -- people quote paths with spaces out of shell habit.
+-- (#202 part c) -- people quote paths with spaces out of shell habit.
 -- nil for a line that is not an attach: line.  `~` is left for the caller
 -- to expand, because the glob check needs the path before expansion.
 --
@@ -3354,7 +3356,7 @@ local function _list_dir_files(dir)
     -- -L makes ls describe what a link points at, so -p marks a link to a
     -- folder with a trailing / like a real folder and it is left out; a
     -- link to a file is kept.  Without -L a link to a folder was attached
-    -- as though it were a file (#362 says folders matched by a wildcard
+    -- as though it were a file (#204 says folders matched by a wildcard
     -- are skipped and links are followed).
     local files = {}
     local handle = io.popen('ls -1pL ' .. shell_quote(dir) .. ' 2>/dev/null')
@@ -3477,7 +3479,7 @@ end
 
 
 -- Insert a `// MISSING ATTACHMENT:` marker below the `attach:` line for
--- the given filepath in an outbox file (#363).  Idempotent: if the marker
+-- the given filepath in an outbox file (#202).  Idempotent: if the marker
 -- already exists anywhere in the file, does nothing.  Logs only when the
 -- marker is actually inserted, so repeated sync cycles on an unresolved
 -- missing file don't spam the log.
@@ -3539,7 +3541,7 @@ local function mark_recipient_problem(outbox_path, recipient, label, reason)
 end
 -- }}}
 
--- ---- What each recipient answered about each attached file (#406-#408) ----
+-- ---- What each recipient answered about each attached file (#312-#314) ----
 --
 -- Kept in the outbox record (.state/outbox.json), beside what it already
 -- holds per message and per recipient:
@@ -3548,7 +3550,7 @@ end
 --     recipients = {
 --       [contact] = {
 --         message_id    = string,
---         body_checksum = string (#409),
+--         body_checksum = string (#208),
 --         attachments   = { [attached path] = answer },
 --         withdrawals   = { [attachment id] = attached path },
 --       },
@@ -3595,7 +3597,7 @@ end
 
 -- {{{ answers.record
 -- Record `answer` for the transfer's recipient and path.  A message body
--- sent as an attachment (#349) has no attach: line and no answer.
+-- sent as an attachment (#308) has no attach: line and no answer.
 function answers.record(state, transfer, answer)
     if transfer.auto_body then return end
     local rmeta = answers.recipient(state, transfer)
@@ -3636,7 +3638,7 @@ end
 -- At start-up: remove what in the pending folder no record holds -- the
 -- pieces of an arriving attachment whose transfer is gone, a packed copy
 -- no message or transfer names.  Kept: everything a record names, which
--- is how a transfer resumes after a restart (#404f).
+-- is how a transfer resumes after a restart (#311f).
 --
 -- Only when the folder is the mailbox's own default.  A folder set by
 -- hand may be shared -- /tmp, the old default, often is, by every
@@ -3792,7 +3794,7 @@ end
 local upload = {}
 
 -- The shared zip library (my-libs/zip, copied into libs/ by its
--- install-into; #405): our own packer and a reader that checks a zip's
+-- install-into; #309): our own packer and a reader that checks a zip's
 -- whole structure before making a byte and meters every byte it makes.
 -- rmail no longer runs zip or unzip.  Plain Lua on 5.3/5.4 and LuaJIT.
 upload.zip_reader = require("zip-reader")
@@ -3801,7 +3803,7 @@ upload.zip_writer = require("zip-writer")
 -- {{{ upload.valid_attachment_id
 -- True for an id shaped like the ones uuid() makes: hex digits and dashes,
 -- 8 to 64 characters.  A contact chooses the ids of the attachments it
--- sends, and the receiver names a folder after each one (#404e).
+-- sends, and the receiver names a folder after each one (#311e).
 function upload.valid_attachment_id(id)
     return type(id) == "string" and #id >= 8 and #id <= 64 and id:match("^[%x%-]+$") ~= nil
 end
@@ -3812,7 +3814,7 @@ end
 -- file): its name, size in bytes and modification time to the fraction of
 -- a second.  Two fingerprints differ when anything was written in between.
 -- Used by compress_attachment to notice a file changing while zip reads it
--- (#404d).  `find -printf` is GNU find, as `stat -c` elsewhere is GNU stat.
+-- (#311d).  `find -printf` is GNU find, as `stat -c` elsewhere is GNU stat.
 function upload.fingerprint(path)
     local h = io.popen("find " .. shell_quote(path) .. " -printf '%p %s %T@\\n'")
     local text = h and h:read("*a")
@@ -3826,11 +3828,11 @@ end
 -- }}}
 
 -- Pack a file or folder into a zip in the pending folder, with the shared
--- zip library's packer (#405; rmail used to run zip).  Returns (zip path,
+-- zip library's packer (#309; rmail used to run zip).  Returns (zip path,
 -- SHA-256, packed size, unpacked size), or nil and a reason:
 --   "missing"    the source could not be read before packing
 --   "zip-failed" the packer could not make the zip (named in the log)
---   "changed"    the source changed while it was being read (#404d); the
+--   "changed"    the source changed while it was being read (#311d); the
 --                zip would be a torn copy -- the start of the old content
 --                and the end of the new -- so it is deleted.  Callers try
 --                again on a later cycle.
@@ -3881,11 +3883,11 @@ local function handle_attachment_request(data, sender)
     -- The id becomes a folder name under the pending folder, and that
     -- folder is later removed with rm -rf.  An id like ../../home/you would
     -- reach outside it, so only the shape rmail's own ids have is taken
-    -- (#404e).
+    -- (#311e).
     if not upload.valid_attachment_id(att_id) then
         return 400, {error = "attachment_id must be 8 to 64 hex digits and dashes"}
     end
-    -- The declared size is what both size limits are built from (#327),
+    -- The declared size is what both size limits are built from (#310),
     -- so it must be a real byte count.  Missing or not a whole number:
     -- refused.  It used to be read as 0 when missing, and 0 used to mean
     -- "no limit at all".
@@ -3996,7 +3998,7 @@ end
 -- inbox consent/progress file, or by editing it to contain a line
 -- that reads exactly "deny".
 --
--- Since #328 the progress file can be a symlink into tmpfs.  A reboot
+-- Since #304 the progress file can be a symlink into tmpfs.  A reboot
 -- wipes tmpfs and the symlink ends up dangling, but the user didn't
 -- actually cancel — treat that state as "not cancelled" so the next
 -- chunk arrival recreates the target and the transfer resumes.
@@ -4016,7 +4018,7 @@ end
 -- Remove a consent/progress form from the inbox along with its tmpfs
 -- backing file.  The form starts as a plain file and, once the transfer
 -- begins, becomes a symlink into /tmp/rmail-progress/consent-<att_id>
--- (#328).  os.remove on the symlink leaves that tmpfs target orphaned,
+-- (#304).  os.remove on the symlink leaves that tmpfs target orphaned,
 -- so clear both.
 local function remove_consent_form(inbox_file, att_id)
     if inbox_file then
@@ -4102,7 +4104,7 @@ local function send_consent_responses(my_name)
     local requests, valid = {}, {}
     local unmatched = {}
     for _, resp in ipairs(responses) do
-        -- Entries written during #348 name the contact by its hash.
+        -- Entries written during #505 name the contact by its hash.
         -- Resolve those; one that matches no contact is dropped with a
         -- log line rather than kept forever without a word.
         if resp.to and not contacts[resp.to] then
@@ -4158,7 +4160,7 @@ local function send_consent_responses(my_name)
             local entry = pending[resp.attachment_id]
             if entry then
                 if resp.consent then
-                    -- Progress file goes onto tmpfs from now on (#328).
+                    -- Progress file goes onto tmpfs from now on (#304).
                     -- The consent prompt was a regular file; from this
                     -- write forward it's a symlink into /tmp.
                     write_progress_file(
@@ -4189,7 +4191,7 @@ local function send_consent_responses(my_name)
         else
             remaining[#remaining + 1] = resp
             -- The per-op failure detail is captured in the unreachable
-            -- summary at cycle end (#324); no per-contact log here.
+            -- summary at cycle end (#114); no per-contact log here.
         end
     end
     save_state("consent-pending.json", pending)
@@ -4213,7 +4215,7 @@ local function send_attachment_cancellations(my_name)
         local c = contacts[item.entry["from"]]
         if c and c.ip then
             valid[#valid + 1] = item
-            -- Names the attachment, not the message (#407): a /delete with
+            -- Names the attachment, not the message (#313): a /delete with
             -- the message id here made the sender drop us from the message.
             requests[#requests + 1] = {
                 endpoints = contact_endpoints(c),
@@ -4250,7 +4252,7 @@ local function send_attachment_cancellations(my_name)
                     item.entry["from"], item.att_id, tostring(results[i].status))
             end
         end
-        -- no answer: detail rolls into the unreachable summary (#324)
+        -- no answer: detail rolls into the unreachable summary (#114)
     end
     save_state("consent-pending.json", pending)
     return true
@@ -4300,7 +4302,7 @@ function upload.file_entry(src, name)
     end
 end
 
--- ---- Unpacking a zip that came from somebody else (#404) ----------------
+-- ---- Unpacking a zip that came from somebody else (#311) ----------------
 --
 -- A zip that arrives from a contact or the phone is a claim about files,
 -- written by the sender.  Everything below checks the claim before the
@@ -4334,7 +4336,7 @@ end
 
 -- {{{ upload.size_limit
 -- The most bytes a transfer declared as `expected_size` bytes may take,
--- packed or unpacked (#327).  10% headroom plus 4 KiB: zipping data that
+-- packed or unpacked (#310).  10% headroom plus 4 KiB: zipping data that
 -- is already compressed (jpg, mp3) can grow it slightly by zip's own
 -- bookkeeping, and the 4 KiB floor covers tiny files, where 10% rounds to
 -- almost nothing.  The sender measures expected_size with `du -sb`, which
@@ -4347,15 +4349,15 @@ end
 
 -- {{{ upload.unpack_received
 -- Unpack a received zip into extract_dir (existing and empty) with the
--- shared zip reader (#405), holding everything it makes to `limit` bytes.
+-- shared zip reader (#309), holding everything it makes to `limit` bytes.
 -- Returns true, or nil plus a short reason and a sentence for the log.
 --
 -- The reader checks the whole zip before making a byte: names that climb
 -- out of the folder or start at the root, entries that share bytes (the
 -- overlapping bomb), devices, encryption, ZIP64, damaged headers.  It
 -- then counts every byte before it exists, so a zip bomb stops at the
--- limit with nothing past it written (#327).  A link is never made: its
--- note, <name>.symlink.txt, is written in its place (#404a).  On any
+-- limit with nothing past it written (#310).  A link is never made: its
+-- note, <name>.symlink.txt, is written in its place (#311a).  On any
 -- refusal it removes everything it made.
 --
 -- Reasons: "oversize-unpacked" (the reader's unpacks-larger: the name the
@@ -4415,7 +4417,7 @@ end
 -- The most pieces one transfer may be cut into, for contacts and the phone
 -- alike.  There is no smallest piece: the owner wants messages of under
 -- 1 KB carried as attachments, so a piece may be as small as its sender
--- likes, and it is the count that is bounded instead (#404b, 2026-09-29:
+-- likes, and it is the count that is bounded instead (#311b, 2026-09-29:
 -- "We need to find a way to dismantle the floor").  At rmail's default
 -- 5 MiB piece this allows about 500 GB; at 1 KiB, about 100 MB.
 upload.MAX_CHUNKS = 100000
@@ -4472,11 +4474,11 @@ local function handle_attachment_chunk(data, sender)
     if not att_id or not data.data then
         return 400, {error = "missing required fields"}
     end
-    -- The id names a folder; see handle_attachment_request (#404e).
+    -- The id names a folder; see handle_attachment_request (#311e).
     if not upload.valid_attachment_id(att_id) then
         return 400, {error = "attachment_id must be 8 to 64 hex digits and dashes"}
     end
-    -- Every claim in the chunk is checked before it is used (#404b).
+    -- Every claim in the chunk is checked before it is used (#311b).
     -- Chunk number and count: whole numbers, 0 <= index < count.
     if not upload.whole_number(total_chunks) or total_chunks < 1
        or not upload.whole_number(chunk_index) or chunk_index >= total_chunks then
@@ -4506,7 +4508,7 @@ local function handle_attachment_chunk(data, sender)
     if cpe.status == "cancel_pending" then
         return 200, {ok = false, cancelled = true}
     end
-    -- Nothing is taken before the owner says yes (#404e).  "accepted": the
+    -- Nothing is taken before the owner says yes (#311e).  "accepted": the
     -- answer is recorded and on its way to the sender; "receiving": it
     -- arrived.  Any other state -- still "pending" an answer, or
     -- "declined" -- refuses the piece without writing anything.  This
@@ -4542,7 +4544,7 @@ local function handle_attachment_chunk(data, sender)
                      held = cpe.pieces_held}
     end
 
-    -- The transfer's shape is pinned at chunk 0 (#404b): the count, the
+    -- The transfer's shape is pinned at chunk 0 (#311b): the count, the
     -- whole zip's checksum and the piece length are fixed in the consent
     -- record, and every later chunk must agree.  The sender sends chunk 0
     -- first, and again first whenever it packs the file anew (a reboot
@@ -4591,7 +4593,7 @@ local function handle_attachment_chunk(data, sender)
     -- malicious or buggy sender could advertise a small attachment in the
     -- consent prompt and then stream arbitrary amounts of data, exhausting
     -- the recipient's disk after consent was already granted.  Applies
-    -- whatever the declared size, 0 included (#327).  bytes_received is
+    -- whatever the declared size, 0 included (#310).  bytes_received is
     -- set to 0 whenever the shape is pinned, so it is always a number here.
     -- A resent piece overwrites the old one, so only the difference counts.
     local existing = 0
@@ -4697,10 +4699,10 @@ local function handle_attachment_chunk(data, sender)
     os.execute('mkdir -p ' .. shell_quote(paths.attachments))
     local extract_dir = pending_dir .. "/extract"
     os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
-    -- The shared zip reader unpacks it (#405): the whole structure checked
+    -- The shared zip reader unpacks it (#309): the whole structure checked
     -- first, then every byte counted before it is made, held to the same
-    -- limit as the packed bytes (#327), so a zip bomb stops with nothing
-    -- past the limit written.  No link is ever made (#404a).
+    -- limit as the packed bytes (#310), so a zip bomb stops with nothing
+    -- past the limit written.  No link is ever made (#311a).
     local unpacked_limit = upload.size_limit(cpe.expected_size)
     local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir, unpacked_limit)
     if not unpacked and why == "extraction-failed" then
@@ -4768,9 +4770,9 @@ local function handle_attachment_response(data, sender)
         log("consent granted by %s for %s", sender, transfer.filename)
     else
         -- Remembered per recipient and path, so the file is never offered
-        -- to them again (#406).  The packed copy is not removed here: other
+        -- to them again (#312).  The packed copy is not removed here: other
         -- recipients may still need it, and sync_outbox removes it when
-        -- none does (#408).  An auto-body zip (#349) is released as before.
+        -- none does (#314).  An auto-body zip (#308) is released as before.
         answers.record_now(transfer, "declined")
         write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
             sender .. " declined your attachment " .. transfer.filename .. ".")
@@ -4782,7 +4784,7 @@ local function handle_attachment_response(data, sender)
     return 200, {ok = true}
 end
 
--- "This attachment id is cancelled" (#407).  One message, sent by
+-- "This attachment id is cancelled" (#313).  One message, sent by
 -- whichever side stopped one transfer; it names the attachment, never
 -- the message, and is handled by stopping that one transfer.
 --
@@ -4795,7 +4797,7 @@ end
 --   we are sending it to them   they cancelled, or their daemon refused
 --                               it: the transfer stops, the answer is
 --                               "cancelled", the message is untouched
---   they are sending it to us   the author withdrew it (#406): pieces
+--   they are sending it to us   the author withdrew it (#312): pieces
 --                               and consent form go, a note says why
 -- An id in neither: 404, which both sides read as "nothing to stop".
 function answers.handle_cancel(data, sender)
@@ -4865,7 +4867,7 @@ local function write_transfers_file(att_state)
                     -- the receiver said how many it holds
                     sent = transfer.held
                 else
-                    -- a receiver from before #404b's batches lists every
+                    -- a receiver from before #311b's batches lists every
                     -- owed piece, so the count is what is not listed
                     local missing_count = transfer.missing and #transfer.missing or 0
                     sent = transfer.total_chunks - missing_count
@@ -4951,8 +4953,8 @@ local function check_transfers_file_cancellations()
     end
 
     -- The author stopped sending this file to this recipient: "cancelled",
-    -- so it is not offered again while the attach: line stays (#406), and
-    -- the recipient is told, so their form or pieces go (#407).
+    -- so it is not offered again while the attach: line stays (#312), and
+    -- the recipient is told, so their form or pieces go (#313).
     local changed = false
     local state = load_state("outbox.json")
     for att_id, transfer in pairs(to_cancel) do
@@ -4987,7 +4989,7 @@ local function send_next_chunks(my_name)
             goto continue
         end
         local zip_path = transfer.compressed_path
-        -- Records written before the #348 revert (April 2026) name their
+        -- Records written before the #505 revert (April 2026) name their
         -- zip by a zip_id and carry no compressed_path at all.  That zip
         -- lived in /tmp and is long gone, so the record is in exactly the
         -- state the branch below exists for: no zip, rebuild from source.
@@ -5000,10 +5002,10 @@ local function send_next_chunks(my_name)
         end
         if (zip_path == nil or not file_exists(zip_path)) and not transfer.auto_body then
             -- The packed copy of an attach: file is gone.  Every recipient
-            -- must get the bytes first offered (#408), so it is not packed
+            -- must get the bytes first offered (#314), so it is not packed
             -- again: the transfer and its siblings stop, marked lost, with
             -- a note in the outbox file (answers.lost).  It is kept on disk
-            -- in the mailbox now (#404f), so this means someone removed it.
+            -- in the mailbox now (#311f), so this means someone removed it.
             -- (It used to be rebuilt from the file as it was by then.)
             outbox_state = outbox_state or load_state("outbox.json")
             answers.lost(outbox_state, chunks, transfer.outbox_file, transfer.original_path)
@@ -5011,7 +5013,7 @@ local function send_next_chunks(my_name)
             goto continue
         end
         if zip_path == nil or not file_exists(zip_path) then
-            -- An oversized message body sent as an attachment (#349): its
+            -- An oversized message body sent as an attachment (#308): its
             -- zip and its source both sit in the pending folder, and if
             -- that is RAM (attachment_pending_dir = /tmp) a reboot wipes
             -- them.  Rebuilt from the source when it is still there: the
@@ -5025,7 +5027,7 @@ local function send_next_chunks(my_name)
                 new_zip, new_checksum, new_size = compress_attachment(src)
             end
             if not new_zip and new_checksum == "changed" then
-                -- The source was being written while it was packed (#404d);
+                -- The source was being written while it was packed (#311d);
                 -- compress_attachment has logged it.  The transfer is kept
                 -- and packed again on the next cycle, rather than cancelled
                 -- as a missing source is below.
@@ -5060,7 +5062,7 @@ local function send_next_chunks(my_name)
         local aborted = false
         local cancelled = false
         -- The receiver lists at most a batch of owed pieces per answer
-        -- (upload.MISSING_ANSWER, #404b); after one batch is sent, the last
+        -- (upload.MISSING_ANSWER, #311b); after one batch is sent, the last
         -- answer names the next.  Passes are bounded so a piece that keeps
         -- arriving damaged waits for the next cycle rather than looping.
         local passes = 0
@@ -5113,7 +5115,7 @@ local function send_next_chunks(my_name)
                 else
                     note_contact_result(transfer.to, false)
                     -- Chunk-specific detail dropped; reachability rolls into
-                    -- the unreachable summary (#324).
+                    -- the unreachable summary (#114).
                     aborted = true; break
                 end
             end
@@ -5126,8 +5128,8 @@ local function send_next_chunks(my_name)
         end
         f:close()
         if cancelled then
-            -- The receiver's daemon refused it mid-transfer (#404's checks):
-            -- not offered to them again (#406).  The message is untouched.
+            -- The receiver's daemon refused it mid-transfer (#311's checks):
+            -- not offered to them again (#312).  The message is untouched.
             outbox_state = outbox_state or load_state("outbox.json")
             answers.record(outbox_state, transfer, "cancelled")
             chunks[att_id] = nil
@@ -5143,11 +5145,11 @@ local function send_next_chunks(my_name)
     -- Completed transfers: the recipient's answer becomes "complete", so
     -- the file is not offered to them again, and the transfer record goes.
     -- The attach: line stays as the author wrote it: other recipients,
-    -- reached later, still get the file (#408).  It used to be removed
+    -- reached later, still get the file (#314).  It used to be removed
     -- here, by sync_outbox, on the first recipient's completion.
     for att_id, transfer in pairs(chunks) do
         if transfer.status == "complete" then
-            -- #349: auto-body transfers put their source under pending/;
+            -- #308: auto-body transfers put their source under pending/;
             -- delete it now that the last chunk has been acked.
             if transfer.auto_body and transfer.original_path
                and file_exists(transfer.original_path) then
@@ -5191,7 +5193,7 @@ local function self_delete_from_inbox(my_name, message_id)
                 log("self-delete from inbox: %s", filename)
             end
             if hooks.on_delete then run_hook(hooks.on_delete, my_name) end
-            -- #355: attachments left in place — user owns them.
+            -- #306: attachments left in place — user owns them.
             inbox_state[filename] = nil
             save_state("inbox.json", inbox_state)
             return
@@ -5264,11 +5266,11 @@ local function sync_outbox(my_name)
     -- Completed transfers left from a cycle that stopped part-way (the
     -- chunk sender normally clears them itself): the recipient's answer
     -- becomes "complete".  The attach: line is not removed -- other
-    -- recipients may still be owed the file (#408).
+    -- recipients may still be owed the file (#314).
     for att_id, transfer in pairs(att_state) do
         if transfer.status == "complete" then
             if transfer.auto_body then
-                -- #349: the auto-body source file needs cleaning up.
+                -- #308: the auto-body source file needs cleaning up.
                 if transfer.original_path
                    and file_exists(transfer.original_path) then
                     os.remove(transfer.original_path)
@@ -5286,11 +5288,11 @@ local function sync_outbox(my_name)
     local current = {}
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
 
-    -- Contact renames are a user-serviced operation (#348 reversal).  A
+    -- Contact renames are a user-serviced operation (#505 reversal).  A
     -- recipient name in state that no longer exists in contacts is
     -- simply logged as unknown; the user fixes it by renaming in
     -- contacts, updating any to: lines in the outbox file, and running
-    -- `sed -i 's/"<old>"/"<new>"/g' .state/*.json`.  See the #348
+    -- `sed -i 's/"<old>"/"<new>"/g' .state/*.json`.  See the #505
     -- issue file for the rationale.
 
     -- Phase 1: collect all pending operations
@@ -5433,8 +5435,8 @@ local function sync_outbox(my_name)
                                     recipient = rname, message_id = uuid(),
                                     subject = name, body = body,
                                     -- of the outbox body, even when an
-                                    -- oversized one goes as a stub (#349):
-                                    -- what #409 compares is the author's text
+                                    -- oversized one goes as a stub (#308):
+                                    -- what #208 compares is the author's text
                                     body_checksum = sha256_of_bytes(body or ""),
                                     mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
@@ -5450,8 +5452,8 @@ local function sync_outbox(my_name)
                         end
                     elseif contacts[rname] then
                         -- Existing recipient: offer each attached path they
-                        -- have no answer for (#406), from the one packed
-                        -- copy every recipient gets (#408).
+                        -- have no answer for (#312), from the one packed
+                        -- copy every recipient gets (#314).
                         local rmeta = state[name].recipients[rname]
                         if not rmeta.error then
                             for _, filepath in ipairs(entry.attachments) do
@@ -5574,7 +5576,7 @@ local function sync_outbox(my_name)
                     for _, fp in ipairs(e.attachments) do listed[e.name][fp] = true end
                 end
 
-                -- Withdrawn files (#406): a transfer of this message whose
+                -- Withdrawn files (#312): a transfer of this message whose
                 -- path is no longer attached for its recipient.  Seen only
                 -- when a cycle reads the file without the line -- removed
                 -- and put back between two cycles, nothing happened.  The
@@ -5644,7 +5646,7 @@ local function sync_outbox(my_name)
                     state[name].packed = nil
                 end
 
-                -- Body edits (#409).  Each recipient keeps the checksum of
+                -- Body edits (#208).  Each recipient keeps the checksum of
                 -- the body it last *answered* for, written only when its
                 -- deliver or update succeeds.  An update is owed to every
                 -- recipient whose kept checksum differs from the file's,
@@ -5656,7 +5658,7 @@ local function sync_outbox(my_name)
                 -- cycle the file's checksum already matched.
                 local current_checksum = sha256_of_bytes(body or "")
                 for _, rmeta in pairs(state[name].recipients) do
-                    -- Recipients delivered before #409 have no checksum of
+                    -- Recipients delivered before #208 have no checksum of
                     -- their own.  The file-wide one is the best record of
                     -- what they were last sent: take it, once.  (With no
                     -- file-wide one either, the recipient is owed an update,
@@ -5741,7 +5743,7 @@ local function sync_outbox(my_name)
             if op.type == "deliver" then
                 local body_size = #(op.body or "")
                 if body_size > 131072 then
-                    -- #349 auto-body-to-attachment.  The deliver payload
+                    -- #308 auto-body-to-attachment.  The deliver payload
                     -- is capped at 128 KB; larger bodies get re-routed
                     -- through the standard attachment pipeline so the
                     -- send succeeds instead of failing with an error
@@ -5837,7 +5839,7 @@ local function sync_outbox(my_name)
                     -- tied to this op via req_to_op — it shouldn't
                     -- gate the deliver's success tracking, and the
                     -- receiver's handler is idempotent on a repeat
-                    -- att_id (#346).
+                    -- att_id (#305).
                     if att_id_to_send then
                         requests[#requests + 1] = {
                             endpoints = contact_endpoints(op.contact),
@@ -5903,7 +5905,7 @@ local function sync_outbox(my_name)
                         subject = op.filename,
                         expected_size = op.expected_size}
             elseif op.type == "attachment_withdraw" then
-                -- the one-attachment cancel, going the author's way (#407)
+                -- the one-attachment cancel, going the author's way (#313)
                 path = "/deliver"
                 data = {type = "attachment_cancel",
                         attachment_id = op.att_id,
@@ -5932,7 +5934,7 @@ local function sync_outbox(my_name)
 
         -- Phase 3: process results
         for i, op in ipairs(ops) do
-            -- Record contact reachability for the cycle-end summary (#324).
+            -- Record contact reachability for the cycle-end summary (#114).
             -- 404 counts as reachable — we heard back, the recipient just
             -- said "already done on my end".
             if not op.skip then
@@ -5950,7 +5952,7 @@ local function sync_outbox(my_name)
                         did_work = true
                     end
                 end
-                -- failure: rolls into the unreachable summary (#324)
+                -- failure: rolls into the unreachable summary (#114)
             elseif op.type == "deliver" then
                 if results[i].ok then
                     if state[op.filename] then
@@ -5962,10 +5964,10 @@ local function sync_outbox(my_name)
                     log("sent: %s -> %s", op.filename, op.recipient)
                     did_work = true
                 end
-                -- failure: rolls into the unreachable summary (#324)
+                -- failure: rolls into the unreachable summary (#114)
             elseif op.type == "update" then
                 if results[i].ok then
-                    -- Only now is the edit theirs (#409).  Any other
+                    -- Only now is the edit theirs (#208).  Any other
                     -- outcome leaves the old checksum, so the update is
                     -- built again next cycle and goes out when they are due.
                     local rmeta = state[op.filename]
@@ -5981,7 +5983,7 @@ local function sync_outbox(my_name)
                     log("update 404: %s removed %s from inbox", op.recipient, op.filename)
                     did_work = true
                 end
-                -- other failures: roll into the unreachable summary (#324)
+                -- other failures: roll into the unreachable summary (#114)
             elseif op.type == "attachment_request" then
                 local transfer = att_state[op.att_id]
                 if results[i].ok then
@@ -5992,7 +5994,7 @@ local function sync_outbox(my_name)
                     -- They answered and refused (4xx/5xx): retrying the
                     -- same request will not change that.  Drop it, and
                     -- remember the refusal so the path is not offered to
-                    -- them again every cycle (#406).
+                    -- them again every cycle (#312).
                     if transfer then
                         answers.record(state, transfer, "cancelled")
                         att_state[op.att_id] = nil
@@ -6002,11 +6004,11 @@ local function sync_outbox(my_name)
                     log("attachment request to %s refused (%s): %s",
                         op.recipient, tostring(results[i].status), op.att_filename)
                 elseif transfer and transfer.request_sent ~= false then
-                    -- Not due yet (#377) or unreachable: keep the transfer
+                    -- Not due yet (#115) or unreachable: keep the transfer
                     -- and its zip and ask again next time.  This used to
                     -- delete both, so every cycle re-zipped the whole file
                     -- on the main loop -- every 30s for an unreachable
-                    -- contact, and since #377 for every contact merely
+                    -- contact, and since #115 for every contact merely
                     -- waiting on its timer.
                     transfer.request_sent = false
                     att_state_changed = true
@@ -6040,12 +6042,12 @@ local function sync_outbox(my_name)
                     log("notified %s of deletion: %s", op.recipient, op.filename)
                     did_work = true
                 end
-                -- failure: rolls into the unreachable summary (#324)
+                -- failure: rolls into the unreachable summary (#114)
             end
         end
     end
 
-    -- A message's record is going: its packed copies go with it (#408).
+    -- A message's record is going: its packed copies go with it (#314).
     local function drop_packed(name)
         for path, pk in pairs(state[name].packed or {}) do
             os.remove(pk.zip)
@@ -6119,7 +6121,7 @@ local function sync_inbox(my_name)
             end
         elseif not current[name] then
             if not meta.pending_delete then
-                -- first time: fire on_delete and mark pending.  #355:
+                -- first time: fire on_delete and mark pending.  #306:
                 -- we don't touch paths.attachments — the user owns
                 -- those files and may want to keep them even though
                 -- they cleared the message from their inbox.
@@ -6169,7 +6171,7 @@ local function sync_inbox(my_name)
                 log("notified %s of inbox deletion: %s", op.sender, op.filename)
                 did_work = true
             end
-            -- failure: rolls into the unreachable summary (#324)
+            -- failure: rolls into the unreachable summary (#114)
         end
     end
 
@@ -6342,10 +6344,10 @@ end
 -- Returns true if the probe got an answer (whether or not the address had
 -- changed), false if no provider answered at all.  The caller needs to tell
 -- those apart: "no answer" is not evidence of "no change", it is usually the
--- network being down, and #379's daily timer retries sooner on it rather
+-- network being down, and #410's daily timer retries sooner on it rather
 -- than banking a whole further day of staleness on a failed lookup.
 --
--- Note the probe cost is already what #379 asks for: check_public_ip returns
+-- Note the probe cost is already what #410 asks for: check_public_ip returns
 -- on the *first* provider that answers, so the routine case is one DNS
 -- query.  verify_ip_change only runs when the address actually differs, so
 -- the second, independent-provider query is paid only on the rare day it
@@ -6452,7 +6454,7 @@ local function sync_address_notifications(my_name)
     local pending = unmigrate_hashed_keys(
         load_state("pending-address.json"), contacts)
 
-    -- #388: an unconfirmed address notice is a claim we have not tested.
+    -- #409: an unconfirmed address notice is a claim we have not tested.
     -- Testing it needs traffic to that contact, and an idle pair generates
     -- none -- so the notice queues an announcement of our own, which is a
     -- real request over the exact path in question.  Succeeding retires the
@@ -6461,7 +6463,7 @@ local function sync_address_notifications(my_name)
     --
     -- Using our own announcement rather than a dedicated probe keeps this
     -- free of new protocol surface, and avoids leaning on /peer-address,
-    -- which #365 removes as dead code.
+    -- which #418 removes as dead code.
     local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
     if my_public and my_public ~= "" then
         for _, f in ipairs(list_notices(INBOX)) do
@@ -6502,10 +6504,10 @@ local function sync_address_notifications(my_name)
         requests[i] = {
             endpoints = contact_endpoints(op.contact),
             path = "/update-address",
-            -- #388: the set is computed now rather than read from the
+            -- #409: the set is computed now rather than read from the
             -- pending entry, so a queued announcement that sat through an
             -- address change goes out with where we are, not where we were.
-            -- ip/port stay for peers that predate #388.
+            -- ip/port stay for peers that predate #409.
             payload = json.encode({
                 ip = op.ip, port = op.port,
                 ips = pub, local_ips = loc,
@@ -6523,7 +6525,7 @@ local function sync_address_notifications(my_name)
             log("notified %s of address change", op.name)
             did_work = true
         end
-        -- failure: rolls into the unreachable summary (#324)
+        -- failure: rolls into the unreachable summary (#114)
     end
 
     save_state("pending-address.json", pending)
@@ -6558,7 +6560,7 @@ local function serialize_contacts_canonical(contacts)
         local c = contacts[name]
         local fields = {}
         -- Only persistent scalar fields belong in the canonical form. Skip
-        -- runtime-computed tables (endpoints, ips — #347) and _-prefixed
+        -- runtime-computed tables (endpoints, ips — #408) and _-prefixed
         -- helpers: tostring() on a table yields a non-deterministic
         -- "table: 0x..." that corrupts the contacts file on round-trip and
         -- makes the hash unstable across daemon reloads.
@@ -6569,7 +6571,7 @@ local function serialize_contacts_canonical(contacts)
                 vals[field] = c[field]
             end
         end
-        -- Indexed addresses (#347) and local addresses (#388) live in
+        -- Indexed addresses (#408) and local addresses (#409) live in
         -- tables after load, so the scalar pass above misses them.  They
         -- must be here anyway: this text is what the phone holds, and when
         -- the phone edits a contact it posts this text back as the whole
@@ -6649,7 +6651,7 @@ local function handle_api_sync(data, caller_name, my_name)
                 if file_exists(INBOX .. "/" .. filename) then
                     os.remove(INBOX .. "/" .. filename)
                 end
-                -- #355: attachments stay in paths.attachments; user
+                -- #306: attachments stay in paths.attachments; user
                 -- owns them.
                 if hooks.on_delete then run_hook(hooks.on_delete, meta["from"] or "") end
                 meta.pending_delete = true  -- sync_inbox will notify original sender
@@ -6757,7 +6759,7 @@ local function handle_api_get_contacts()
     return 200, "text/plain; charset=utf-8", serialize_contacts_canonical(load_contacts())
 end
 
--- ---- Saving contacts from the phone (#411) --------------------------------
+-- ---- Saving contacts from the phone (#504) --------------------------------
 --
 -- The phone holds the contacts in canonical form (serialize_contacts_canonical:
 -- one `name.key = value` line per field, sorted, no comments) and posts the
@@ -7066,7 +7068,7 @@ local function handle_api_list_attachments()
     for _, f in ipairs(list_files(paths.attachments)) do
         local path = paths.attachments .. "/" .. f
         -- A symbolic link is left out: the phone is only ever given files
-        -- that are really in this folder (#404a).  Anything else is listed.
+        -- that are really in this folder (#311a).  Anything else is listed.
         if upload.is_link(path) then goto next_file end
         local h = io.popen("wc -c < " .. shell_quote(path) .. " 2>/dev/null")
         local size = h and tonumber(h:read("*a"))
@@ -7086,7 +7088,7 @@ end
 -- {{{ upload.refuse_link
 -- The three download handlers below ask this first.  A symbolic link in
 -- attachments/ is never read through: it could name any file on this
--- computer, and before #404a a contact's zip could plant one.  Returns
+-- computer, and before #311a a contact's zip could plant one.  Returns
 -- true (and logs) when the path is a link, so the caller answers 403.
 function upload.refuse_link(path, filename)
     if upload.is_link(path) then
@@ -7178,7 +7180,7 @@ local function handle_api_attachment_chunk(filename, chunk_n)
     return 200, "application/octet-stream", data
 end
 
--- Phone-to-server uploads (#391).  A finished upload lands in the
+-- Phone-to-server uploads (#307).  A finished upload lands in the
 -- attachments directory itself, where the Files tab lists it, rather than
 -- hidden under .uploads/<id>/.  The phone zips before chunking, so the
 -- assembled file is a zip; it is unpacked here.  It used to be stored as the
@@ -7214,7 +7216,7 @@ function upload.finish(upload_id, uploads)
     end
     f:close()
 
-    -- The whole must match the phone's whole-file checksum (#404c).  Each
+    -- The whole must match the phone's whole-file checksum (#311c).  Each
     -- piece was checked on arrival, so a mismatch means the pieces the
     -- phone described are not the zip it meant.
     if sha256_file(zip) ~= u.total_checksum then
@@ -7225,10 +7227,10 @@ function upload.finish(upload_id, uploads)
     local head = (read_file_binary(zip) or ""):sub(1, 4)
     if head == "PK\3\4" then
         -- A zip, which is what the phone sends: it must hold exactly one
-        -- entry, a regular file (#404c).  More entries used to be joined
+        -- entry, a regular file (#311c).  More entries used to be joined
         -- end to end into one file; a folder or link entry has no file
         -- content to give.
-        -- The shared zip reader (#405) checks the whole structure: an
+        -- The shared zip reader (#309) checks the whole structure: an
         -- unreadable, overlapping or badly named zip is refused here.
         local listed, entries = pcall(upload.zip_reader.list, zip)
         if not listed then
@@ -7287,7 +7289,7 @@ function upload.finish(upload_id, uploads)
 end
 
 -- {{{ upload.checksums_from
--- The checksums a phone upload must declare (#404c), read from a start or
+-- The checksums a phone upload must declare (#311c), read from a start or
 -- resume request:
 --   chunk_checksums  object {"0": hex, "1": hex, ...}, one per piece
 --   total_checksum   hex, SHA-256 of the pieces joined in order (the zip)
@@ -7354,7 +7356,7 @@ function upload.chunk(upload_id, chunk_n, body)
         return 400, {error = "chunk index out of range"}
     end
     -- Each piece is checked against the checksum the phone declared before
-    -- it is written (#404c).  A record without checksums was made before
+    -- it is written (#311c).  A record without checksums was made before
     -- they were required; the phone resumes before sending, which adds
     -- them, so this only meets a client that skips resume.
     if type(u.chunk_checksums) ~= "table" then
@@ -7509,7 +7511,7 @@ local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
     local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
     for name, c in pairs(contacts) do
         if resolve_contact_host(c.ip) == my_public_ip and c.token and c.port then
-            -- #393: no name in the packet.  The receiver knows who sent it
+            -- #417: no name in the packet.  The receiver knows who sent it
             -- from which contact's token opens it, and files the address
             -- under its own name for that contact.
             local payload = "RMAIL-DISCOVER " .. my_port .. " " .. my_lan_ip
@@ -7542,7 +7544,7 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
             local plaintext = decrypt_packet(key, data)
             if plaintext then
                 local disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%d+)%s+(%S+)$")
-                -- #393: the token that decrypted this packet is what says
+                -- #417: the token that decrypted this packet is what says
                 -- who sent it, so the address is filed under OUR name for
                 -- that contact -- the name every lookup uses.  The packet
                 -- carries no name of its own: a name chosen on the sender's
@@ -7563,7 +7565,7 @@ local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_n
                 end
                 local here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)$")
                 if here_lan_ip then
-                    lan_peers[name] = here_lan_ip  -- #393: see the request branch
+                    lan_peers[name] = here_lan_ip  -- #417: see the request branch
                     log("LAN discovery: %s is at %s (received response)", name, here_lan_ip)
                     return
                 end
@@ -7594,7 +7596,7 @@ local function do_on_connection_timeout(rt, host, target_port)
         if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) and c.token then
             if rt.lan.discovery_sent[name] then return end
             rt.lan.discovery_sent[name] = true
-            local payload = "RMAIL-DISCOVER " .. rt.port .. " " .. my_lan_ip  -- #393: no name
+            local payload = "RMAIL-DISCOVER " .. rt.port .. " " .. my_lan_ip  -- #417: no name
             local key = derive_key(c.token)
             local encrypted = encrypt_packet(key, payload)
             if encrypted then
@@ -7648,7 +7650,7 @@ local function handle_request(rt, client, preread)
         -- rmail spoke TLS and this answer travelled inside it; when
         -- encryption moved into each frame, commit 60d309e kept the answer
         -- in the clear and the name came with it, published to anyone who
-        -- asked.  Nothing read it.  Dropped 2026-10-04, #410.)
+        -- asked.  Nothing read it.  Dropped 2026-10-04, #106.)
         if first4 == "GET " then
             while true do
                 local line = client:receive("*l")
@@ -7684,7 +7686,7 @@ local function handle_request(rt, client, preread)
         end
         if not plaintext then log("decryption failed: no matching contact key"); return end
 
-        -- #377 requirement 3: a contact who talks to us is demonstrably
+        -- #115 requirement 3: a contact who talks to us is demonstrably
         -- alive, so drop their backoff to the floor and mark them due now.
         -- Their reply then goes out on the next loop pass instead of up to
         -- two hours later, which is what gives two online peers push-like
@@ -7840,13 +7842,13 @@ local function handle_request(rt, client, preread)
                 fn = path:match("^/api/attachments/(.+)/chunk/(%d+)$")
                 local cn = tonumber(path:match("/chunk/(%d+)$"))
                 local s, ct, c = handle_api_attachment_chunk(fn, cn)
-                -- bytes: sent; 403: a link (#404a); anything else: not there
+                -- bytes: sent; 403: a link (#311a); anything else: not there
                 if ct then send_raw_response(resp, s, ct, c)
                 else send_response(resp, s, {error = s == 403 and "symbolic links are not served" or "not found"}) end
             elseif method == "GET" and path:match("^/api/attachments/(.+)$") then
                 fn = path:match("^/api/attachments/(.+)$")
                 local s, ct, c = handle_api_get_attachment(fn)
-                -- bytes: sent; 403: a link (#404a); anything else: not there
+                -- bytes: sent; 403: a link (#311a); anything else: not there
                 if ct then send_raw_response(resp, s, ct, c)
                 else send_response(resp, s, {error = s == 403 and "symbolic links are not served" or "not found"}) end
             elseif method == "DELETE" and path:match("^/api/attachments/(.+)$") then
@@ -7895,7 +7897,7 @@ local function run_sync_cycle(rt)
     local w7 = send_attachment_cancellations(rt.my_name)
     write_transfers_file(load_state("chunks-outgoing.json"))
 
-    -- #377: a contact who was due but had nothing queued this cycle still
+    -- #115: a contact who was due but had nothing queued this cycle still
     -- needs their timer moved on.  Their ops never reach the gate -- an
     -- op-less contact builds no request at all -- so nothing above has
     -- touched their due time, and leaving it in the past would make them
@@ -7913,7 +7915,7 @@ local function run_sync_cycle(rt)
     for name, reached in pairs(ctimer.outcome) do
         if reached then
             ctimer.mark_success(name, now)
-            -- #388: an address-change notice is a claim that this contact
+            -- #409: an address-change notice is a claim that this contact
             -- has moved.  What retires the claim is *using* the new address
             -- successfully -- we just did, so the notice has served its
             -- purpose and becomes noise.
@@ -7955,7 +7957,7 @@ local function run_sync_cycle(rt)
     end
 
     -- One summary log for contacts whose every op failed this cycle
-    -- (#324), instead of a separate "failed to X" line per queued op.
+    -- (#114), instead of a separate "failed to X" line per queued op.
     -- Also clears the per-cycle attempted/skipped sets, so it has to run
     -- after the sweep above reads them.
     flush_unreachable_summary()
@@ -7981,7 +7983,7 @@ end
 -- Init runtime — setup, validation, returns state table
 -- ============================================================
 
--- ---- #379: periodic re-detection of our own address ---------------------
+-- ---- #410: periodic re-detection of our own address ---------------------
 --
 -- detect_ip_change and its two siblings ran exactly once, from init_runtime,
 -- and nowhere else.  A daemon whose normal state is to run for months could
@@ -8072,7 +8074,7 @@ local function init_runtime()
     -- a config that was unreadable or had the key misspelled, and what
     -- it did then was put the daemon on a port that belongs to somebody
     -- else's mailbox.  Two daemons, one port, and the second one dies
-    -- inside socket.bind with nothing explaining why.  See #382.
+    -- inside socket.bind with nothing explaining why.  See #102.
     local configured_port = tonumber(config.port)
     if not configured_port then
         if config.port == nil then
@@ -8090,7 +8092,7 @@ local function init_runtime()
         os.exit(1)
     end
     -- zip and unzip are no longer needed: attachments are packed and read
-    -- by the shared zip library in libs/ (#405).
+    -- by the shared zip library in libs/ (#309).
     align_contacts()
 
     local rt = {
@@ -8098,7 +8100,7 @@ local function init_runtime()
         port         = configured_port,
         nat_mapping  = nil,
         -- interval/min_interval/max_interval used to live here: one global
-        -- cadence for every contact.  Replaced by per-contact timers (#377);
+        -- cadence for every contact.  Replaced by per-contact timers (#115);
         -- see the `ctimer` table.  last_sync is kept only so an inotify
         -- trigger can still tell how long it has been since the last cycle.
         last_sync    = socket.gettime(),
@@ -8112,7 +8114,7 @@ local function init_runtime()
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
 
-    -- Which of dkjson's two decoders this run is on (#403).  dkjson decides
+    -- Which of dkjson's two decoders this run is on (#104).  dkjson decides
     -- by itself, once, while loading: it tries to switch to its LPeg decoder
     -- (LPeg is a C text-matching library; faster on large texts) and stays
     -- on its plain-Lua decoder if that fails.  Both give the same tables for
@@ -8256,13 +8258,13 @@ local function init_runtime()
     pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(detect_ipv6_change, rt.my_name, rt.port)
     pcall(check_lan_ip_change, rt.port)
-    -- #377 requirement 1, the startup ping itself: tell every contact where
+    -- #115 requirement 1, the startup ping itself: tell every contact where
     -- we are, at boot.  Deliberately not a new mechanism -- it queues the
     -- same pending-address entry that a detected IP change queues, so it
     -- travels as an ordinary /update-address op through the ordinary sync
     -- cycle.  "Hi, I'm still here, at this location."
     --
-    -- This matters most for the case that motivated #379: a contact whose
+    -- This matters most for the case that motivated #410: a contact whose
     -- stored address for us went stale has no way to ask, and we are the
     -- only party who can tell them.  Announcing unprompted at boot means a
     -- restart is a full repair, not just a re-detection.
@@ -8297,7 +8299,7 @@ local function init_runtime()
     -- With no contacts, the mailbox's own timer stands in (also due now).
     ctimer.refresh_self(load_contacts(), rt.my_name)
 
-    -- Arm the daily re-check (#379).  Redrawn on boot rather than persisted:
+    -- Arm the daily re-check (#410).  Redrawn on boot rather than persisted:
     -- simpler, and it means a restart loop cannot pin the probe to one time
     -- of day.  The startup checks above have just run, so the first timed
     -- one is a full draw away.
@@ -8484,14 +8486,14 @@ local function main()
         end
 
         -- Sleep until: a socket has data, an outbox file changes, it's time
-        -- for the next sync cycle, or the daily address re-check (#379) comes
+        -- for the next sync cycle, or the daily address re-check (#410) comes
         -- due.  No wasted wakeups -- which is why the address timer has to be
         -- part of this calculation rather than checked opportunistically: an
         -- idle daemon can sit in select() for the whole sync interval, and a
         -- check that only runs when something else happens to wake us is a
         -- check that does not run on a quiet machine.
         local now_s = socket.gettime()
-        -- #377: sleep until the *earliest* contact comes due, not until one
+        -- #115: sleep until the *earliest* contact comes due, not until one
         -- global interval elapses.  A backed-off contact no longer drags the
         -- others' cadence with it, and a chatty one no longer pins everyone
         -- to the floor.  A mailbox with no contacts keeps its own timer

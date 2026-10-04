@@ -3,12 +3,12 @@
 #
 # Two things the receiving side does since 2026-10-04:
 #
-#   - a sender can withdraw an attachment it offered (issues #406, #407):
+#   - a sender can withdraw an attachment it offered (issues #312, #313):
 #     one "this attachment is cancelled" message, naming the attachment.
 #     The receiver throws away the pieces and the consent form, leaves a
 #     note saying the file was withdrawn, and touches nothing else;
 #   - pieces of an arriving attachment wait on disk, in a hidden folder
-#     inside the mailbox, not in /tmp (#404f).  A transfer survives a
+#     inside the mailbox, not in /tmp (#311f).  A transfer survives a
 #     restart and finishes from where it stopped, with no new consent.  At
 #     start-up, pieces and packed copies no record holds are swept away.
 #

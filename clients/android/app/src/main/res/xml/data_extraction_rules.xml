@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Nothing leaves the phone by way of Android backup (#392 B19).  The app's
+  Nothing leaves the phone by way of Android backup (#826 B19).  The app's
   storage holds each mailbox's token, the key that encrypts its traffic,
   along with the mail itself.  allowBackup="false" covers cloud backup; these
   rules also cover Android 12+'s device-to-device transfer, which ignores it.

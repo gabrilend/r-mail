@@ -5,7 +5,7 @@
 # This one is the control: two real mailboxes on this machine, a message
 # with an attachment big enough to go in several pieces, the receiving
 # owner saying yes, and the file arriving byte for byte.  It exists so the
-# checks added in 2026-09-29 (issue #404: required checksums, a pinned
+# checks added in 2026-09-29 (issue #311: required checksums, a pinned
 # piece count and length, the unpacked-size limit, links turned into
 # notes) are proven not to stop an honest sender.
 #
@@ -13,7 +13,7 @@
 #   a 40 KB file cut into 16 KiB pieces (attachment_chunk_size), so three
 #   pieces with a shorter last one -- the shape the pinning rules check;
 #   the same file cut into 256-byte pieces, about 157 of them.  The
-#   receiver lists at most 64 owed pieces per answer (#404b), so the sender
+#   receiver lists at most 64 owed pieces per answer (#311b), so the sender
 #   must follow the answers batch by batch; and there is no smallest piece.
 #
 # Usage:

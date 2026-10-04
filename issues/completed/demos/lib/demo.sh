@@ -37,6 +37,7 @@ show()    { printf "    %s\n" "$*"; }
 # first plain argument for a script's name and the rest shift by one.)
 now_ms() {
     "$LUA" - "$DIR" <<'LUA'
+package.path = arg[1] .. "/libs/?.lua;" .. package.path
 package.cpath = arg[1] .. "/libs/?.so;" .. package.cpath
 print(math.floor(require("socket").gettime() * 1000))
 LUA
@@ -117,6 +118,12 @@ run_tests() {
         _out="$DEMO_WORK/test-$(basename "$_t" .sh).out"
         "$DIR/scripts/$_t" > "$_out" 2>&1
         _p=$(grep -c '\[32mok' "$_out"); _f=$(grep -c '\[31m--' "$_out")
+        # a test that prints only a total ("23 passed, 0 failed")
+        if [ "$_p" -eq 0 ] && [ "$_f" -eq 0 ]; then
+            _p=$(sed -n 's/.* \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed.*/\1/p' "$_out" | tail -1)
+            _f=$(sed -n 's/.* \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed.*/\2/p' "$_out" | tail -1)
+            _p=${_p:-0}; _f=${_f:-0}
+        fi
         _pass=$((_pass + _p)); _fail=$((_fail + _f))
         if [ "$_f" -eq 0 ]; then
             printf "    ${G}%3d checks passed${N}  %s\n" "$_p" "$_t"

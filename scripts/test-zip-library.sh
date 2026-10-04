@@ -2,7 +2,7 @@
 # test-zip-library.sh — check that rmail's copy of the shared zip library is the library, and that it works on rmail's Lua
 #
 # rmail packs and reads attachment zips with the shared zip library
-# (my-libs/zip, rmail #405), carried as a copy in libs/ so rmail still
+# (my-libs/zip, rmail #309), carried as a copy in libs/ so rmail still
 # works when installed on a machine without my-libs.  A copy can drift: an
 # edit made here, or the library moving on without the copy being made
 # again.  This test fails on either, and then runs the library's own

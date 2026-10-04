@@ -1,6 +1,6 @@
 -- zip-reader.lua — reading a received zip: every structural rule checked
 -- before a byte is made, then each entry made under the meter (my-libs
--- issue 801; built for rao-chat issue 216e, shared with rmail #405).
+-- issue 801; built for rao-chat issue 216e, shared with rmail #309).
 --
 -- A zip is read from its end: the end record points at the central
 -- directory (one header per entry: name, sizes, CRC, where its data
@@ -359,7 +359,7 @@ end
 -- }}}
 
 -- {{{ local function note_text
--- A link's note, two lines, word for word as rmail #404a first wrote it:
+-- A link's note, two lines, word for word as rmail #311a first wrote it:
 -- where it pointed, as one readable line (control bytes and backslashes
 -- shown as \xNN in capitals), then why it was not made.
 local function note_text(target)

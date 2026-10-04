@@ -4,7 +4,7 @@
 # Before a contact sends an attachment, the owner is shown its declared
 # size and says yes or no.  The file then arrives packed in a zip.  The
 # packed bytes have been counted against the declared size since issue
-# #327, but a zip is a box of compressed streams, and a megabyte of zeros
+# #310, but a zip is a box of compressed streams, and a megabyte of zeros
 # packs into about a kilobyte: a small zip, well within the packed limit,
 # could unpack into gigabytes and fill the disk (a "zip bomb").
 #

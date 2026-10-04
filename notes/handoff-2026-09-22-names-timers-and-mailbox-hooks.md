@@ -9,9 +9,9 @@ live with this project.  The conversation itself is in
 
 | Commit | What |
 |---|---|
-| 7efbdba | Contacts tidy-up after a sync; home-network search files an address under the local contact name (#393); separate self-address word (#394) |
-| 671d098 | #394 reverted at the owner's request: `name` both labels the mailbox and means "me" on a `to:` line.  Kept #393 and the tidy-up.  Opened #395 (pinned) |
-| 12861e4 | Search packets carry no name at all (incompatible; the owner is upgrading every machine).  A mailbox with no contacts keeps one timer of its own (#377 follow-up) |
+| 7efbdba | Contacts tidy-up after a sync; home-network search files an address under the local contact name (#417); separate self-address word (#502) |
+| 671d098 | #502 reverted at the owner's request: `name` both labels the mailbox and means "me" on a `to:` line.  Kept #417 and the tidy-up.  Opened #506 (pinned) |
+| 12861e4 | Search packets carry no name at all (incompatible; the owner is upgrading every machine).  A mailbox with no contacts keeps one timer of its own (#115 follow-up) |
 
 Tests: `scripts/test-mailbox-selection.sh` and
 `scripts/test-lan-discovery-names.sh` both pass.  The daemons running as
@@ -20,18 +20,18 @@ services (`kuvalu-mail` on 8025 for `~/mail`, `kuvalu-notes` on 8026 for
 
 ## Open, in this repository
 
-- **#396** — outbox changes made during a sync lose their file-change
+- **#119** — outbox changes made during a sync lose their file-change
   notice and wait for a timer.  Question to the owner: honour them?
-- **#395** — pinned: tell the owner when a contact names itself
+- **#506** — pinned: tell the owner when a contact names itself
   differently; never rewrite `contacts` unasked.
 - **Main mailbox error loop.** `/tmp/kuvalu-mail.log` repeated
   "sync error: rmail.lua:302 (was :271) bad argument #1 to 'open' (string
   expected, got nil)" thousands of times, starting 14:02 right after
   "consent granted by sorelu for victory-garden.jpg".  A file-exists check
   is handed a nil path somewhere in the attachment path.  Not investigated
-  further; likely #391 territory.  Check whether it survives the restart.
+  further; likely #307 territory.  Check whether it survives the restart.
   **Resolved 2026-09-23.**  It survived the restart (over a million lines).
-  Cause: an April transfer record from before the #348 revert, carrying a
+  Cause: an April transfer record from before the #505 revert, carrying a
   zip_id and no compressed_path, reached the chunk sender once sorelu
   consented.  Fixed in code, covered by
   `scripts/test-stale-transfer-records.sh`; the record was removed from

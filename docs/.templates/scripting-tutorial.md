@@ -91,7 +91,7 @@ or not yet due when the author edits receives the newest version once
 reached.
 
 Hook paths: a relative path is read from the folder holding the config file
-(`./hooks/on_receive.sh` means this mailbox's copy, #382), a leading `~` is
+(`./hooks/on_receive.sh` means this mailbox's copy, #102), a leading `~` is
 your home folder, an absolute path is used as it is, and `""` turns the hook
 off.
 
@@ -347,7 +347,7 @@ nothing — or, for `on_update`, print the old body.
 
 ## Patterns
 
-Hooks combine with living messages (see #306) to build behaviours rmail
+Hooks combine with living messages (see #207) to build behaviours rmail
 doesn't ship natively.  The one worked out below is a **periodic** — a
 self-scheduling task that ticks down each sync cycle and fires when the
 timer hits zero.  Two other substantial pattern collections live in
@@ -499,7 +499,7 @@ creating new outbox messages addressed to other contacts.
   Then in config: `on_receive_raw = ~/mail/hooks/wrap`. Recompile
   after editing the source.
 - A message body over 128 KB is sent as an attachment automatically (a stub
-  body and a consent form; #349), which keeps `$3` in `on_receive_raw` and
+  body and a consent form; #308), which keeps `$3` in `on_receive_raw` and
   `on_send` a manageable size that won't hit OS argument length limits.  An
   edit (update) has no such cap, so `on_update`'s and `on_send`'s `$3` can be
   larger for an edited message.

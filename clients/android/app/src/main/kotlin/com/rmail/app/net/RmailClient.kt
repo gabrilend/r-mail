@@ -58,7 +58,7 @@ class RmailClient(
         // work (attachment probes, batch delivery, living-message
         // updates) and the previous 10 s budget triggered transient
         // "read timed out" errors that always resolved on the next sync
-        // (#320).  30 s is a better balance: rare to hit when things are
+        // (#811).  30 s is a better balance: rare to hit when things are
         // working, still fast enough to surface a truly dead server.
         s.soTimeout = 30_000
         sock = s
@@ -610,7 +610,7 @@ class RmailClient(
                 put("chunk_checksums", cs)
                 // SHA-256 of the whole zip (the pieces joined in order).  The
                 // daemon checks each piece against chunk_checksums as it
-                // arrives and the joined whole against this (#404c); it
+                // arrives and the joined whole against this (#311c); it
                 // refuses a resume without it.
                 put("total_checksum", totalChecksum)
             }

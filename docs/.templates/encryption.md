@@ -68,10 +68,10 @@ the message's approximate plaintext size to byte precision. That's a genuine
 gap for short, patterned messages ("ok", "see you at 3pm") where the length
 itself is revealing. Two follow-ups track the fix:
 
-- **#366** — add randomized padding inside the encrypted frame so message
+- **#901** — add randomized padding inside the encrypted frame so message
   sizes fall into coarse buckets instead of leaking exactly.
-- **#367** — a hook-based technique for sending the body as a fixed-chunk
-  attachment when you want stronger size normalization than #366 provides.
+- **#902** — a hook-based technique for sending the body as a fixed-chunk
+  attachment when you want stronger size normalization than #901 provides.
 
 See "Mitigating traffic analysis" below for what you can do today via hooks.
 
@@ -214,7 +214,7 @@ outside there's a symmetric trickle of traffic in both directions.
 The hook below pads short bodies up to a fixed target length. **Note** that
 it passes messages longer than the target through unchanged — for long
 messages it's a no-op, and the plaintext size still leaks. For stronger
-size obfuscation see #366 (in-frame padding, under development) and #367
+size obfuscation see #901 (in-frame padding, under development) and #902
 (body-as-attachment padding for long messages).
 
 ```sh
@@ -401,7 +401,7 @@ Two approaches that actually work:
 running with a read-only root partition. The rmail program and its libraries
 live on the read-only partition.  The mailbox (inbox, outbox, attachments,
 contacts) is on a separate writable partition — and since the mailbox became
-the installation (#382), so are its `config` and the **hook scripts** it
+the installation (#102), so are its `config` and the **hook scripts** it
 names, which are programs rmail runs.  The daemon also rewrites `contacts`
 itself, so the mailbox cannot be read-only.  If an attacker exploits rmail,
 they can read and write messages and they *can* change or add a hook script,
@@ -491,7 +491,7 @@ bastard took my wallet" heh what a rascal. I didn't know squirrels could do that
 
 | Layer | Protection | Limitation |
 |-------|-----------|------------|
-| Wire encryption | AES-256-GCM, random nonces | Length header in cleartext leaks approximate plaintext size (see #366) |
+| Wire encryption | AES-256-GCM, random nonces | Length header in cleartext leaks approximate plaintext size (see #901) |
 | Authentication | Trial decryption with shared token | Only proves "knows the token" |
 | Metadata | No unencrypted headers in messages | IP addresses and timing visible |
 | Replay | None | A recorded packet can be sent again and is acted on |

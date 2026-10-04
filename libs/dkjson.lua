@@ -600,7 +600,7 @@ end
 function json.use_lpeg ()
   local g = require ("lpeg")
 
-  -- rmail change, 2026-09-29 (rmail issue #403): LPeg 0.x exposes
+  -- rmail change, 2026-09-29 (rmail issue #104): LPeg 0.x exposes
   -- `version` as a function, LPeg 1.0 and later as a plain string
   -- ("LPeg 1.1.0").  The original line called it unconditionally, which
   -- raised on every modern LPeg; the pcall at the bottom of this file
@@ -715,7 +715,7 @@ function json.use_lpeg ()
   return json -- so you can get the module using json = require "dkjson".use_lpeg()
 end
 
--- rmail change, 2026-09-29 (rmail issue #403): the original discarded
+-- rmail change, 2026-09-29 (rmail issue #104): the original discarded
 -- this pcall's result, so the reason LPeg was not used (not installed,
 -- the 0.11 refusal, or a bug like the version check above) was lost.
 -- It is kept in json.lpeg_unused_reason so the caller can say which

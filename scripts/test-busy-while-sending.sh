@@ -6,7 +6,7 @@
 # something to send the other both waited out their 8-second limit, both
 # backed off, and then -- each handling the other's late request, which
 # makes the other due at once -- dialed each other at the same instant
-# again, every few seconds, for as long as both had mail (#387).
+# again, every few seconds, for as long as both had mail (#120).
 #
 # Now, while a batch waits, a caller it is dialing gets an immediate sealed
 # "503 busy" (retry soon, no backoff), and any other caller is held and

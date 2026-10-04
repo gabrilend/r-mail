@@ -3,7 +3,7 @@
 #
 # One message can go to several people with a file attached.  Until
 # 2026-10-04 the sending daemon kept one record for the file, not one per
-# person (issues #406, #407, #408):
+# person (issues #312, #313, #314):
 #
 #   - when the first recipient finished, the attach: line was removed, so
 #     someone reached later got the text and never the file;

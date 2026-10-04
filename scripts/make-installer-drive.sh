@@ -1,7 +1,7 @@
 #!/bin/sh
 # make-installer-drive.sh — populate a USB drive with a portable rmail installer.
 #
-# Implements issue #361.  The resulting drive looks like:
+# Implements issue #618.  The resulting drive looks like:
 #
 #   /install.sh       # thin wrapper that execs source-code/scripts/install.sh
 #   /README.md        # "plug in, run ./install.sh" instructions

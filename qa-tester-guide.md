@@ -589,8 +589,8 @@ cat ~/rmail-test/alice/inbox/question
 
 ### Covers checkboxes in q-a-tests.md
 
-- §3 "Living messages — edits propagate (#306)" — bullets 1, 2, 3
-- §3 "Delete/edit race conditions (#323)" — bullets 3, 4, 5
+- §3 "Living messages — edits propagate (#207)" — bullets 1, 2, 3
+- §3 "Delete/edit race conditions (#210)" — bullets 3, 4, 5
 
 ---
 
@@ -725,8 +725,8 @@ running — she'll be useful for later walkthroughs too.
 ### Covers checkboxes in q-a-tests.md
 
 - §3 "Outbox file watching" — third bullet (drain works)
-- §3 "Living messages — edits propagate (#306)" — recipient-removal bullet
-- §3 "Delete/edit race conditions (#323)" — receiver-delete bullets
+- §3 "Living messages — edits propagate (#207)" — recipient-removal bullet
+- §3 "Delete/edit race conditions (#210)" — receiver-delete bullets
 
 ---
 
@@ -892,7 +892,7 @@ sender.
 
 ### Covers checkboxes in q-a-tests.md
 
-- §3 "Duplicate filename prevention (#315)" — different-senders bullet
+- §3 "Duplicate filename prevention (#814)" — different-senders bullet
 
 ---
 
@@ -1021,11 +1021,11 @@ echo "hello world" > ~/rmail-test/attachments-source/greeting.txt
 
 ### Covers checkboxes in q-a-tests.md
 
-- §2 "raccept / rdeny helpers (#332)" — the consent-file behaviour
+- §2 "raccept / rdeny helpers (#706)" — the consent-file behaviour
   bullets (manually exercised here; walkthrough 8 uses the helper
   scripts)
-- §4 "Chunk handling (#202)"
-- §5 "Oversized transfer rejection (#327)" — not the oversized
+- §4 "Chunk handling (#303)"
+- §5 "Oversized transfer rejection (#310)" — not the oversized
   bullet specifically, but the general chunk pipeline
 
 ---
@@ -1075,12 +1075,12 @@ echo "cherry" > ~/rmail-test/attachments-source/fruit-c.txt
 | # | Observation | Pass | Fail | Blocked | N/A | Notes |
 |---|---|---|---|---|---|---|
 | 1 | Alice's terminal logs a clear "file not found" / "missing attachment" style message naming the bad path | ☐ | ☐ | ☐ | ☐ | |
-| 2 | Alice's outbox `broken` file gains a `// MISSING ATTACHMENT:` comment line under the bad `attach:` line (see issue #363) | ☐ | ☐ | ☐ | ☐ | |
+| 2 | Alice's outbox `broken` file gains a `// MISSING ATTACHMENT:` comment line under the bad `attach:` line (see issue #202) | ☐ | ☐ | ☐ | ☐ | |
 | 3 | The message body still arrives at bob (bob's inbox has `broken` with body `Here's a file that doesn't exist.`) | ☐ | ☐ | ☐ | ☐ | |
 | 4 | The daemon does **not** retry the missing attach every 30 s in a loop — the warning appears once (or a small number of times) then stops | ☐ | ☐ | ☐ | ☐ | |
 
 **Note for tester**: if you see the daemon retrying the missing
-attach endlessly, that's the bug described in issue #363 part (b)
+attach endlessly, that's the bug described in issue #202 part (b)
 — mark it Fail and report, but keep going.
 
 ### Test 6.2 — Glob expansion (`*.txt`)
@@ -1184,12 +1184,12 @@ attach endlessly, that's the bug described in issue #363 part (b)
 
 ### Covers checkboxes in q-a-tests.md
 
-- §4 "attach: paths (#101)"
-- §4 "attach: glob expansion (#362)" — all the glob bullets
-- §5 "Auto-body: oversized message bodies (#349)"
-- §5 "list_files skips directories (#356)" — partial (the attach
+- §4 "attach: paths (#203)"
+- §4 "attach: glob expansion (#204)" — all the glob bullets
+- §5 "Auto-body: oversized message bodies (#308)"
+- §5 "list_files skips directories (#205)" — partial (the attach
   pipeline testing exercises the file-vs-dir discrimination)
-- Issue #363 parts (b) and (c) — missing-file detection, quoted-
+- Issue #202 parts (b) and (c) — missing-file detection, quoted-
   path parsing
 
 ---
@@ -1336,8 +1336,8 @@ And put back the `on_receive` line in alice's config.
 
 ### Covers checkboxes in q-a-tests.md
 
-- §2 "Hook config format (#325)" — all four bullets
-- §3 "On_update hook (#306)" — partial (no update flow here; see
+- §2 "Hook config format (#213)" — all four bullets
+- §3 "On_update hook (#207)" — partial (no update flow here; see
   walkthrough 2 for that)
 
 ---
@@ -1459,10 +1459,10 @@ executable: `chmod +x helpers/*.sh`.
 
 ### Covers checkboxes in q-a-tests.md
 
-- §2 "Helper scripts (#326)" — both bullets
-- §2 "rto / rattach helpers (#330, #331)" — all four bullets
-- §2 "raccept / rdeny helpers (#332)" — all three bullets
-- Issue #364 — rfield takes contacts file as first arg
+- §2 "Helper scripts (#702)" — both bullets
+- §2 "rto / rattach helpers (#704, #705)" — all four bullets
+- §2 "raccept / rdeny helpers (#706)" — all three bullets
+- Issue #703 — rfield takes contacts file as first arg
 
 ---
 
@@ -1473,13 +1473,13 @@ finish 1-8 and have time, flag that you're ready for these.  Some
 require extra setup (a phone, a flash drive, a second machine) that
 will be called out in the walkthrough text.
 
-- **Walkthrough 9 — Multi-IP contacts (#347).**  Testing the
+- **Walkthrough 9 — Multi-IP contacts (#408).**  Testing the
   "contact has several possible IPs, daemon tries each and promotes
   the winner" feature.  Single-box, no extra hardware.
 - **Walkthrough 10 — Android companion app.**  Needs an Android
   phone on the same network.  Tests the pairing flow, sync, compose
   on phone, attachment handling on phone.
-- **Walkthrough 11 — Portable USB mailbox drive (#339, #361).**
+- **Walkthrough 11 — Portable USB mailbox drive (#616, #618).**
   Needs a USB flash drive.  Tests the generator scripts and the
   plug-and-run mailbox.
 - **Walkthrough 12 — Cross-network / public-IP tests.**  Requires

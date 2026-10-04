@@ -58,7 +58,8 @@ t0=$(now_ms)
 mv "$BOX_home/outbox/.garden" "$BOX_home/outbox/garden"
 wait_for 60 '[ -f "$DEMO_WORK/alice/inbox/garden" ]'
 t1=$(now_ms)
-show "arrived $((t1 - t0)) ms after it was saved (the outbox watcher woke the daemon)"
+show "arrived $((t1 - t0)) ms after it was saved: the outbox watcher woke the daemon at once,"
+show "and the message went when alice's timer came due (every 30 s +/- 30 while she answers)"
 show "what alice's inbox file holds:"
 sed 's/^/      | /' "$DEMO_WORK/alice/inbox/garden"
 events message | while read -r subject mtime bytes frame; do

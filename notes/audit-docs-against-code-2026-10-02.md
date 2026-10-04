@@ -14,7 +14,7 @@ everything here is "by reading".  Four findings were checked again by
 hand (marked ✓).  Line numbers are rmail.lua's unless named, as of
 commit 15897a4.
 
-Issues opened from it: #406–#411 (the code bugs); the document fixes
+Issues opened from it: #312–#504 (the code bugs); the document fixes
 were made in the templates the same day.
 
 ## Editing
@@ -25,7 +25,7 @@ README:40, is the closest).  As shipped, only the author's edits travel:
 (5145-5182); a recipient's edit to an inbox file is never sent
 (`sync_inbox` looks only for deletions, 5540-5577) and is overwritten by
 the author's next edit (`handle_deliver_update`, 2289-2291).  Two-way
-"shared files" was tried and rejected (#352); `helpers/shared.lua` is
+"shared files" was tried and rejected (#708); `helpers/shared.lua` is
 gone.
 
 ## 1. Data loss, security, consent
@@ -37,28 +37,28 @@ gone.
    remover runs on completion, 4871), so the next cycle sends a fresh
    request under a new id (5070-5127) and the receiver gets a new consent
    form each time.  The receiver's form is removed, not replaced (3878).
-   → #406.
+   → #312.
 2. ✓ **Cancelling or refusing an attachment removes the recipient from
    the message.**  Template 238-239: "The sender's daemon is notified
    automatically and stops sending."  The receiver's cancel (user cancel,
    oversize, bad zip) is sent as `/delete` with the *message's* id
    (3920-3926; `refuse_transfer` 4078-4086); the sender's `handle_delete`
    strikes the `to:` line, fires `on_delete` and deletes the outbox file
-   when it was the last recipient (2468-2495, 2394-2396).  → #407.
+   when it was the last recipient (2468-2495, 2394-2396).  → #313.
 3. ✓ **One recipient finishing takes the file from the others.**
    Template 23: "Both alice and bob get photo.jpg."  When any recipient's
    transfer completes, the shared `attach:` line is removed
    (4856-4874 → `remove_attach_from_file` 3553-3571); transfers for a
-   recipient start only after its body is delivered (5042-5127).  → #408.
+   recipient start only after its body is delivered (5042-5127).  → #314.
 4. **Edits are lost when the contact is not due or not reached.**
    `state[name].body_checksum` is saved while the update is built,
    before it is sent (5182); a withheld or failed update (the per-contact
-   gate, 3101-3103) is never retried.  #374's "Found while verifying"
-   reports the same.  → #409.
+   gate, 3101-3103) is never retried.  #211's "Found while verifying"
+   reports the same.  → #208.
 5. ✓ **"Your name is not sent in cleartext" is false.**  encryption
    template 80, 97, 472; README:316.  The plaintext health check answers
    anyone with `{"ok":true,"name":<name>}` (6794-6803); install.sh 876-878
-   admits it.  → #410.
+   admits it.  → #106.
 6. **Replays are not prevented, and the documents do not say so.**
    encryption template 113-116 says an attacker cannot "change a message"
    or "send fake messages".  No nonce tracking, counters or times
@@ -70,7 +70,7 @@ gone.
    post a replacement (6189-6204) — expected (owner).  Not expected: the
    phone is sent the contacts in canonical form (sorted, no comments;
    5979), and a save from the phone writes that text over `contacts` as
-   it is, so every `//` comment is lost (checked by hand).  → #411.
+   it is, so every `//` comment is lost (checked by hand).  → #504.
 8. **The router "security check" opens a port.**  nat-traversal template
    351-361 and README:290 say it probes.  When UPnP answers it adds a TCP
    mapping (port 60000+time%4000) and deletes it (1999-2005), at every
@@ -98,7 +98,7 @@ gone.
 ## 2. Timestamps
 
 1. Received messages take the sender's outbox-file modification time
-   (#374), sent as `mtime` in deliver and update (5030, 5175, 5359, 5371),
+   (#211), sent as `mtime` in deliver and update (5030, 5175, 5359, 5371),
    applied with `touch -m -d @N` clamped to 2001-09-09..2100-01-01
    (402-408, 2243, 2291).  An edit moves the file's time to the edit
    time; a wrong but in-range clock (future dates too) is accepted; a
@@ -108,12 +108,12 @@ gone.
    (zip-writer.lua 15-17, 146; zip-reader.lua 43-44, 103-111, 491-495).
    The DOS time field is UTC, 1980-2107 (zip-writer 63-74).  Phone
    uploads use Java `ZipEntry` with no extended time, so they are dated
-   at arrival (RmailClient.kt 727-728).  #374 still says `unzip`
-   preserves times — outdated since #405.
+   at arrival (RmailClient.kt 727-728).  #211 still says `unzip`
+   preserves times — outdated since #309.
 3. The phone sends and receives `X-Mtime` for inbox and outbox files
    (6170, 6966-6973; RmailClient.kt 241-257; MailStore.kt 37, 53);
    attachment downloads carry none.  The phone lists by file name, not
-   time (MailStore.kt 30, 46), so #374's "the phone's list sorts the same
+   time (MailStore.kt 30, 46), so #211's "the phone's list sorts the same
    way" is not what the app does.  The thin client keeps no times.
    Phone-composed names use local time with no zone (MainViewModel.kt
    371).
@@ -122,11 +122,11 @@ gone.
    `touch -d @` (395-408); without them, set_file_mtime fails silently.
 5. protocol template 116-134 (one timer, "starts at 5 minutes",
    MIN/MAX_INTERVAL, "outbox changes … no timer needed") is outdated.
-   Per-contact timers (#377): floor 30 s, +360 s per failed cycle, ceiling
+   Per-contact timers (#115): floor 30 s, +360 s per failed cycle, ceiling
    7200 s, ±30 s jitter (912-1008); a contact that connects is due now
    (6837); nothing queued → back to the floor (7078-7086); all due at
    start-up (7429-7437); an outbox change still waits for the timer
-   (3090-3146; #396 open); chunks go through the same gate (4681).
+   (3090-3146; #119 open); chunks go through the same gate (4681).
 6. README:324 and 366 ("retried on each sync cycle"), defensive template
    38-41 ("within seconds") and 116-117 ("default sync interval
    (minutes)") are outdated; scripting-tutorial 360-362 is about right.
@@ -137,7 +137,7 @@ gone.
    default 60 s plus up to 600 s (155-160, 7698-7701), undocumented.
    Phone: WorkManager every 15 min, no network constraint (SyncWorker.kt
    41-50; MailboxRegistry.kt 21); foreground back-off 30 s/+360 s/2 h/±30 s
-   (SyncBackoff.kt 33-39).  Availability windows (#389) are not built.
+   (SyncBackoff.kt 33-39).  Availability windows (#419) are not built.
 
 ## 3. Android permissions
 
@@ -190,22 +190,22 @@ POST_NOTIFICATIONS, RECEIVE_BOOT_COMPLETED.  No document mentions any.
 - Progress text (template 182-185, 231-235) is stale: the code says "To
   cancel: delete this file, or add a line that reads: deny" (4344);
   "Sending: …" before the first piece (3868-3872); the file is a link
-  into /tmp/rmail-progress (#328).
+  into /tmp/rmail-progress (#304).
 - Template 218-219: deleting `transfers` cancels nothing (4545).
 - "Capped at 128 KB … error, won't retry" (template 254-260; tutorial
   479-481; defensive 184-193): bodies over 131072 bytes become an
-  attachment with a stub body (#349; 5216-5344); updates have no cap
+  attachment with a stub body (#308; 5216-5344); updates have no cap
   (5362-5371).
 - Undocumented: the body waits for every attached file, with the
   `// MISSING ATTACHMENT` marker (5003-5033); the `attach:` line removed
   on completion; `name-2.ext` and identical content kept once
-  (3957-3968); attachments kept when a message is deleted (#355); limits
+  (3957-3968); attachments kept when a message is deleted (#306); limits
   of 4 GiB per file and per zip, 65,535 entries, ZIP64 refused; phone
   transfers in 256 KiB pieces (6281); abandoned `.uploads` and pending
   pieces never expire.
 - Correct: the 100,000-piece cap and 64 per answer (4111-4117); size ×
   1.1 + 4 KiB (4033-4035); nothing before consent (4205-4209); id format
-  (3488-3490); link notes (#404a).
+  (3488-3490); link notes (#311a).
 
 ## 6. Deletion and hooks
 
@@ -273,7 +273,7 @@ POST_NOTIFICATIONS, RECEIVE_BOOT_COMPLETED.  No document mentions any.
 - Android guide: the public IP is fetched only on "Detect public IP"
   (SetupScreen.kt 66-80, 246); "Detect port" scans the entered host then
   254 LAN hosts (373-420), not Wi-Fi only; the back arrow, three-dot menu
-  and pencil were replaced (#359; InboxScreen.kt 300-382); phone
+  and pencil were replaced (#817; InboxScreen.kt 300-382); phone
   Accept/Deny undocumented.
 - ports-explained 186: the phone only talks to its home daemon.
 - README:224-245 opens TCP only; the daemon also binds UDP, uses multicast
@@ -281,7 +281,7 @@ POST_NOTIFICATIONS, RECEIVE_BOOT_COMPLETED.  No document mentions any.
 - GNU tools hard-wired (`stat -c`, `touch -d @`, `df --output`, `du -sb`,
   `find -printf`, `sha256sum`, `ip`; 396, 407, 3441, 3449, 3500, 3456,
   1868) though a kqueue path exists (341-359).
-- docs/attachments.md is older than its template (before #405); rerun
+- docs/attachments.md is older than its template (before #309); rerun
   `scripts/generate-docs.sh`.
 
 ## Checked and found accurate
@@ -290,8 +290,8 @@ Contacts syntax and `ip[N]`/`port[N]` (README:150-186); one port for both
 directions; AES-256-GCM framing, SHA-256 key, trial decryption
 (README:311-318); NAT renewal every 30 min; renaming a contact; mail to
 oneself; `rto`/`rattach`/`raccept`/`rdeny`/`rfield`; no `--config` flag;
-AMBIGUOUS RECIPIENT; the #404 chunk rules; `own = true` gating `/api/*`.
+AMBIGUOUS RECIPIENT; the #311 chunk rules; `own = true` gating `/api/*`.
 
 Not checked (needs running): the duplicate-message race when two daemons
-dial each other at once (#374), and recovery of an interrupted transfer
+dial each other at once (#211), and recovery of an interrupted transfer
 after a reboot wipes /tmp.

@@ -43,6 +43,9 @@ printf '{"lunch":{"from":"alice","message_id":"m-1"}}' > "$BOX_house/.state/inbo
 printf 'to: alice\n\ndraft reply\n' > "$BOX_house/outbox/reply"
 start_daemon house
 wait_for 30 'grep -q "listening on" "$DEMO_WORK/house.log" 2>/dev/null'
+# let its start-up cycle (address lookups, announcements) finish first:
+# a request during a cycle waits for it
+wait_for 30 '[ -f "$BOX_house/.state/public_ip" ]'; sleep 3
 "$LUA" - "$DIR" "$PORT" "$PHONE" <<'LUA'
 package.path = arg[1] .. "/scripts/lib/?.lua;" .. package.path
 local fc = require("fake-contact")

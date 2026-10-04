@@ -12,7 +12,7 @@
 # With several, they are listed and one is chosen — the alternative,
 # following all of them at once, produces interleaved lines with nothing
 # saying which daemon wrote which, which is the problem that having one
-# log per service exists to solve.  (Re #381.)
+# log per service exists to solve.  (Re #612.)
 #
 # A log named simply /tmp/rmail.log is from before services were named per
 # mailbox.  It is still listed, because a daemon installed then is still
@@ -21,7 +21,7 @@
 # If no log file exists, fall back to `journalctl -u <service> -f` when
 # systemd is active — that covers NixOS installs whose configuration.nix
 # defines a service logging to journald instead of to a file.  See the
-# 2026-04-17 follow-up in issues/completed/205-redirect-service-logs-to-tmp.md.
+# 2026-04-17 follow-up in issues/completed/117-redirect-service-logs-to-tmp.md.
 
 # {{{ follow()
 follow() {

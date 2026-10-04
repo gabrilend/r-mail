@@ -49,6 +49,8 @@ printf 'the train is late\n' > "$BOX_home/inbox/train"
 printf '{"train":{"from":"alice","message_id":"m-7"}}' > "$BOX_home/.state/inbox.json"
 start_daemon home
 wait_for 30 'grep -q "listening on" "$DEMO_WORK/home.log" 2>/dev/null'
+# let its start-up cycle finish first: a request during a cycle waits for it
+wait_for 30 '[ -f "$BOX_home/.state/public_ip" ]'; sleep 3
 "$LUA" - "$DIR" "$PORT" "$PHONE" <<'LUA'
 package.path = arg[1] .. "/scripts/lib/?.lua;" .. package.path
 local fc = require("fake-contact")

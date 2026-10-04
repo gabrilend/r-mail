@@ -35,7 +35,7 @@ it'll have skips if more people are watching.
 
 ## Android keyboard scrolling
 
-**Converted to issue:** 313-android-keyboard-scroll-fix
+**Converted to issue:** 807-android-keyboard-scroll-fix
 
 Android, turn off scrolling when typing long messages. Actually, turn it on, so
 I can always see the bottom of the text without it being covered by the keyboard.

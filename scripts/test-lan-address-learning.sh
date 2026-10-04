@@ -46,8 +46,11 @@ RECEIVER_PORT=59460
 DIRECT_PORT=59461
 RELAYED_PORT=59462
 
-# Longest any daemon runs.  Only reached when a case fails.
-DEADLINE_SECONDS=60
+# Longest any daemon runs.  Only reached when a case fails.  Two minutes,
+# not one: when a sender calls while the receiver is itself dialing it, it
+# is answered "busy" and tries again on its next timer, up to a minute
+# later (2026-10-04, #120).
+DEADLINE_SECONDS=120
 
 ok()   { printf "  \033[32mok\033[0m   %s\n" "$*"; }
 fail() { printf "  \033[31m--\033[0m   %s\n" "$*"; }

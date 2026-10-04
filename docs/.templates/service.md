@@ -289,7 +289,7 @@ old shared config directory forced, and it is gone.
    heard anything, and nothing reported an error.
 
 4. **Its own mail directory** — `inbox/`, `outbox/`, `contacts` and `.state/`
-   are all inside the folder that holds its config file (#382: the mailbox is
+   are all inside the folder that holds its config file (#102: the mailbox is
    the installation; there is no `mail` setting any more).
 
 ### Starting a daemon by hand

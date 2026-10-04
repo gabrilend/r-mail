@@ -38,7 +38,7 @@ the metadata the crypto can't hide.
 - **Timing.** Every outbox change wakes the daemon (`inotify`), and
   the message goes out as soon as that contact's own timer is due —
   30 seconds after the last exchange when all is well, longer after
-  failures (#377).  An observer watching your uplink sees "Alice sent
+  failures (#115).  An observer watching your uplink sees "Alice sent
   something" to within that window.
 - **Size.** The ciphertext length on the wire is the plaintext
   length plus a small fixed overhead (nonce + tag).  Big messages
@@ -193,7 +193,7 @@ printf '%s' "$3" | sed '/^--- padding ---$/,$d'
 
 ### Messages larger than the top bucket
 
-A body over 128 KB is sent as an attachment automatically (#349): the
+A body over 128 KB is sent as an attachment automatically (#308): the
 recipient gets a short stub body and a consent form, and the content
 travels through the chunked attachment pipeline, so the observer sees
 many fixed-size chunks rather than one giant packet.  This keeps `$3`
@@ -273,7 +273,7 @@ ExecStart=torsocks lua /path/to/rmail.lua /path/to/config-file
 
 The hop count adds hundreds of milliseconds, sometimes more.  Your
 contacts see a Tor exit node as your address, so if you use this,
-also use a DNS hostname (#311) in your contacts file on the other
+also use a DNS hostname (#405) in your contacts file on the other
 side — exit-node IPs change.
 
 **What this doesn't hide.** Your *contacts'* IPs.  They're in your

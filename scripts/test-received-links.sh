@@ -3,7 +3,7 @@
 #
 # A symbolic link is a tiny file whose content is a path; opening the link
 # opens whatever that path names.  A zip file can carry links, and unzip
-# recreates them.  Until 2026-09-29 (issue #404a) a contact could send a
+# recreates them.  Until 2026-09-29 (issue #311a) a contact could send a
 # zip holding "photo -> ~/.ssh/id_rsa"; it was filed into attachments/,
 # and the owner's phone -- and the on_package hook -- read the private key
 # through it.
@@ -25,7 +25,7 @@
 #                        in attachments/, each link has its note with the
 #                        right text, and the secret's content is in no
 #                        filed file.
-#   hidden link name     a link whose own name holds a newline.  Since #405
+#   hidden link name     a link whose own name holds a newline.  Since #309
 #                        the shared zip reader checks every name before
 #                        anything is made, and refuses a control character
 #                        in a name ("bad-name"): the whole transfer is

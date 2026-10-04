@@ -26,7 +26,7 @@
 #   both-gone       a current record whose source and copy are both gone
 #
 # A record with no compressed copy is stopped, not rebuilt (2026-10-04,
-# #408): every recipient must get the bytes first offered, and a copy
+# #314): every recipient must get the bytes first offered, and a copy
 # packed now from the source could differ.  Until then the copy was packed
 # again from the source when the source was still there.
 #

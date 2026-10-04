@@ -41,7 +41,7 @@ local nonce = crypto.random_bytes(12)
 local sealed = crypto.aes_gcm_encrypt(key, nonce, text)
 local frame = #nonce + #sealed
 local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
-print(string.format("    the request:     %q (%d bytes)", text, #text))
+print(string.format("    the request:     %s (%d bytes)", (text:gsub("\r\n", "\\r\\n")), #text))
 print(string.format("    on the wire:     4-byte length + 12-byte nonce + %d sealed + 16-byte tag = %d bytes", #text, 4 + frame))
 print("    the frame starts " .. hex(nonce):sub(1, 24) .. " " .. hex(sealed):sub(1, 24) .. "...")
 local status, body = alice:request("GET", "/")
@@ -64,14 +64,16 @@ show "after a cycle that reached them: due again in 30 s (± 30 s jitter)"
 show "after one that did not, the wait grows by 6 minutes, to a ceiling of 2 hours:"
 "$LUA" - <<'LUA'
 local floor, step, ceiling = 30, 360, 7200
+-- failures in a row -> seconds until the next try
 local t, i, line = floor, 0, {}
 repeat
-    i = i + 1
     line[#line + 1] = string.format("%d:%ds", i, t)
-    t = math.min(ceiling, t + step)
+    i = i + 1
+    t = math.min(ceiling, floor + i * step)
 until t == ceiling
-line[#line + 1] = string.format("%d+:%ds", i + 1, ceiling)
-print("      failures:wait  " .. table.concat(line, "  "))
+line[#line + 1] = string.format("%d+:%ds", i, ceiling)
+print("      failures in a row : seconds to the next try")
+print("      " .. table.concat(line, "  "))
 print(string.format("      at the ceiling an unreachable contact costs %d attempts a day (a fixed 30 s would be %d)",
     math.floor(86400 / ceiling), 86400 / floor))
 LUA
