@@ -15,12 +15,13 @@ kept once.
 Limits: 4 GiB per file and per zip, 65,535 entries per zip (ZIP64 is not
 read or written), at most 100,000 pieces per transfer.
 
-> **Known problems** (open issues): declining does not stop the offer —
-> the sender offers the file again, with a new form, every time it syncs
-> with you (#406); cancelling or refusing a transfer is sent to the sender
-> as deleting the whole message, which removes you from it (#407); and
-> when one recipient finishes, the sender removes the `attach:` line, so
-> recipients not yet reached never get the file (#408).
+The sender keeps, for every recipient and every attached path, that
+recipient's answer — **complete**, **declined**, **cancelled**,
+**withdrawn** or **lost** — in its outbox record.  A path is offered to a
+recipient only while they have no answer for it (or it was withdrawn and
+is back), so a file is never offered twice to someone who already has it
+or said no.  The answer belongs to the path, not to the bytes: what is
+sent is fixed when the file is first offered (#406, #408).
 
 ---
 
@@ -37,9 +38,29 @@ attach: /path/to/photo.jpg
 Here's the photo from yesterday.
 ```
 
-Both alice and bob are offered `photo.jpg` (but see #408 above: today, once
-one of them finishes, the other is no longer offered it). To send a file to
-only some recipients,
+Both alice and bob are offered `photo.jpg`, whenever each is reached: if bob
+is offline while alice finishes, he is offered it when he comes back.  The
+`attach:` line stays as you wrote it.
+
+**What is sent is fixed when first offered.**  The file is packed once,
+when the first recipient is offered it, and every recipient gets that
+packed copy — even if you change or delete the file afterwards.  The copy
+is kept on disk, in the mailbox's pending folder, until every recipient has
+answered, and removed then (#408).  To send a changed file, attach it under
+a new path, or remove the line and put it back (below).
+
+**Removing an `attach:` line withdraws the file.**  When a sync finds the
+line gone, everyone who does not yet have the whole file stops getting it
+and is told; their daemon removes the consent form or the pieces and
+leaves a `withdrawn-<file>` note.  Anyone who already has it keeps it.  A
+recipient who is offline is told when reached.  Removing the line and
+putting it back before a sync notices changes nothing.  Putting it back
+after a sync offers the file again to those it was withdrawn from — as a
+new offer, packed from what is at the path then.  Changing the path is
+withdrawing the old file and offering a new one: someone who declined the
+old file is offered the new one (#406).
+
+To send a file to only some recipients,
 place the `attach:` line between their `to:` line and the next one:
 
 ```
@@ -99,10 +120,10 @@ below), and the transfer begins when the sender is next due to sync with
 you.  When the file is complete it is saved in `~/mail/attachments/` and
 the form is removed.
 
-If you **decline**: the form is removed, and the sender's daemon deletes its
-packed copy and drops a `declined-<file>` notice in its own inbox.  It does
-not remove the `attach:` line, so today the file is offered again, with a
-new form, the next time it syncs with you (#406).
+If you **decline**: the form is removed, and the sender's daemon records
+your answer and drops a `declined-<file>` notice in its own inbox.  That
+file is never offered to you again from that message; other recipients are
+not affected (#406).
 
 If you **delete the consent file entirely**: this is treated as a decline.
 
@@ -210,17 +231,22 @@ If the connection drops mid-transfer, the receiver keeps whatever chunks have
 already arrived. The sender resumes from where it left off on the next sync
 cycle — no re-negotiation, no new consent request needed.
 
-Whether partial chunks survive a reboot depends on `attachment_pending_dir`:
-- **`/tmp`** (default): on many systems `/tmp` is in RAM, so a reboot clears
-  partial downloads and the sender restarts from the beginning.  While a
-  file arrives it can take room in RAM about three times over (the pieces,
-  the joined zip, the unpacked files).  #404f proposes a folder on disk
-  inside the mailbox as the default.
-- **A persistent path**: chunks survive reboots and the transfer resumes
-  exactly where it left off.  Write it in full (`/home/you/mail/.pending`):
-  `~` is not expanded for this setting, and quotes are kept.  Avoid
-  `attachments/` itself — the packed zips and temporary files would then
-  show up in the phone's file list.
+Pieces wait on disk, in a hidden folder inside the mailbox,
+`attachments/.pending/` (the `attachment_pending_dir` setting), so they
+survive a restart or a reboot and the transfer resumes where it stopped.
+The same folder holds the sender's packed copies (`rmail-<id>.zip`).  It
+used to be `/tmp`, which on many systems is RAM: a reboot cleared partial
+downloads, and a file arriving took room in RAM about three times over (the
+pieces, the joined zip, the unpacked files).  What keeps arriving pieces
+harmless is the checking above, not where they wait (#404f).  Being hidden,
+nothing in it shows among your attachments or on the phone.
+
+To keep them in RAM anyway, set `attachment_pending_dir` to a folder in
+`/tmp`.  Write it in full: `~` is not expanded for this setting, and quotes
+are kept.  A packed copy lost on a reboot is then **not** packed again
+(that would send later recipients different bytes): the transfers stop and
+a `// ATTACHMENT LOST: <path>` note under the `attach:` line says to remove
+the line, wait for one sync, and put it back.
 
 Pieces of a transfer that is never finished, and abandoned phone uploads,
 are never cleaned up.
@@ -242,9 +268,13 @@ carol  awaiting consent
 ```
 
 Remove a recipient's line to cancel their transfer only — the file is still
-sent to the other recipients and the outbox message is preserved. Remove the
-entire section to cancel all recipients for that file.  Deleting the
-`transfers` file cancels nothing: the daemon writes it again.
+sent to the other recipients and the outbox message is preserved.  Their
+answer becomes *cancelled*, so the file is not offered to them again, and
+their daemon is told, so their form or pieces go.  Remove the entire section
+to cancel all recipients for that file.  Deleting the `transfers` file
+cancels nothing: the daemon writes it again.  To stop sending the file to
+everyone, removing the `attach:` line does the same (see "Sending an
+attachment").
 
 Deleting the outbox file also works and is more drastic: it sends a deletion
 notice to all recipients, cancels any pending consent requests, stops any
@@ -264,12 +294,11 @@ To cancel: delete this file, or add a line that reads: deny
 ```
 
 Delete that file (or add a `deny` line) to cancel. Partial chunks are
-cleaned up on both sides.  The sender's daemon is told — but today the
-cancel is sent as "delete this message", so the sender also removes you
-from the message itself: its `to:` line for you goes, you get no later
-edits, and if you were its last recipient the sender's outbox file is
-deleted (#407).  The same happens when your daemon refuses a transfer
-(oversize, a damaged zip).
+cleaned up on both sides.  The sender's daemon is told with a message
+that names the attachment, not the message: it stops that one transfer and
+records *cancelled*, and the message itself is untouched — you stay on it
+and still get its edits (#407).  The same happens when your daemon refuses a
+transfer (oversize, a damaged zip).
 
 ---
 
@@ -278,7 +307,7 @@ deleted (#407).  The same happens when your daemon refuses a transfer
 | Key                       | Default                 | Description                          |
 |---------------------------|-------------------------|--------------------------------------|
 | `attachments`             | `~/mail/attachments`    | where received files are saved       |
-| `attachment_pending_dir`  | `/tmp`                  | where in-progress chunks are stored  |
+| `attachment_pending_dir`  | `<attachments>/.pending` | where arriving pieces and packed copies wait |
 | `attachment_chunk_size`   | `5242880` (5 MB)        | bytes per chunk                      |
 
 These are set in your mailbox's `config` file.  The generated config file does

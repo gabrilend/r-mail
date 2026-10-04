@@ -114,10 +114,20 @@ local paths = {
     state       = MAIL .. "/.state",
     contacts    = MAIL .. "/contacts",
     attachments = config.attachments or (MAIL .. "/attachments"),
-    pending     = config.attachment_pending_dir or "/tmp",
     transfers   = MAIL .. "/transfers",
 }
 paths.uploads = paths.attachments .. "/.uploads"
+-- Where attachments wait while they travel: the pieces of one arriving
+-- (`.pending/<id>/`), and the packed copy of one being sent
+-- (`rmail-<id>.zip`).  On disk, inside the mailbox, by default (#404f).
+-- It used to be /tmp, which on many systems -- the owner's included -- is
+-- RAM: an arriving file took room there up to three times over (pieces,
+-- joined zip, unpacked files) and vanished on a reboot, and the packed
+-- copy every recipient must get (#408: attachments are fixed once offered)
+-- vanished with it.  What keeps arriving pieces harmless is the checking
+-- they go through (#404), not where they wait.  A setting can still put
+-- it in RAM.  Hidden, so nothing lists it among the received attachments.
+paths.pending = config.attachment_pending_dir or (paths.attachments .. "/.pending")
 
 -- The daemon's RAM-backed folder: status that churns and means nothing
 -- after a reboot (transfer progress, consent progress) and the daemon's
@@ -1046,6 +1056,12 @@ local function flush_unreachable_summary()
     log("unreachable contacts this cycle: %s", table.concat(unreachable, ", "))
 end
 
+-- Reading and rewriting the contacts file as text (see contactfile.parse,
+-- and the phone-save merge near handle_api_post_contacts).  One table
+-- rather than more top-level locals: the main chunk is close to Lua's
+-- 200-local ceiling.
+local contactfile = {}
+
 local function load_contacts()
     local text = read_file(CONTACTS)
     if not text or text == "" then return {} end
@@ -1074,6 +1090,14 @@ local function load_contacts()
         end
     end
 
+    return contactfile.parse(text)
+end
+
+-- Contacts text -> the contacts table every other part of the daemon uses.
+-- Separate from reading the file so that text which is not (yet) the file
+-- can be read the same way: a phone's save is checked by parsing the file
+-- it would produce before that file is written (#411).
+function contactfile.parse(text)
     local contacts = {}
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         line = line:match("^%s*(.-)%s*$")
@@ -2305,11 +2329,17 @@ end
 -- separate user-invoked tool, but it shouldn't be automatic on
 -- message deletion.
 
--- delete a zip if no other active transfer still references it.
--- Shared-zip identity is the compressed zip's path itself; transfers
--- for the same outbox message + source file share the same zip on
--- disk, so they share the same .compressed_path value in state.
-local function release_zip(chunks, compressed_path)
+-- Delete a transfer's zip once no transfer holds it -- for an oversized
+-- message body sent as an attachment (#349) only.  The packed copy of an
+-- `attach:` file belongs to the outbox record, not to any one transfer:
+-- it is kept until every recipient has answered, so that a recipient
+-- reached late gets the same bytes as the first (#408), and is removed by
+-- sync_outbox's release pass.  This used to delete it when the last
+-- *current* transfer finished, and the next recipient got a fresh packing
+-- of whatever was at the path by then.
+local function release_zip(chunks, transfer)
+    if not transfer.auto_body then return end
+    local compressed_path = transfer.compressed_path
     if not compressed_path then return end
     for _, t in pairs(chunks) do
         if t.compressed_path == compressed_path then return end  -- still in use
@@ -2485,7 +2515,7 @@ local function handle_delete(data, sender)
                     for att_id, transfer in pairs(att_state) do
                         if transfer.to == sender and transfer.message_id == message_id then
                             att_state[att_id] = nil
-                            release_zip(att_state, transfer.compressed_path)
+                            release_zip(att_state, transfer)
                             att_changed = true
                             log("cancelled outgoing chunks for %s to %s (they deleted)", att_id, sender)
                         end
@@ -2628,8 +2658,13 @@ local function handle_update_address(data, sender)
             local shown = {}
             for _, m in ipairs(merged) do shown[#shown + 1] = m.addr end
             log("address set from %s: %s", sender, table.concat(shown, ", "))
-            -- Any cached lookup for a name we kept is now suspect.
-            dns_cache[contacts[sender].ip] = nil
+            -- Any cached lookup for a name we kept is now suspect.  A
+            -- contact we knew only by its key had no address, so nothing
+            -- was cached for it: indexing the cache with that missing
+            -- address used to throw, after the file was written, and the
+            -- sender was answered with an error for an update we had taken.
+            local old_addr = contacts[sender].ip
+            if old_addr then dns_cache[old_addr] = nil end
             applied_set = true
             announced_changed = true
         elseif #merged > 0 then
@@ -2893,7 +2928,16 @@ local function http_read_encrypted_response(e)
         end
         e.ok     = (status == 200)
         e.status = status
-        if not e.ok then
+        -- "Busy": they were dialing us while we dialed them, and answered
+        -- at once instead of making us wait (ctimer.answer_while_sending).
+        -- Not an answer to the request -- every builder must retry it, so
+        -- no status -- but they are there, so no backoff (`busy` is read
+        -- by the timer gate) and no trying their other addresses.
+        if status == 503 and type(e.data) == "table" and e.data.busy then
+            e.ok, e.status, e.busy = false, nil, true
+            log("%s:%d was sending to us at the same moment; will try again shortly",
+                e.req.host, e.req.port)
+        elseif not e.ok then
             log("response from %s:%d status=%s", e.req.host, e.req.port, tostring(status))
         end
     else
@@ -2909,8 +2953,83 @@ local resolve_lan_host = nil
 -- Hook for connection timeout. Set by main() to trigger LAN discovery on failure.
 local on_connection_timeout = nil
 
+-- ---- Answering while we wait on our own requests (#387, in part) ------------
+--
+-- A sync cycle runs on the main thread, and while it waits on its requests
+-- nothing else is handled.  Two daemons that each had something to send
+-- the other at the same moment both waited out their 8-second limit, both
+-- failed, both backed off -- and then each handled the other's late request,
+-- which made the other due again at once (`saw_inbound`), so they dialed
+-- each other at the same instant again: a stall every few seconds, for as
+-- long as both had mail for the other (seen 2026-10-04, two mailboxes on one
+-- machine).
+--
+-- So while a batch waits, the listening sockets are watched too.  A caller
+-- is decrypted to learn who it is:
+--   one we are dialing in this batch   answered at once, sealed, "503 busy":
+--                                      their daemon retries soon, without
+--                                      backing off; ours does the same
+--   anyone else (the phone, another    held, unanswered, and handled by the
+--   contact)                           main loop the moment the cycle ends,
+--                                      as it would have been anyway
+--   a plain "GET "                     the health answer, as always
+-- Nothing is *processed* during a cycle: handlers write records the cycle
+-- holds in memory, and processing a request mid-cycle could lose its
+-- changes.  The rest of #387 -- serving requests while a cycle waits -- is
+-- still open.
+--
+-- Kept in ctimer (it is about who we are dialing and when), not in new
+-- top-level names: the file is at Lua's limit of 200.
+ctimer.listeners = {}   -- set by main: the listening TCP sockets
+ctimer.deferred  = {}   -- {sock, first4, packet}, for main to handle after the cycle
+
+-- {{{ ctimer.answer_while_sending
+function ctimer.answer_while_sending(listener, dialing)
+    local c = listener:accept()
+    if not c then return end
+    c:settimeout(5)
+    local first4 = c:receive(4)
+    if not first4 or #first4 ~= 4 then c:close(); return end
+    if first4 == "GET " then
+        while true do
+            local line = c:receive("*l")
+            if not line or line == "" then break end
+        end
+        local body = json.encode({ok = true})
+        c:send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
+            "Content-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
+        c:close()
+        return
+    end
+    local len = parse_uint32_be(first4)
+    if len < 28 or len > 64 * 1024 * 1024 then c:close(); return end
+    local packet = c:receive(len)
+    if not packet or #packet ~= len then c:close(); return end
+    local plaintext, name = trial_decrypt(packet)
+    if not plaintext then c:close(); return end
+    if dialing[name] then
+        local body = json.encode({busy = true})
+        send_encrypted(c, derive_key(load_contacts()[name].token),
+            "HTTP/1.1 503 Busy\r\nContent-Type: application/json\r\n" ..
+            "Content-Length: " .. #body .. "\r\n\r\n" .. body)
+        c:close()
+        log("%s called while we were sending to them; answered busy", name)
+        return
+    end
+    ctimer.deferred[#ctimer.deferred + 1] = {sock = c, first4 = first4, packet = packet}
+end
+-- }}}
+
 local function http_post_batch(requests)
     if #requests == 0 then return {} end
+
+    -- who this batch is dialing, for answer_while_sending
+    local dialing = {}
+    for _, req in ipairs(requests) do
+        local cname = req.contact_name
+            or (req.endpoints and req.endpoints[1] and req.endpoints[1].contact_name)
+        if cname then dialing[cname] = true end
+    end
 
     local entries = {}
     local lookup = {}
@@ -2962,10 +3081,21 @@ local function http_post_batch(requests)
         local remaining = deadline - socket.gettime()
         if remaining <= 0 then break end
 
+        -- the listening sockets too: see answer_while_sending
+        local listening = {}
+        for _, l in ipairs(ctimer.listeners) do
+            recvt[#recvt + 1] = l
+            listening[l] = true
+        end
+
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
             math.min(remaining, 0.5))
+
+        for _, sock in ipairs(readable or {}) do
+            if listening[sock] then pcall(ctimer.answer_while_sending, sock, dialing) end
+        end
 
         if writable then
             for _, conn in ipairs(writable) do
@@ -2996,7 +3126,7 @@ local function http_post_batch(requests)
             end
             e.conn:close()
         end
-        results[i] = {ok = e.ok, status = e.status, data = e.data}
+        results[i] = {ok = e.ok, status = e.status, data = e.data, busy = e.busy}
     end
     return results
 end
@@ -3019,14 +3149,14 @@ local function http_post_batch_raw(requests)
     local results = http_post_batch(requests)
     local promotions = {}
     for i, req in ipairs(requests) do
-        if results[i] and not results[i].ok and not results[i].status then
+        if results[i] and not results[i].ok and not results[i].status and not results[i].busy then
             local eps = req.endpoints
             if eps and #eps > 1 then
                 for k = 2, #eps do
                     local ep = eps[k]
                     if not ep or not ep.addr or ep.addr == "" then break end
                     local single = {
-                        host = ep.addr, port = ep.port, path = req.path,
+                        host = ep.addr, port = ep.port, path = req.path, contact_name = ep.contact_name,
                         payload = req.payload, psk_key = req.psk_key,
                     }
                     local r = http_post_batch({single})[1]
@@ -3121,7 +3251,9 @@ local function http_post_batch_with_fallback(requests)
         if cname then
             -- Any HTTP status at all means we reached them and they answered;
             -- a 404 ("already done on my end") is a reachable contact, not a
-            -- dead one, and must not be allowed to grow their backoff.
+            -- dead one, and must not be allowed to grow their backoff.  So is
+            -- a busy answer (they were sending to us at that moment): the
+            -- request is retried at the floor, not after a backoff.
             --
             -- Recorded, not applied.  The timer advances once per contact per
             -- *cycle*, at the end of run_sync_cycle -- not once per op.  Six
@@ -3135,7 +3267,7 @@ local function http_post_batch_with_fallback(requests)
             -- future and the gate then withheld that same contact's inbox and
             -- address ops later in the same cycle, spreading work that should
             -- have gone out together across several cycles.
-            local reached = (r.ok or r.status) and true or false
+            local reached = (r.ok or r.status or r.busy) and true or false
             if ctimer.outcome[cname] == nil or reached then
                 ctimer.outcome[cname] = reached
             end
@@ -3152,7 +3284,7 @@ end
 -- (`*`, `?`, `[...]`) in the filename component.  parse_outbox_file
 -- expands every glob line to one absolute-path "attach:" line per
 -- matching regular file, and rewrites the outbox file on disk so the
--- rest of the pipeline (transfer tracking, remove_attach_from_file) is
+-- rest of the pipeline (transfer tracking, each recipient's answers) is
 -- operating on stable literal paths.
 --
 -- Only the filename component is globbed — a glob in a directory
@@ -3407,6 +3539,191 @@ local function mark_recipient_problem(outbox_path, recipient, label, reason)
 end
 -- }}}
 
+-- ---- What each recipient answered about each attached file (#406-#408) ----
+--
+-- Kept in the outbox record (.state/outbox.json), beside what it already
+-- holds per message and per recipient:
+--
+--   state[outbox file] = {
+--     recipients = {
+--       [contact] = {
+--         message_id    = string,
+--         body_checksum = string (#409),
+--         attachments   = { [attached path] = answer },
+--         withdrawals   = { [attachment id] = attached path },
+--       },
+--     },
+--     packed = { [attached path] = {zip = path of the packed copy,
+--                checksum = hex string, total_chunks = number,
+--                expected_size = number (bytes, unpacked),
+--                filename = string (what the recipient sees)} },
+--   }
+--
+-- An answer is one of:
+--   complete    the recipient has the whole file       never offered again
+--   declined    the recipient said no                  never offered again
+--   cancelled   one side stopped this one transfer     never offered again
+--               (the recipient's cancel or refusal, or the author's line
+--               removed from the transfers file)
+--   withdrawn   the author removed the attach: line    offered again if the
+--               while it was on its way                line comes back
+--   lost        the packed copy vanished from disk     not offered until the
+--                                                      line is removed and put back
+-- No answer means not yet offered, or on its way (a transfer record in
+-- chunks-outgoing.json says which).
+--
+-- An answer belongs to the path, not to the bytes at it (owner,
+-- 2026-10-02: "We shouldn't be able to edit attachments").  That holds
+-- because what is sent is fixed when first offered: `packed` keeps the one
+-- packed copy every recipient gets until no recipient still needs it.
+--
+-- `withdrawals` are owed messages: "this attachment id is cancelled",
+-- sent to a recipient who may hold a consent form or pieces of it, and
+-- retried on that contact's timer until their daemon answers.
+local answers = {}
+
+-- {{{ answers.recipient
+-- The recipient section a transfer belongs to, or nil when the message
+-- or the recipient has gone from the record since (the author deleted
+-- the file, or the recipient deleted the message) -- then there is no
+-- one left to record an answer for.
+function answers.recipient(state, transfer)
+    local meta = state[transfer.outbox_file]
+    return meta and meta.recipients and meta.recipients[transfer.to]
+end
+-- }}}
+
+-- {{{ answers.record
+-- Record `answer` for the transfer's recipient and path.  A message body
+-- sent as an attachment (#349) has no attach: line and no answer.
+function answers.record(state, transfer, answer)
+    if transfer.auto_body then return end
+    local rmeta = answers.recipient(state, transfer)
+    if not rmeta then return end
+    rmeta.attachments = rmeta.attachments or {}
+    rmeta.attachments[transfer.original_path] = answer
+end
+-- }}}
+
+-- {{{ answers.record_now
+-- The same, reading and writing the outbox record itself: for the request
+-- handlers and the chunk sender, which run outside sync_outbox (the sync
+-- cycle runs between requests, never during one, so nothing else holds
+-- the record open meanwhile).
+function answers.record_now(transfer, answer)
+    if transfer.auto_body then return end
+    local state = load_state("outbox.json")
+    answers.record(state, transfer, answer)
+    save_state("outbox.json", state)
+end
+-- }}}
+
+-- {{{ answers.stop
+-- Stop one transfer from our side: record `answer`, and if the recipient
+-- may hold its consent form or pieces (the request reached them), owe
+-- them a withdrawal.  The caller removes the transfer record.
+function answers.stop(state, att_id, transfer, answer)
+    answers.record(state, transfer, answer)
+    if transfer.auto_body or transfer.request_sent == false then return end
+    local rmeta = answers.recipient(state, transfer)
+    if not rmeta then return end
+    rmeta.withdrawals = rmeta.withdrawals or {}
+    rmeta.withdrawals[att_id] = transfer.original_path
+end
+-- }}}
+
+-- {{{ answers.sweep_pending
+-- At start-up: remove what in the pending folder no record holds -- the
+-- pieces of an arriving attachment whose transfer is gone, a packed copy
+-- no message or transfer names.  Kept: everything a record names, which
+-- is how a transfer resumes after a restart (#404f).
+--
+-- Only when the folder is the mailbox's own default.  A folder set by
+-- hand may be shared -- /tmp, the old default, often is, by every
+-- mailbox on the machine -- and another mailbox's files are not ours to
+-- judge.  (When the default was /tmp, a reboot did this sweeping.)
+function answers.sweep_pending()
+    if config.attachment_pending_dir then return end
+    local held = {}
+    for att_id in pairs(load_state("consent-pending.json")) do
+        held[".pending/" .. att_id] = true
+    end
+    for _, t in pairs(load_state("chunks-outgoing.json")) do
+        if t.compressed_path then held[t.compressed_path] = true end
+        if t.auto_body and t.original_path then held[t.original_path] = true end
+    end
+    for _, meta in pairs(load_state("outbox.json")) do
+        for _, pk in pairs(meta.packed or {}) do held[pk.zip] = true end
+    end
+    local function sweep(dir, rel_prefix)
+        local h = io.popen("ls -1A " .. shell_quote(dir) .. " 2>/dev/null")
+        if not h then return end
+        for entry in h:lines() do
+            local full = dir .. "/" .. entry
+            local rel = rel_prefix .. entry
+            if entry == ".pending" and rel_prefix == "" then
+                sweep(full, ".pending/")
+            elseif not held[rel] and not held[full] then
+                os.execute("rm -rf " .. shell_quote(full))
+                log("pending folder: removed %s, which no transfer or message holds", rel)
+            end
+        end
+        h:close()
+    end
+    sweep(paths.pending, "")
+end
+-- }}}
+
+-- {{{ answers.lost
+-- The packed copy of `path` for outbox file `name` is gone from disk.
+-- Packing the path again would send recipients different bytes from what
+-- others got or were offered, so it is not done: every transfer of it is
+-- stopped (answer lost, recipients told), every recipient not yet answered
+-- is marked lost too, and a note in the outbox file says how to send it
+-- again -- remove the attach: line, let one sync pass, put it back.
+function answers.lost(state, chunks, name, path)
+    log("error: the packed copy of %s for %s is gone; not packing it again -- see the note in the outbox file",
+        path, name)
+    for att_id, t in pairs(chunks) do
+        if t.outbox_file == name and t.original_path == path and not t.auto_body then
+            answers.stop(state, att_id, t, "lost")
+            chunks[att_id] = nil
+        end
+    end
+    -- A transfer can outlive its message's record: one written before
+    -- answers were kept, or whose message has since been deleted.  Then
+    -- stopping the transfers is all there is to do.
+    local meta = state[name]
+    if not meta then return end
+    for _, rmeta in pairs(meta.recipients or {}) do
+        rmeta.attachments = rmeta.attachments or {}
+        local a = rmeta.attachments[path]
+        if a == nil or a == "withdrawn" then rmeta.attachments[path] = "lost" end
+    end
+    if meta.packed then meta.packed[path] = nil end
+    local outbox_path = OUTBOX .. "/" .. name
+    local text = read_file(outbox_path)
+    if not text then return end
+    local marker = "// ATTACHMENT LOST: " .. path
+    if text:find(marker, 1, true) then return end
+    local pos = 1
+    while pos <= #text do
+        local line_end = text:find("\n", pos) or #text + 1
+        local fp = _extract_attach_path(text:sub(pos, line_end - 1))
+        if fp and expand_tilde(fp) == path then
+            local prefix = text:sub(1, line_end)
+            if prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end
+            write_file(outbox_path, prefix .. marker ..
+                " \xe2\x80\x94 its packed copy is gone; remove the attach: line, " ..
+                "wait for one sync, and put it back to send it again\n" ..
+                text:sub(line_end + 1))
+            return
+        end
+        pos = line_end + 1
+    end
+end
+-- }}}
+
 
 local function encode_attachments(filepaths)
     local result = {}
@@ -3547,27 +3864,6 @@ local function compress_attachment(filepath)
         return nil, "zip-failed"
     end
     return zip_path, checksum, comp_size, packed.size
-end
-
--- remove a specific attach: line from an outbox file
-local function remove_attach_from_file(filepath, attach_path)
-    local text = read_file(filepath)
-    if not text then return end
-    local header_lines, body = _scan_outbox_header(text)
-    local kept = {}
-    for _, line in ipairs(header_lines) do
-        -- attach_path is the expanded, unquoted path the transfer used; the
-        -- line is compared as the parser would read it.
-        local fp = _extract_attach_path(line)
-        if fp then
-            if expand_tilde(fp) ~= attach_path then kept[#kept + 1] = line end
-        else
-            kept[#kept + 1] = line
-        end
-    end
-    local header = ""
-    for _, line in ipairs(kept) do header = header .. line .. "\n" end
-    write_file(filepath, header .. body)
 end
 
 -- ---- Receiver side ----
@@ -3917,10 +4213,14 @@ local function send_attachment_cancellations(my_name)
         local c = contacts[item.entry["from"]]
         if c and c.ip then
             valid[#valid + 1] = item
+            -- Names the attachment, not the message (#407): a /delete with
+            -- the message id here made the sender drop us from the message.
             requests[#requests + 1] = {
                 endpoints = contact_endpoints(c),
-                path = "/delete",
+                path = "/deliver",
                 payload = json.encode({
+                    type = "attachment_cancel",
+                    attachment_id = item.att_id,
                     message_id = item.entry.message_id,
                 }),
                 psk_key = c.token,
@@ -3935,12 +4235,22 @@ local function send_attachment_cancellations(my_name)
     end
     local results = http_post_batch_with_fallback(requests)
     for i, item in ipairs(valid) do
-        note_contact_result(item.entry["from"], results[i].ok)
-        if results[i].ok then
+        -- Any answer at all settles it: ok, or 404 (they hold no such
+        -- transfer -- it finished or was dropped meanwhile), or a refusal
+        -- from a daemon too old to know this message, which asking again
+        -- will not change.  Only no answer at all is retried.
+        local answered = results[i].ok or results[i].status ~= nil
+        note_contact_result(item.entry["from"], answered)
+        if answered then
             pending[item.att_id] = nil
-            log("notified %s of attachment cancellation: %s", item.entry["from"], item.att_id)
+            if results[i].ok or results[i].status == 404 then
+                log("notified %s of attachment cancellation: %s", item.entry["from"], item.att_id)
+            else
+                log("warning: %s refused the attachment cancellation for %s (%s) -- an older rmail? it may keep sending pieces, which are refused",
+                    item.entry["from"], item.att_id, tostring(results[i].status))
+            end
         end
-        -- failure: detail rolls into the unreachable summary (#324)
+        -- no answer: detail rolls into the unreachable summary (#324)
     end
     save_state("consent-pending.json", pending)
     return true
@@ -4457,16 +4767,79 @@ local function handle_attachment_response(data, sender)
         transfer.missing = m
         log("consent granted by %s for %s", sender, transfer.filename)
     else
-        if transfer.compressed_path and file_exists(transfer.compressed_path) then
-            os.remove(transfer.compressed_path)
-        end
+        -- Remembered per recipient and path, so the file is never offered
+        -- to them again (#406).  The packed copy is not removed here: other
+        -- recipients may still need it, and sync_outbox removes it when
+        -- none does (#408).  An auto-body zip (#349) is released as before.
+        answers.record_now(transfer, "declined")
         write_file(INBOX .. "/declined-" .. sanitize_filename(transfer.filename),
             sender .. " declined your attachment " .. transfer.filename .. ".")
         chunks[att_id] = nil
+        release_zip(chunks, transfer)
         log("consent declined by %s for %s", sender, transfer.filename)
     end
     save_state("chunks-outgoing.json", chunks)
     return 200, {ok = true}
+end
+
+-- "This attachment id is cancelled" (#407).  One message, sent by
+-- whichever side stopped one transfer; it names the attachment, never
+-- the message, and is handled by stopping that one transfer.
+--
+-- It used to be a /delete carrying the *message's* id, which the sender
+-- could not tell from "the recipient deleted the message": it struck the
+-- recipient's to: line, ran on_delete, and deleted the outbox file when
+-- they were the last recipient.
+--
+-- Two directions, told apart by which record holds the id:
+--   we are sending it to them   they cancelled, or their daemon refused
+--                               it: the transfer stops, the answer is
+--                               "cancelled", the message is untouched
+--   they are sending it to us   the author withdrew it (#406): pieces
+--                               and consent form go, a note says why
+-- An id in neither: 404, which both sides read as "nothing to stop".
+function answers.handle_cancel(data, sender)
+    local att_id = data.attachment_id
+    if not att_id or not upload.valid_attachment_id(att_id) then
+        return 400, {error = "attachment_id must be 8 to 64 hex digits and dashes"}
+    end
+
+    local chunks = load_state("chunks-outgoing.json")
+    local transfer = chunks[att_id]
+    if transfer and transfer.to == sender then
+        answers.record_now(transfer, "cancelled")
+        chunks[att_id] = nil
+        release_zip(chunks, transfer)
+        save_state("chunks-outgoing.json", chunks)
+        log("attachment %s cancelled by %s; the message stays", transfer.filename, sender)
+        return 200, {ok = true}
+    end
+
+    local cprog = load_state("consent-pending.json")
+    local entry = cprog[att_id]
+    if entry and entry["from"] == sender then
+        os.execute('rm -rf ' .. shell_quote(paths.pending .. "/.pending/" .. att_id))
+        remove_consent_form(entry.inbox_file, att_id)
+        write_file(INBOX .. "/withdrawn-" .. sanitize_filename(entry.filename),
+            sender .. " withdrew the attachment " .. entry.filename ..
+            " before it arrived; nothing of it was kept.")
+        cprog[att_id] = nil
+        save_state("consent-pending.json", cprog)
+        -- An answer to the form may still be waiting to go out; it has
+        -- nothing left to answer.
+        local responses = load_state("consent-responses.json")
+        if type(responses) == "table" and responses[1] then
+            local kept = {}
+            for _, r in ipairs(responses) do
+                if r.attachment_id ~= att_id then kept[#kept + 1] = r end
+            end
+            save_state("consent-responses.json", kept)
+        end
+        log("attachment %s withdrawn by %s", entry.filename, sender)
+        return 200, {ok = true}
+    end
+
+    return 404, {error = "no such attachment transfer"}
 end
 
 
@@ -4577,15 +4950,21 @@ local function check_transfers_file_cancellations()
         end
     end
 
+    -- The author stopped sending this file to this recipient: "cancelled",
+    -- so it is not offered again while the attach: line stays (#406), and
+    -- the recipient is told, so their form or pieces go (#407).
     local changed = false
+    local state = load_state("outbox.json")
     for att_id, transfer in pairs(to_cancel) do
-        release_zip(chunks, transfer.compressed_path)
+        answers.stop(state, att_id, transfer, "cancelled")
         chunks[att_id] = nil
+        release_zip(chunks, transfer)
         log("transfer cancelled via transfers file: %s to %s", transfer.filename, transfer.to)
         changed = true
     end
 
     if changed then
+        save_state("outbox.json", state)
         save_state("chunks-outgoing.json", chunks)
         write_transfers_file(chunks)
     end
@@ -4597,6 +4976,9 @@ local function send_next_chunks(my_name)
     local contacts = load_contacts()
     local did_work = false
     local changed = false
+    -- The outbox record, read only when an answer has to be written into
+    -- it (a transfer completed, was cancelled, or lost its packed copy).
+    local outbox_state
     for att_id, transfer in pairs(chunks) do
         if transfer.status ~= "sending" then goto continue end
         local contact = contacts[transfer.to]
@@ -4616,13 +4998,27 @@ local function send_next_chunks(my_name)
             transfer.zip_id = nil
             changed = true
         end
+        if (zip_path == nil or not file_exists(zip_path)) and not transfer.auto_body then
+            -- The packed copy of an attach: file is gone.  Every recipient
+            -- must get the bytes first offered (#408), so it is not packed
+            -- again: the transfer and its siblings stop, marked lost, with
+            -- a note in the outbox file (answers.lost).  It is kept on disk
+            -- in the mailbox now (#404f), so this means someone removed it.
+            -- (It used to be rebuilt from the file as it was by then.)
+            outbox_state = outbox_state or load_state("outbox.json")
+            answers.lost(outbox_state, chunks, transfer.outbox_file, transfer.original_path)
+            changed = true
+            goto continue
+        end
         if zip_path == nil or not file_exists(zip_path) then
-            -- The compressed zip lives in /tmp and can be wiped (e.g. a
-            -- reboot) while a transfer waits for consent.  Rebuild it from
-            -- the original source rather than dropping the transfer: the
-            -- fresh checksum rides with the chunks (it isn't pinned at
-            -- consent) and the receiver's repair path reconciles any stale
-            -- partial chunks, so no re-consent is needed.
+            -- An oversized message body sent as an attachment (#349): its
+            -- zip and its source both sit in the pending folder, and if
+            -- that is RAM (attachment_pending_dir = /tmp) a reboot wipes
+            -- them.  Rebuilt from the source when it is still there: the
+            -- body is the message's text, the same for every recipient.
+            -- The fresh checksum rides with the chunks and the receiver's
+            -- repair path reconciles any stale partial chunks, so no
+            -- re-consent is needed.
             local src = transfer.original_path
             local new_zip, new_checksum, new_size
             if src and file_exists(src) then
@@ -4654,7 +5050,7 @@ local function send_next_chunks(my_name)
                     log("chunk transfer: zip missing and original gone for %s, cancelling", att_id)
                 end
                 chunks[att_id] = nil
-                release_zip(chunks, transfer.compressed_path)
+                release_zip(chunks, transfer)
                 changed = true; goto continue
             end
         end
@@ -4730,8 +5126,12 @@ local function send_next_chunks(my_name)
         end
         f:close()
         if cancelled then
-            release_zip(chunks, transfer.compressed_path)
+            -- The receiver's daemon refused it mid-transfer (#404's checks):
+            -- not offered to them again (#406).  The message is untouched.
+            outbox_state = outbox_state or load_state("outbox.json")
+            answers.record(outbox_state, transfer, "cancelled")
             chunks[att_id] = nil
+            release_zip(chunks, transfer)
             changed = true
         elseif not aborted and #transfer.missing == 0 then
             transfer.status = "complete"
@@ -4740,25 +5140,27 @@ local function send_next_chunks(my_name)
         end
         ::continue::
     end
-    -- clean up completed transfers and release shared zips.  This is
-    -- the typical completion path (status flips to "complete" above and
-    -- we clear the entry in the same call); the secondary cleanup in
-    -- sync_outbox exists only as a belt-and-braces for entries that
-    -- somehow persist across cycles.
+    -- Completed transfers: the recipient's answer becomes "complete", so
+    -- the file is not offered to them again, and the transfer record goes.
+    -- The attach: line stays as the author wrote it: other recipients,
+    -- reached later, still get the file (#408).  It used to be removed
+    -- here, by sync_outbox, on the first recipient's completion.
     for att_id, transfer in pairs(chunks) do
         if transfer.status == "complete" then
             -- #349: auto-body transfers put their source under pending/;
-            -- delete it now that the last chunk has been acked.  No
-            -- outbox attach: line to strip (there never was one).
+            -- delete it now that the last chunk has been acked.
             if transfer.auto_body and transfer.original_path
                and file_exists(transfer.original_path) then
                 os.remove(transfer.original_path)
             end
+            outbox_state = outbox_state or load_state("outbox.json")
+            answers.record(outbox_state, transfer, "complete")
             chunks[att_id] = nil
-            release_zip(chunks, transfer.compressed_path)
+            release_zip(chunks, transfer)
             changed = true
         end
     end
+    if outbox_state then save_state("outbox.json", outbox_state) end
     if changed then save_state("chunks-outgoing.json", chunks) end
     return did_work
 end
@@ -4773,6 +5175,7 @@ local function handle_deliver(data, sender)
     elseif msg_type == "attachment_request"  then return handle_attachment_request(data, sender)
     elseif msg_type == "attachment_response" then return handle_attachment_response(data, sender)
     elseif msg_type == "attachment_chunk"    then return handle_attachment_chunk(data, sender)
+    elseif msg_type == "attachment_cancel"   then return answers.handle_cancel(data, sender)
     elseif msg_type == "chunk_failed"        then return 200, {ok = true}
     else return 400, {error = "unknown type: " .. tostring(msg_type)}
     end
@@ -4817,13 +5220,15 @@ local function self_delete_from_outbox(my_name, message_id)
 end
 
 local function sync_outbox(my_name)
-    -- Undo mark_missing_attachment once the file exists.  Otherwise the
-    -- marker outlives the problem and still says "file not found" beside an
-    -- attachment that has since been sent.
-    local function clear_missing_marker(outbox_path, filepath)
+    -- Take a daemon's note about an attached path out of the outbox file
+    -- once the problem is over.  Otherwise it outlives the problem: "file
+    -- not found" beside an attachment since sent (MISSING ATTACHMENT, when
+    -- the file appears), or "packed copy is gone" after the line it was
+    -- about was removed (ATTACHMENT LOST, see answers.lost).
+    local function clear_marker(outbox_path, label, filepath)
         local text = read_file(outbox_path)
         if not text then return end
-        local marker = "// MISSING ATTACHMENT: " .. filepath
+        local marker = "// " .. label .. ": " .. filepath
         local s, e = text:find(marker, 1, true)
         if not s then return end
         local line_start = s
@@ -4832,7 +5237,11 @@ local function sync_outbox(my_name)
         end
         local line_end = text:find("\n", e, true) or #text
         write_file(outbox_path, text:sub(1, line_start - 1) .. text:sub(line_end + 1))
-        log("attach: found %s, cleared its missing-attachment marker", filepath)
+        -- "cleared its missing-attachment marker" is what the tests watch for
+        log("attach: %s, cleared its %s marker", filepath, (label:lower():gsub(" ", "-")))
+    end
+    local function clear_missing_marker(outbox_path, filepath)
+        clear_marker(outbox_path, "MISSING ATTACHMENT", filepath)
     end
 
     local contacts = load_contacts()
@@ -4852,27 +5261,22 @@ local function sync_outbox(my_name)
     -- the cleanup pass can tell the two apart.
     local outbox_files_with_unresolved_recipients = {}
 
-    -- clean up completed transfers: remove attach: lines from outbox files
+    -- Completed transfers left from a cycle that stopped part-way (the
+    -- chunk sender normally clears them itself): the recipient's answer
+    -- becomes "complete".  The attach: line is not removed -- other
+    -- recipients may still be owed the file (#408).
     for att_id, transfer in pairs(att_state) do
         if transfer.status == "complete" then
             if transfer.auto_body then
-                -- #349: no outbox attach: line to strip (the body came
-                -- from op.body, not a user-visible attach line), but
-                -- the /tmp auto-body source file needs cleaning up.
+                -- #349: the auto-body source file needs cleaning up.
                 if transfer.original_path
                    and file_exists(transfer.original_path) then
                     os.remove(transfer.original_path)
                 end
                 log("auto-body transfer complete to %s (%s)",
                     transfer.to, transfer.outbox_file)
-            else
-                local outbox_path = OUTBOX .. "/" .. transfer.outbox_file
-                if file_exists(outbox_path) then
-                    remove_attach_from_file(outbox_path, transfer.original_path)
-                end
-                log("attachment transfer complete, removed attach: %s",
-                    transfer.filename)
             end
+            answers.record(state, transfer, "complete")
             att_state[att_id] = nil
             att_state_changed = true
             did_work = true
@@ -4996,6 +5400,7 @@ local function sync_outbox(my_name)
                             state[name].recipients[my_name] = {
                                 message_id = msg_id,
                                 self = true,
+                                body_checksum = sha256_of_bytes(body or ""),
                             }
                             log("self-delivered: %s -> %s", name, inbox_name)
                             did_work = true
@@ -5027,6 +5432,10 @@ local function sync_outbox(my_name)
                                     type = "deliver", filename = name,
                                     recipient = rname, message_id = uuid(),
                                     subject = name, body = body,
+                                    -- of the outbox body, even when an
+                                    -- oversized one goes as a stub (#349):
+                                    -- what #409 compares is the author's text
+                                    body_checksum = sha256_of_bytes(body or ""),
                                     mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
                                 }
@@ -5040,10 +5449,19 @@ local function sync_outbox(my_name)
                             outbox_files_with_unresolved_recipients[name] = true
                         end
                     elseif contacts[rname] then
-                        -- existing recipient: check for new attach: lines not yet in progress
+                        -- Existing recipient: offer each attached path they
+                        -- have no answer for (#406), from the one packed
+                        -- copy every recipient gets (#408).
                         local rmeta = state[name].recipients[rname]
                         if not rmeta.error then
                             for _, filepath in ipairs(entry.attachments) do
+                                local answer = rmeta.attachments and rmeta.attachments[filepath]
+                                -- complete, declined, cancelled: never again.
+                                -- lost: not until the line is removed and
+                                -- put back (answers.lost).  withdrawn: the
+                                -- line was removed and is back -- offered.
+                                local settled = answer == "complete" or answer == "declined"
+                                    or answer == "cancelled" or answer == "lost"
                                 local in_progress = false
                                 for tid, transfer in pairs(att_state) do
                                     if transfer.to == rname and
@@ -5067,70 +5485,77 @@ local function sync_outbox(my_name)
                                         break
                                     end
                                 end
-                                if not in_progress and not file_exists(filepath) then
+                                local packed = state[name].packed and state[name].packed[filepath]
+                                if settled or in_progress then
+                                    -- nothing to offer
+                                elseif packed and not file_exists(packed.zip) then
+                                    -- the copy others were offered is gone
+                                    answers.lost(state, att_state, name, filepath)
+                                    att_state_changed = true
+                                elseif not packed and not file_exists(filepath) then
                                     mark_missing_attachment(
                                         OUTBOX .. "/" .. name, filepath, name)
-                                elseif not in_progress then
-                                    -- The file is here now.  An already
-                                    -- delivered message reaches this branch
-                                    -- and not the undelivered one above, so
-                                    -- its note has to be taken away here too,
-                                    -- or it keeps saying "not found" beside a
-                                    -- file that is being sent.
-                                    clear_missing_marker(OUTBOX .. "/" .. name, filepath)
-                                    local att_id = uuid()
-                                    local basename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
-                                    local expected_size = measure_size(filepath) or 0
-                                    -- find existing zip for this file (shared across recipients)
-                                    local zip_path, checksum, total_chunks
-                                    for _, t in pairs(att_state) do
-                                        if t.outbox_file == name and
-                                           t.original_path == filepath and
-                                           t.compressed_path and
-                                           file_exists(t.compressed_path) then
-                                            zip_path     = t.compressed_path
-                                            checksum     = t.total_checksum
-                                            total_chunks = t.total_chunks
-                                            break
-                                        end
-                                    end
-                                    if not zip_path then
-                                        local comp_size
-                                        zip_path, checksum, comp_size =
-                                            compress_attachment(filepath)
+                                else
+                                    if not packed then
+                                        -- First offer of this path in this
+                                        -- message: pack it, once.  Every
+                                        -- recipient gets these bytes, even
+                                        -- if the file changes or goes later.
+                                        --
+                                        -- The file is here now.  An already
+                                        -- delivered message reaches this branch
+                                        -- and not the undelivered one above, so
+                                        -- its note has to be taken away here too,
+                                        -- or it keeps saying "not found" beside a
+                                        -- file that is being sent.
+                                        clear_missing_marker(OUTBOX .. "/" .. name, filepath)
+                                        local expected_size = measure_size(filepath) or 0
+                                        local zip_path, checksum, comp_size = compress_attachment(filepath)
                                         if zip_path then
-                                            total_chunks = math.max(1,
-                                                math.ceil(comp_size / cfg.chunk_size))
+                                            packed = {
+                                                zip = zip_path, checksum = checksum,
+                                                total_chunks = math.max(1, math.ceil(comp_size / cfg.chunk_size)),
+                                                expected_size = expected_size,
+                                                filename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath,
+                                            }
+                                            state[name].packed = state[name].packed or {}
+                                            state[name].packed[filepath] = packed
+                                        else
+                                            -- Not recorded, so the next cycle
+                                            -- packs it again.  On failure
+                                            -- compress_attachment returns the
+                                            -- reason where the checksum would be.
+                                            log("failed to compress %s for %s (%s)", filepath, rname, tostring(checksum))
                                         end
                                     end
-                                    if zip_path then
+                                    if packed then
+                                        local att_id = uuid()
                                         att_state[att_id] = {
                                             to = rname, outbox_file = name,
-                                            original_path = filepath, filename = basename,
-                                            compressed_path = zip_path,
-                                            total_chunks = total_chunks,
-                                            total_checksum = checksum,
-                                            expected_size = expected_size,
+                                            original_path = filepath, filename = packed.filename,
+                                            compressed_path = packed.zip,
+                                            total_chunks = packed.total_chunks,
+                                            total_checksum = packed.checksum,
+                                            expected_size = packed.expected_size,
                                             message_id = rmeta.message_id,
                                             status = "awaiting_consent",
                                             request_sent = false,
                                         }
                                         att_state_changed = true
+                                        if answer == "withdrawn" then
+                                            -- offered again: the answer is
+                                            -- whatever this offer brings
+                                            rmeta.attachments[filepath] = nil
+                                        end
                                         ops[#ops + 1] = {
                                             type = "attachment_request",
                                             att_id = att_id, filename = name,
                                             recipient = rname,
                                             contact = contacts[rname],
-                                            att_filename = basename,
-                                            expected_size = expected_size,
+                                            att_filename = packed.filename,
+                                            expected_size = packed.expected_size,
                                             message_id = rmeta.message_id,
                                         }
-                                    else
-                                        -- Not recorded, so the next cycle
-                                        -- packs it again.  On failure
-                                        -- compress_attachment returns the
-                                        -- reason where the checksum would be.
-                                        log("failed to compress %s for %s (%s)", filepath, rname, tostring(checksum))
                                     end
                                 end
                             end
@@ -5142,12 +5567,109 @@ local function sync_outbox(my_name)
                     end
                 end
 
-                -- detect body edits: compare current body checksum against stored
+                -- Attached paths each recipient's to: line still lists.
+                local listed = {}
+                for _, e in ipairs(entries) do
+                    listed[e.name] = {}
+                    for _, fp in ipairs(e.attachments) do listed[e.name][fp] = true end
+                end
+
+                -- Withdrawn files (#406): a transfer of this message whose
+                -- path is no longer attached for its recipient.  Seen only
+                -- when a cycle reads the file without the line -- removed
+                -- and put back between two cycles, nothing happened.  The
+                -- transfer stops, the answer is "withdrawn" (offered again
+                -- if the line comes back), and a recipient who may hold the
+                -- form or pieces is owed a withdrawal.  A recipient whose
+                -- to: line went is not: the removal notice makes their
+                -- daemon drop the message and everything attached to it.
+                for tid, t in pairs(att_state) do
+                    if t.outbox_file == name and not t.auto_body
+                       and not (listed[t.to] and listed[t.to][t.original_path]) then
+                        if listed[t.to] then
+                            answers.stop(state, tid, t, "withdrawn")
+                            log("attachment %s withdrawn from %s (its attach: line was removed)",
+                                t.filename, t.to)
+                        end
+                        att_state[tid] = nil
+                        att_state_changed = true
+                        did_work = true
+                    end
+                end
+                for rname, rmeta in pairs(state[name].recipients) do
+                    for path, a in pairs(rmeta.attachments or {}) do
+                        if a == "lost" and not (listed[rname] and listed[rname][path]) then
+                            -- the author removed the line, as the note asked:
+                            -- putting it back offers it again
+                            rmeta.attachments[path] = "withdrawn"
+                            clear_marker(OUTBOX .. "/" .. name, "ATTACHMENT LOST", path)
+                        end
+                    end
+                    -- owed withdrawals, retried on the contact's timer
+                    if contacts[rname] and rmeta.withdrawals then
+                        for aid, path in pairs(rmeta.withdrawals) do
+                            ops[#ops + 1] = {
+                                type = "attachment_withdraw", filename = name,
+                                recipient = rname, contact = contacts[rname],
+                                att_id = aid, attached_path = path,
+                                message_id = rmeta.message_id,
+                            }
+                        end
+                    end
+                end
+
+                -- The packed copy of a path is kept while any recipient
+                -- still needs it: one whose to: line lists the path and
+                -- who has no answer for it yet (not yet offered, or the
+                -- offer under way) or a withdrawn one (offered again).
+                -- Recipients who cannot be sent to -- not a contact, or
+                -- marked with an error -- do not hold it.
+                for path, pk in pairs(state[name].packed or {}) do
+                    local needed = false
+                    for _, e in ipairs(entries) do
+                        local rm = state[name].recipients[e.name]
+                        if listed[e.name][path] and contacts[e.name] and e.name ~= my_name
+                           and not (rm and rm.error) then
+                            local a = rm and rm.attachments and rm.attachments[path]
+                            if a == nil or a == "withdrawn" then needed = true end
+                        end
+                    end
+                    if not needed then
+                        os.remove(pk.zip)
+                        state[name].packed[path] = nil
+                        log("packed copy of %s for %s removed: every recipient has answered", path, name)
+                    end
+                end
+                if state[name].packed and not next(state[name].packed) then
+                    state[name].packed = nil
+                end
+
+                -- Body edits (#409).  Each recipient keeps the checksum of
+                -- the body it last *answered* for, written only when its
+                -- deliver or update succeeds.  An update is owed to every
+                -- recipient whose kept checksum differs from the file's,
+                -- and stays owed -- rebuilt every cycle -- until that
+                -- recipient answers.  There used to be one checksum for the
+                -- whole file, saved while the updates were being built and
+                -- before any was sent: a contact who was not due, or could
+                -- not be reached, missed the edit for good, because next
+                -- cycle the file's checksum already matched.
                 local current_checksum = sha256_of_bytes(body or "")
-                if state[name].body_checksum and current_checksum ~= state[name].body_checksum then
-                    -- body changed since last sync — queue updates for all delivered recipients
+                for _, rmeta in pairs(state[name].recipients) do
+                    -- Recipients delivered before #409 have no checksum of
+                    -- their own.  The file-wide one is the best record of
+                    -- what they were last sent: take it, once.  (With no
+                    -- file-wide one either, the recipient is owed an update,
+                    -- which at worst resends what they already have.)
+                    if rmeta.body_checksum == nil then
+                        rmeta.body_checksum = state[name].body_checksum
+                    end
+                end
+                state[name].body_checksum = nil
+                do
                     for rname, rmeta in pairs(state[name].recipients) do
-                        if rmeta.message_id and not rmeta.error then
+                        if rmeta.message_id and not rmeta.error
+                           and rmeta.body_checksum ~= current_checksum then
                             if rmeta.self then
                                 -- self-delivery update: apply directly to own inbox
                                 local inbox_state = load_state("inbox.json")
@@ -5167,11 +5689,15 @@ local function sync_outbox(my_name)
                                         break
                                     end
                                 end
+                                -- Applied, or our own copy was deleted from
+                                -- the inbox: either way nothing is owed.
+                                rmeta.body_checksum = current_checksum
                             elseif contacts[rname] then
                                 ops[#ops + 1] = {
                                     type = "update", filename = name,
                                     recipient = rname, message_id = rmeta.message_id,
                                     subject = name, body = body,
+                                    body_checksum = current_checksum,
                                     mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
                                 }
@@ -5179,7 +5705,6 @@ local function sync_outbox(my_name)
                         end
                     end
                 end
-                state[name].body_checksum = current_checksum
             end
         end
     end
@@ -5377,6 +5902,12 @@ local function sync_outbox(my_name)
                         filename = op.att_filename,
                         subject = op.filename,
                         expected_size = op.expected_size}
+            elseif op.type == "attachment_withdraw" then
+                -- the one-attachment cancel, going the author's way (#407)
+                path = "/deliver"
+                data = {type = "attachment_cancel",
+                        attachment_id = op.att_id,
+                        message_id = op.message_id}
             else
                 path = "/delete"
                 data = {message_id = op.message_id}
@@ -5425,6 +5956,7 @@ local function sync_outbox(my_name)
                     if state[op.filename] then
                         state[op.filename].recipients[op.recipient] = {
                             message_id = op.message_id,
+                            body_checksum = op.body_checksum,
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
@@ -5433,6 +5965,12 @@ local function sync_outbox(my_name)
                 -- failure: rolls into the unreachable summary (#324)
             elseif op.type == "update" then
                 if results[i].ok then
+                    -- Only now is the edit theirs (#409).  Any other
+                    -- outcome leaves the old checksum, so the update is
+                    -- built again next cycle and goes out when they are due.
+                    local rmeta = state[op.filename]
+                        and state[op.filename].recipients[op.recipient]
+                    if rmeta then rmeta.body_checksum = op.body_checksum end
                     log("updated: %s -> %s", op.filename, op.recipient)
                     did_work = true
                 elseif results[i].status == 404 then
@@ -5452,11 +5990,13 @@ local function sync_outbox(my_name)
                     did_work = true
                 elseif results[i].status then
                     -- They answered and refused (4xx/5xx): retrying the
-                    -- same request will not change that.  Drop it and
-                    -- release the shared zip if nobody else needs it.
+                    -- same request will not change that.  Drop it, and
+                    -- remember the refusal so the path is not offered to
+                    -- them again every cycle (#406).
                     if transfer then
+                        answers.record(state, transfer, "cancelled")
                         att_state[op.att_id] = nil
-                        release_zip(att_state, transfer.compressed_path)
+                        release_zip(att_state, transfer)
                         att_state_changed = true
                     end
                     log("attachment request to %s refused (%s): %s",
@@ -5471,6 +6011,27 @@ local function sync_outbox(my_name)
                     transfer.request_sent = false
                     att_state_changed = true
                 end
+            elseif op.type == "attachment_withdraw" then
+                -- Any answer settles it: ok, 404 (they hold nothing of it
+                -- -- never answered the form, or already discarded it), or
+                -- a refusal from a daemon too old to know the message,
+                -- which asking again will not change.  No answer: owed
+                -- still, and sent when the contact is next due.
+                local status = results[i].status
+                if results[i].ok or status ~= nil then
+                    local rmeta = state[op.filename] and state[op.filename].recipients[op.recipient]
+                    if rmeta and rmeta.withdrawals then
+                        rmeta.withdrawals[op.att_id] = nil
+                        if not next(rmeta.withdrawals) then rmeta.withdrawals = nil end
+                    end
+                    if results[i].ok or status == 404 then
+                        log("told %s the attachment %s was withdrawn", op.recipient, op.attached_path)
+                    else
+                        log("warning: %s refused the withdrawal of %s (%s) -- an older rmail? its form stays until answered",
+                            op.recipient, op.attached_path, tostring(status))
+                    end
+                    did_work = true
+                end
             elseif op.type == "notify_deletion" then
                 if results[i].ok or results[i].status == 404 then
                     if state[op.filename] and state[op.filename].recipients then
@@ -5484,16 +6045,25 @@ local function sync_outbox(my_name)
         end
     end
 
+    -- A message's record is going: its packed copies go with it (#408).
+    local function drop_packed(name)
+        for path, pk in pairs(state[name].packed or {}) do
+            os.remove(pk.zip)
+            log("packed copy of %s for %s removed: the message is gone", path, name)
+        end
+    end
+
     -- clean up deleted files from state (only when all recipients notified)
     for name in pairs(state) do
         if not current[name] then
             if not state[name].recipients or not next(state[name].recipients) then
+                drop_packed(name)
                 state[name] = nil
                 -- cancel any outgoing chunk transfers for this outbox file
                 for att_id, transfer in pairs(att_state) do
                     if transfer.outbox_file == name then
                         att_state[att_id] = nil
-                        release_zip(att_state, transfer.compressed_path)
+                        release_zip(att_state, transfer)
                         att_state_changed = true
                         log("cancelled outgoing chunks for %s (outbox file deleted)", att_id)
                     end
@@ -5517,6 +6087,7 @@ local function sync_outbox(my_name)
            and not outbox_files_with_unresolved_recipients[name] then
             os.remove(OUTBOX .. "/" .. name)
             log("cleaned up %s: no recipients left", name)
+            drop_packed(name)
             state[name] = nil
             did_work = true
         end
@@ -5976,8 +6547,9 @@ end
 
 -- Serialize contacts in a canonical, deterministic form for hashing and wire transfer.
 -- Contacts sorted by name, fields sorted by key. Values are quoted when non-numeric.
-local function serialize_contacts_canonical()
-    local contacts = load_contacts()
+-- Takes a contacts table (load_contacts() for the file as it is,
+-- contactfile.parse(text) for text that is not the file yet).
+local function serialize_contacts_canonical(contacts)
     local names = {}
     for name in pairs(contacts) do names[#names+1] = name end
     table.sort(names)
@@ -6030,7 +6602,7 @@ local function serialize_contacts_canonical()
 end
 
 local function canonical_contacts_hash()
-    return hex_sha256(serialize_contacts_canonical())
+    return hex_sha256(serialize_contacts_canonical(load_contacts()))
 end
 
 -- GET /peer-address — return the caller's stored address (ip/port) from our contacts file.
@@ -6147,7 +6719,7 @@ local function handle_api_sync(data, caller_name, my_name)
     local contacts_text = nil
     local phone_hash = data.contacts_hash
     if not phone_hash or phone_hash ~= canonical_contacts_hash() then
-        contacts_text = serialize_contacts_canonical()
+        contacts_text = serialize_contacts_canonical(load_contacts())
     end
 
     return 200, {
@@ -6182,10 +6754,263 @@ end
 
 -- GET /api/contacts — return contacts in canonical serialization for hashing/transfer.
 local function handle_api_get_contacts()
-    return 200, "text/plain; charset=utf-8", serialize_contacts_canonical()
+    return 200, "text/plain; charset=utf-8", serialize_contacts_canonical(load_contacts())
 end
 
--- POST /api/contacts — accept contacts file from phone, replacing server's version.
+-- ---- Saving contacts from the phone (#411) --------------------------------
+--
+-- The phone holds the contacts in canonical form (serialize_contacts_canonical:
+-- one `name.key = value` line per field, sorted, no comments) and posts the
+-- whole of it back after an edit.  That text used to be written over the
+-- contacts file as it was, so every save from the phone threw away the
+-- person's comments, blank lines and ordering.
+--
+-- Now the posted text is compared with the canonical form of the file as it
+-- is, contact by contact, and only what differs is changed in the file:
+--
+--   contact unchanged        its lines are not touched
+--   contact removed          its lines go, with the comment lines directly
+--                            above its first line
+--   contact added            appended at the end, after a blank line
+--   contact changed          each changed key's one line is edited in place
+--                            (spacing before the value kept), a removed key's
+--                            line deleted, a new key added after the contact's
+--                            last line
+--
+-- The canonical form is not always the file's own shape: `ip[1]` with no
+-- plain `ip` shows as `ip`, `local-ip[N]` are renumbered, an `ipv6` line is
+-- folded into the address list.  A changed key that has no single line of
+-- its own in the file cannot be edited in place; then that contact's entry
+-- lines are replaced by its canonical lines, at the place its first line was.
+-- Comments among them stay.
+--
+-- Whatever path was taken, the merged text is parsed and must come out
+-- equal to what the phone sent.  If it does not, nothing is written and the
+-- save is refused: a contacts file that quietly differs from what the owner
+-- saved would send mail to the wrong place.
+
+-- {{{ contactfile.canonical_map
+-- Canonical contacts text -> {name -> {key -> line}}.  Keys keep their
+-- index ("ip[2]", "local-ip"); a line is the whole `name.key = value`.
+function contactfile.canonical_map(text)
+    local map = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local name, key = line:match("^([%w_%-]+)%.([%w_%-]+%[?%d*%]?)%s*=")
+        if name then
+            map[name] = map[name] or {}
+            map[name][key] = line
+        end
+    end
+    return map
+end
+-- }}}
+
+-- {{{ contactfile.lines
+-- The contacts file as a list of lines, each tagged with what it is:
+--   {text, kind = "entry", name, key}   a `name.key = value` line
+--   {text, kind = "bare",  name}        a name alone on its line
+--   {text, kind = "comment"}            starts with / or #
+--   {text, kind = "blank"}
+-- `key` is spelled as the canonical form spells it ("ip[2]").
+function contactfile.lines(text)
+    local out = {}
+    -- Split keeping a final line without a newline; a trailing newline
+    -- does not make an extra empty line.
+    local body = text:gsub("\n$", "")
+    for raw in (body .. "\n"):gmatch("([^\n]*)\n") do
+        local t = raw:match("^%s*(.-)%s*$")
+        local l = {text = raw}
+        if t == "" then
+            l.kind = "blank"
+        elseif t:match("^[/#]") then
+            l.kind = "comment"
+        else
+            local name, key = t:match("^([%w_%-]+)%.([%w_%-]+%[?%d*%]?)%s*=")
+            if name then
+                l.kind, l.name, l.key = "entry", name, key
+            else
+                l.kind, l.name = "bare", t:match("^([%w_%-]+)$")
+            end
+        end
+        out[#out + 1] = l
+    end
+    return out
+end
+-- }}}
+
+-- {{{ contactfile.find
+-- Indexes of the file lines that belong to `name`, and, with `key`, only
+-- those for that key.
+function contactfile.find(lines, name, key)
+    local hits = {}
+    for i, l in ipairs(lines) do
+        if l.name == name and (key == nil or l.key == key) then
+            hits[#hits + 1] = i
+        end
+    end
+    return hits
+end
+-- }}}
+
+-- {{{ contactfile.edit_in_place
+-- Apply one changed contact key by key.  Returns false, untouched, when
+-- some changed key has no single line of its own (see the comment above).
+-- `ops` collects {at = line index, kind = "replace"|"delete"|"insert_after",
+-- text}; nothing is applied until every key has found its line.
+function contactfile.edit_in_place(lines, name, old, new, ops)
+    local mine = {}
+    local all = contactfile.find(lines, name)
+    local last = all[#all]
+    for key, old_line in pairs(old) do
+        local new_line = new[key]
+        if new_line ~= old_line then
+            local hits = contactfile.find(lines, name, key)
+            if #hits ~= 1 then return false end
+            if new_line then
+                -- Keep the person's spacing up to the value.
+                local prefix = lines[hits[1]].text:match("^(.-=%s*)")
+                local value = new_line:match("=%s*(.*)$")
+                mine[#mine + 1] = {at = hits[1], kind = "replace", text = prefix .. value}
+            else
+                mine[#mine + 1] = {at = hits[1], kind = "delete"}
+            end
+        end
+    end
+    local added = {}
+    for key, new_line in pairs(new) do
+        if old[key] == nil then
+            if #contactfile.find(lines, name, key) ~= 0 then return false end
+            added[#added + 1] = new_line
+        end
+    end
+    -- A contact always has a line in the file (it showed in the canonical
+    -- form, which is read from the file), so `last` is set.
+    table.sort(added)
+    for _, line in ipairs(added) do
+        mine[#mine + 1] = {at = last, kind = "insert_after", text = line}
+    end
+    for _, op in ipairs(mine) do ops[#ops + 1] = op end
+    return true
+end
+-- }}}
+
+-- {{{ contactfile.replace_block
+-- Replace one contact's entry lines with its canonical lines, at the place
+-- its first line was.  Comments among them stay.
+function contactfile.replace_block(lines, name, new, ops)
+    local hits = contactfile.find(lines, name)
+    local keys = {}
+    for key in pairs(new) do keys[#keys + 1] = key end
+    table.sort(keys)
+    for n, at in ipairs(hits) do
+        if n == 1 then
+            ops[#ops + 1] = {at = at, kind = "replace", text = new[keys[1]]}
+            for k = 2, #keys do
+                ops[#ops + 1] = {at = at, kind = "insert_after", text = new[keys[k]]}
+            end
+        else
+            ops[#ops + 1] = {at = at, kind = "delete"}
+        end
+    end
+end
+-- }}}
+
+-- {{{ contactfile.remove_contact
+-- Delete a contact's lines, and the comment lines directly above its first.
+function contactfile.remove_contact(lines, name, ops)
+    local hits = contactfile.find(lines, name)
+    local i = hits[1] - 1
+    while i >= 1 and lines[i].kind == "comment" do
+        ops[#ops + 1] = {at = i, kind = "delete"}
+        i = i - 1
+    end
+    for _, at in ipairs(hits) do ops[#ops + 1] = {at = at, kind = "delete"} end
+end
+-- }}}
+
+-- {{{ contactfile.apply
+-- The file's lines with `ops` applied, then the new contacts appended.
+-- Two blank lines left side by side by a deletion are made one.
+function contactfile.apply(lines, ops, appended)
+    local by_line = {}
+    for _, op in ipairs(ops) do
+        by_line[op.at] = by_line[op.at] or {}
+        local o = by_line[op.at]
+        if op.kind == "delete" then o.delete = true
+        elseif op.kind == "replace" then o.replace = op.text
+        else
+            -- Several inserts after one line are written in the order given.
+            o.after = o.after or {}
+            o.after[#o.after + 1] = op.text
+        end
+    end
+    local out = {}
+    local deleted_since_last = false
+    for i, l in ipairs(lines) do
+        local o = by_line[i] or {}
+        local keep = not o.delete
+        if keep and l.kind == "blank" and deleted_since_last
+           and (#out == 0 or out[#out] == "") then
+            keep = false
+        end
+        if keep then
+            out[#out + 1] = o.replace or l.text
+            deleted_since_last = false
+        else
+            deleted_since_last = true
+        end
+        for _, text in ipairs(o.after or {}) do out[#out + 1] = text end
+    end
+    if #appended > 0 then
+        if #out > 0 and out[#out] ~= "" then out[#out + 1] = "" end
+        for _, text in ipairs(appended) do out[#out + 1] = text end
+    end
+    return table.concat(out, "\n") .. "\n"
+end
+-- }}}
+
+-- {{{ contactfile.merge
+-- The current file's text and the phone's canonical text -> the file text
+-- to write, or nil and the reason.  `in_place` false forces every changed
+-- contact through replace_block.
+function contactfile.merge(file_text, posted, in_place)
+    local old = contactfile.canonical_map(serialize_contacts_canonical(contactfile.parse(file_text)))
+    local new = contactfile.canonical_map(posted)
+    local lines = contactfile.lines(file_text)
+    local ops, appended, rewritten = {}, {}, {}
+    for name, old_keys in pairs(old) do
+        local new_keys = new[name]
+        if not new_keys then
+            contactfile.remove_contact(lines, name, ops)
+        else
+            local same = true
+            for k, v in pairs(old_keys) do if new_keys[k] ~= v then same = false end end
+            for k in pairs(new_keys) do if old_keys[k] == nil then same = false end end
+            if not same then
+                if not (in_place and contactfile.edit_in_place(lines, name, old_keys, new_keys, ops)) then
+                    contactfile.replace_block(lines, name, new_keys, ops)
+                    rewritten[#rewritten + 1] = name
+                end
+            end
+        end
+    end
+    local added_names = {}
+    for name in pairs(new) do
+        if not old[name] then added_names[#added_names + 1] = name end
+    end
+    table.sort(added_names)
+    for n, name in ipairs(added_names) do
+        if n > 1 then appended[#appended + 1] = "" end
+        local keys = {}
+        for key in pairs(new[name]) do keys[#keys + 1] = key end
+        table.sort(keys)
+        for _, key in ipairs(keys) do appended[#appended + 1] = new[name][key] end
+    end
+    return contactfile.apply(lines, ops, appended), rewritten
+end
+-- }}}
+
+-- POST /api/contacts — the phone's edited contacts, merged into the file.
 local function handle_api_post_contacts(body)
     if not body or body == "" then return 400, {error = "empty body"} end
     -- Defensive: strip runtime-computed table fields (endpoints/ips) that an
@@ -6197,10 +7022,33 @@ local function handle_api_post_contacts(body)
         local field = line:match("^[%w_%-]+%.([%w_%-]+)%s*=")
         if field ~= "endpoints" and field ~= "ips" then kept[#kept + 1] = line end
     end
-    write_file(CONTACTS, table.concat(kept, "\n"))
-    align_contacts()
-    log("contacts updated from phone")
-    return 200, {ok = true}
+    -- What the phone means, in canonical form: the target the merge must hit.
+    local wanted = serialize_contacts_canonical(contactfile.parse(table.concat(kept, "\n")))
+    local file_text = read_file(CONTACTS) or ""
+    -- Two tries: key by key where every changed key has its own line, and
+    -- if the result does not read back as what the phone sent, every
+    -- changed contact rewritten as a block.
+    for _, in_place in ipairs({true, false}) do
+        local merged, rewritten = contactfile.merge(file_text, wanted, in_place)
+        if serialize_contacts_canonical(contactfile.parse(merged)) == wanted then
+            if not in_place then
+                log("warning: contacts from phone: key-by-key edit did not read back as sent; rewrote these contacts' lines as blocks")
+            end
+            if #rewritten > 0 then
+                table.sort(rewritten)
+                log("contacts from phone: lines rewritten in canonical form for %s",
+                    table.concat(rewritten, ", "))
+            end
+            if merged ~= file_text then
+                write_file(CONTACTS, merged)
+                align_contacts()
+                log("contacts updated from phone")
+            end
+            return 200, {ok = true}
+        end
+    end
+    log("error: contacts from phone could not be merged into the file so that it reads back as sent; file left unchanged")
+    return 500, {error = "contacts could not be merged; file unchanged"}
 end
 
 -- GET /api/attachments — list received attachments with name, size, category, sender.
@@ -6776,7 +7624,10 @@ end
 -- Request handler (extracted from main)
 -- ============================================================
 
-local function handle_request(rt, client)
+-- `preread`, when given, is the first frame of the connection, already
+-- read: a caller held while a sync cycle ran (ctimer.answer_while_sending)
+-- and handed over by the main loop afterwards.
+local function handle_request(rt, client, preread)
     client:settimeout(10)
 
     -- Known sender from previous request on this connection (for keep-alive)
@@ -6787,16 +7638,23 @@ local function handle_request(rt, client)
         -- Read first 4 bytes — length prefix or "GET " for health check
         -- Use a longer timeout for keep-alive idle (waiting for next request)
         client:settimeout(known_contact and 30 or 10)
-        local first4 = client:receive(4)
+        local first4 = preread and preread.first4 or client:receive(4)
         if not first4 or #first4 ~= 4 then return end  -- connection closed or timeout
 
-        -- Plaintext health check
+        -- Plaintext health check: lets a person test a port forward from
+        -- outside without the token.  It answers anyone, so it says
+        -- nothing about the mailbox -- only that something is listening.
+        -- (It once carried this mailbox's name.  That was harmless when
+        -- rmail spoke TLS and this answer travelled inside it; when
+        -- encryption moved into each frame, commit 60d309e kept the answer
+        -- in the clear and the name came with it, published to anyone who
+        -- asked.  Nothing read it.  Dropped 2026-10-04, #410.)
         if first4 == "GET " then
             while true do
                 local line = client:receive("*l")
                 if not line or line == "" then break end
             end
-            local hc_body = json.encode({ok = true, name = rt.my_name})
+            local hc_body = json.encode({ok = true})
             client:send(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
                 "Content-Length: " .. #hc_body .. "\r\nConnection: close\r\n\r\n" .. hc_body)
@@ -6807,7 +7665,9 @@ local function handle_request(rt, client)
         client:settimeout(10)
         local len = parse_uint32_be(first4)
         if len < 28 or len > 64 * 1024 * 1024 then return end
-        local packet = client:receive(len)
+        local packet
+        if preread then packet, preread = preread.packet, nil
+        else packet = client:receive(len) end
         if not packet or #packet ~= len then return end
 
         -- Decrypt: try known sender's key first (fast path for keep-alive)
@@ -7201,6 +8061,7 @@ end
 local function init_runtime()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
                paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
+    answers.sweep_pending()
     if not config.name then
         io.stderr:write("error: 'name' is not set in " .. CONFIG_PATH .. "\n"); os.exit(1)
     end
@@ -7558,6 +8419,8 @@ local function main()
     local stop = {started = socket.gettime(), next_check = 0, misses = 0, every = 3}
 
     rt.server:settimeout(0)  -- non-blocking accept
+    -- watched by a sync cycle's batches too (ctimer.answer_while_sending)
+    ctimer.listeners = {rt.server, rt.server6}
 
     local function resume_client(raw_sock)
         local info = clients[raw_sock]
@@ -7577,6 +8440,34 @@ local function main()
             info.wait_sock = wait_sock or raw_sock
         end
     end
+
+    -- {{{ start_client
+    -- A connection gets its own coroutine running the request handler,
+    -- started at once and run until its first wait.  `preread` is the
+    -- first frame of a caller held during a sync cycle.
+    local function start_client(raw_client, preread)
+        local async_client = make_async_socket(raw_client)
+        local co = coroutine.create(function()
+            handle_request(rt, async_client, preread)
+        end)
+        clients[raw_client] = {
+            co = co, wait_type = nil, wait_sock = nil,
+            last_activity = socket.gettime()
+        }
+        local ok, wait_type, wait_sock = coroutine.resume(co)
+        if not ok then
+            log("request error: %s", tostring(wait_type))
+            pcall(function() raw_client:close() end)
+            clients[raw_client] = nil
+        elseif coroutine.status(co) == "dead" then
+            pcall(function() raw_client:close() end)
+            clients[raw_client] = nil
+        else
+            clients[raw_client].wait_type = wait_type
+            clients[raw_client].wait_sock = wait_sock or raw_client
+        end
+    end
+    -- }}}
 
     while true do
         -- Build socket lists for select — includes inotify fd so the kernel
@@ -7630,29 +8521,7 @@ local function main()
                     contacts_changed = true
                 elseif sock == rt.server or sock == rt.server6 then
                     local raw_client = sock:accept()
-                    if raw_client then
-                        local async_client = make_async_socket(raw_client)
-                        local co = coroutine.create(function()
-                            handle_request(rt, async_client)
-                        end)
-                        clients[raw_client] = {
-                            co = co, wait_type = nil, wait_sock = nil,
-                            last_activity = socket.gettime()
-                        }
-                        -- Start processing — will run until first yield or completion
-                        local ok, wait_type, wait_sock = coroutine.resume(co)
-                        if not ok then
-                            log("request error: %s", tostring(wait_type))
-                            pcall(function() raw_client:close() end)
-                            clients[raw_client] = nil
-                        elseif coroutine.status(co) == "dead" then
-                            pcall(function() raw_client:close() end)
-                            clients[raw_client] = nil
-                        else
-                            clients[raw_client].wait_type = wait_type
-                            clients[raw_client].wait_sock = wait_sock or raw_client
-                        end
-                    end
+                    if raw_client then start_client(raw_client) end
                 else
                     -- Find which client owns this socket and resume it
                     for raw_sock, info in pairs(clients) do
@@ -7730,6 +8599,12 @@ local function main()
             pcall(poll_udp_cycle, rt)
             local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
+            -- callers held while the cycle waited on its own requests
+            local held = ctimer.deferred
+            ctimer.deferred = {}
+            for _, d in ipairs(held) do
+                start_client(d.sock, {first4 = d.first4, packet = d.packet})
+            end
             rt.last_sync = now
 
             if rt.nat_mapping then

@@ -45,7 +45,7 @@ Deleting works both ways:
 
 When all `to:` lines are gone (everyone deleted or was removed), the outbox file is cleaned up automatically.
 
-Editing works one way: change the text of your outbox file and the new version is sent to every recipient (a "living message"). Only the author's edits travel. A recipient who edits their inbox copy keeps that change to themselves, and the author's next edit overwrites it. An edit is currently sent once: a contact that is unreachable, or not yet due for a sync, when you edit never receives that version (issue #409).
+Editing works one way: change the text of your outbox file and the new version is sent to every recipient (a "living message"). Only the author's edits travel. A recipient who edits their inbox copy keeps that change to themselves, and the author's next edit overwrites it. An edit is owed to each recipient until that recipient's daemon has answered it: a contact that is offline, or not yet due for a sync, when you edit receives the newest version once it is reached.
 
 There is no history for deleted messages. The [scripting hooks](docs/.templates/scripting-tutorial.md) run when a message is received, sent or updated, and when the *other* side deletes one. `on_delete` does not run for your own deletions and is given only the other party's name, so it cannot back up a message you delete.
 
@@ -90,7 +90,7 @@ deny
 
 Leave either `accept` or `deny` to make your choice. Once accepted, the file is packed into a zip (stored, not compressed), transferred in chunks, and appears in `~/mail/attachments/` when complete.
 
-Known problems, each with an open issue: declining does not stop the offer — the sender offers the file again, with a new form, every time it syncs with you (#406); cancelling or refusing a transfer is sent as deleting the whole message, which removes you from it (#407); and when one recipient finishes, the file is no longer offered to recipients not yet reached (#408). Interrupted transfers resume automatically on the next sync cycle.
+The sender remembers each recipient's answer per attached file: a file is not offered again to someone who has it or said no, a recipient reached late still gets it, and every recipient gets the same bytes, packed when the file was first offered. Removing an `attach:` line withdraws the file from everyone who does not have it yet. Cancelling a transfer stops that file only; you stay on the message. Pieces wait on disk inside the mailbox, so interrupted transfers resume on the next sync cycle, even after a reboot.
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/.templates/attachments.md](docs/.templates/attachments.md).
 
@@ -271,7 +271,7 @@ To verify the daemon is reachable:
 curl http://localhost:8025/
 ```
 
-This returns `{"ok":true,"name":"yourname"}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly. Note that this plain-text answer is given to anyone who connects, so it currently reveals the mailbox's name (issue #410 removes it).
+This returns `{"ok":true}` if everything is working. You can also test from another machine using the public IP of your router instead of `localhost` to confirm port forwarding is set up correctly. This plain-text answer is given to anyone who connects, so it says nothing about the mailbox.
 
 Once the firewall is open, run the connectivity check to verify your router settings, naming your mailbox (or its config file):
 
@@ -326,7 +326,7 @@ All connections use AES-256-GCM encryption. Every message delivery and deletion 
 The protocol:
 - Each packet is `[4-byte length][12-byte random nonce][ciphertext][16-byte GCM auth tag]`
 - The AES key is `SHA256(token)` — a 32-byte key derived from the contact's token
-- The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in the encrypted traffic — only destination IP and port are visible to an observer. Two exceptions: the plain-text health check (`GET /`) answers anyone with the mailbox's name (issue #410), and nothing stops a recorded packet from being sent again later (no replay protection).
+- The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in the encrypted traffic — only destination IP and port are visible to an observer. Separately, nothing stops a recorded packet from being sent again later (no replay protection).
 - Your own devices (contacts marked `own`, such as your phone) are sent the whole contacts file, every contact's token included.
 
 `rmail_crypto.so` (compiled from source by `./scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
@@ -396,6 +396,11 @@ If the port isn't open or forwarded, the connection will either time out (packet
 The state files are plain JSON on purpose, so that this is a few seconds of `sed` rather than a program.
 
 ## Docs
+
+Every document, and the nine phases the project's issues are sorted into,
+are listed in [docs/table-of-contents.md](docs/table-of-contents.md).
+`./run-demo.sh` runs a demo of any phase: throwaway mailboxes in RAM doing
+that phase's work, with what came out and how long it took.
 
 - [docs/.templates/attachments.md](docs/.templates/attachments.md) — full attachment workflow, consent, configuration
 - [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md) — scripting hooks with examples in bash, Lua, and C

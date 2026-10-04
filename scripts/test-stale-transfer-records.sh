@@ -25,6 +25,11 @@
 #                   (the compressed copy is still there and is all it needs)
 #   both-gone       a current record whose source and copy are both gone
 #
+# A record with no compressed copy is stopped, not rebuilt (2026-10-04,
+# #408): every recipient must get the bytes first offered, and a copy
+# packed now from the source could differ.  Until then the copy was packed
+# again from the source when the source was still there.
+#
 # The recipient is an address reserved for documentation (192.0.2.7) so no
 # piece ever reaches anyone; what is tested is the sender's handling, not
 # delivery.  All four mailboxes run at once, on ports no install uses.
@@ -159,13 +164,10 @@ plant_record "$WORK/both-gone" "\"compressed_path\": \"$WORK/both-gone/files/cop
 rm "$WORK/both-gone/files/picture.jpg"
 
 echo "running four mailboxes at once (up to ${DEADLINE_SECONDS}s)"
-# old-record waits for the end of the cycle, not the rebuild line: the
-# rebuilt record is saved only after the send attempt to the unanswering
-# address has timed out, and the case checks what was saved.
-run_case old-record      59381 "unreachable contacts this cycle" &
-run_case old-record-gone 59382 "original gone" &
+run_case old-record      59381 "not packing it again" &
+run_case old-record-gone 59382 "not packing it again" &
 run_case source-deleted  59383 "unreachable contacts this cycle" &
-run_case both-gone       59384 "original gone" &
+run_case both-gone       59384 "not packing it again" &
 wait
 
 # --------------------------------------------------------------------------
@@ -198,24 +200,25 @@ else
     note_fail "no log line recognising the old record"
 fi
 if grep -q "was missing, recompressed" "$WORK/old-record.log"; then
-    ok "the compressed copy was rebuilt from the source"
+    note_fail "the compressed copy was rebuilt from the source"
+elif grep -q "is gone; not packing it again" "$WORK/old-record.log"; then
+    ok "the transfer was stopped, not packed again from the source"
 else
-    note_fail "the compressed copy was not rebuilt"
+    note_fail "the transfer was neither stopped nor rebuilt"
     info "$(tail -3 "$WORK/old-record.log")"
 fi
-if state_of old-record | grep -q '"compressed_path"' \
-   && ! state_of old-record | grep -q '"zip_id"'; then
-    ok "the saved record now uses the current field, and the old one is gone"
+if ! state_of old-record | grep -q "att-under-test"; then
+    ok "and its record was removed"
 else
-    note_fail "the saved record was not brought up to date"
+    note_fail "the record is still there"
     info "$(state_of old-record)"
 fi
 
 echo ""
 echo "an April-style record, source deleted"
 no_crash old-record-gone
-if grep -q "original gone for att-under-test, cancelling" "$WORK/old-record-gone.log"; then
-    ok "the transfer was cancelled with a reason"
+if grep -q "is gone; not packing it again" "$WORK/old-record-gone.log"; then
+    ok "the transfer was stopped with a reason"
 else
     note_fail "the transfer was not cancelled"
     info "$(tail -3 "$WORK/old-record-gone.log")"
@@ -243,8 +246,8 @@ fi
 echo ""
 echo "source and compressed copy both gone"
 no_crash both-gone
-if grep -q "original gone for att-under-test, cancelling" "$WORK/both-gone.log"; then
-    ok "the transfer was cancelled with a reason"
+if grep -q "is gone; not packing it again" "$WORK/both-gone.log"; then
+    ok "the transfer was stopped with a reason"
 else
     note_fail "the transfer was not cancelled"
     info "$(tail -3 "$WORK/both-gone.log")"

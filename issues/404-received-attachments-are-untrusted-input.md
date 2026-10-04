@@ -8,8 +8,8 @@ the phases.  The owner approved every fix below on 2026-09-29 ("yes,
 everything that you mentioned"); #404e was found during the work and
 added.
 
-Done: #404a, #327 (reopened and closed), #404b, #404d, #404e — each with
-its own test, all passing.  Open: #404c, whose daemon side is done and
+Done: #404a, #327 (reopened and closed), #404b, #404d, #404e, #404f —
+each with its own test, all passing.  Open: #404c, whose daemon side is done and
 tested but whose phone-app change has not been built (no Android SDK on
 the machine it was written on).  Until the new app is installed, phone
 uploads are refused.
@@ -102,6 +102,7 @@ handler, so they go one after the other.
     scripts/test-phone-upload-checks.sh      #404c (daemon side)
     scripts/test-torn-pack.sh                #404d
     scripts/test-attachment-ids-and-consent.sh  #404e
+    scripts/test-attachment-withdraw-and-resume.sh  #404f (pieces on disk across a restart)
     scripts/test-attachment-round-trip.sh    control: an honest transfer
 
 Each builds its own throwaway mailboxes under `/tmp/rmail/tests/` on its

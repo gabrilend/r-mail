@@ -276,9 +276,9 @@ http://YOUR_PUBLIC_IP:YOUR_PORT/
 
 For example: `http://184.3.201.206:8025/`
 
-You should see something like `{"ok":true,"name":"yourname"}`. If you see
-this, the connection works.  (Anyone who connects sees that answer, name
-included — #410 removes the name.)
+You should see `{"ok":true}`. If you see this, the connection works.
+(Anyone who connects sees that answer, which is why it says nothing about
+the mailbox.)
 
 **If it times out or refuses to connect:**
 
@@ -418,8 +418,9 @@ most (the shortest period Android allows), whenever Android lets it.
 and accept or deny; the answer is sent to your home server.
 
 **Tokens:** the home server sends the phone the whole contacts file, every
-contact's token included.  Saving contacts from the phone writes the phone's
-copy back, which today removes every comment from the contacts file (#411).
+contact's token included.  Saving contacts from the phone changes only the
+contacts that changed; the contacts file keeps its comments, blank lines and
+order.
 
 **Times:** messages keep the time the home server gave them; the lists are
 sorted by file name, not time.  Files sent up from the phone carry no time

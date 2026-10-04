@@ -86,8 +86,9 @@ the old body to reject an update).
 
 Only the author's edits travel: an edit you make to an inbox file stays on
 your side and is overwritten by the author's next update.  An update is
-currently sent once — a contact unreachable or not yet due when the author
-edits never receives that version (#409).
+owed to each recipient until their daemon answers it: a contact unreachable
+or not yet due when the author edits receives the newest version once
+reached.
 
 Hook paths: a relative path is read from the folder holding the config file
 (`./hooks/on_receive.sh` means this mailbox's copy, #382), a leading `~` is

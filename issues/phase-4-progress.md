@@ -29,6 +29,34 @@ runs, new issues that do not fit elsewhere continue here.
 
 Newest first, with one line on what each gave the project.
 
+- **2026-10-04 — #406, #407, #408, #404f: each recipient's answer about an
+  attached file is kept, and every recipient gets the same file.**  A file
+  is no longer offered again to someone who has it or said no; a recipient
+  reached late still gets it, from the one packed copy made when it was
+  first offered, kept on disk until everyone has answered; removing an
+  `attach:` line withdraws it, and putting it back after a sync offers it
+  again; a cancel names the attachment and no longer reads as deleting the
+  message; arriving pieces wait on disk inside the mailbox and survive a
+  restart.  Covered by `scripts/test-attachment-answers.sh` (against
+  stand-in recipients, `scripts/lib/fake-recipient.lua`) and
+  `scripts/test-attachment-withdraw-and-resume.sh`.
+
+- **2026-10-04 — #409 an edit is retried until it is delivered.**  Each
+  recipient keeps the checksum of the version it last took; an edit made
+  while a contact was not due or offline used to be lost for good.
+  Covered by `scripts/test-edit-delivery.sh`, which also caught a crash in
+  the address handler for a contact known only by its key (fixed).
+
+- **2026-10-04 — #410 the plain health check names no one.**  It answers
+  `{"ok":true}`; the mailbox's name had come along by accident when
+  encryption moved out of TLS.  Covered by
+  `scripts/test-plaintext-health-check.sh`.
+
+- **2026-10-04 — #411 saving contacts from the phone keeps the file's
+  comments.**  Only the contacts that changed are edited; the merged file
+  must read back as what the phone sent.  Covered by
+  `scripts/test-phone-contacts-save.sh`.
+
 - **2026-09-29 — #404e attachment ids are checked, and nothing is taken
   before the owner's yes.**  A contact chose the id that names a
   transfer's folder, which is later removed with `rm -rf`; an id climbing

@@ -871,11 +871,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 # your own name — used locally so the daemon can tell "me" from "everyone else"
 # in your contacts file.  Your contacts do not see it in the mail you send
 # them: each of them sees you by whatever name they assigned you in their own
-# contacts file.
-#
-# It is not a secret, though.  The daemon answers the plaintext health check
-# documented in README.md with this name, without asking who is calling, so
-# anyone who can reach your port can read it.
+# contacts file, and the daemon's plaintext health check does not send it.
 #
 # The daemon tests a recipient against this name before it looks in your
 # contacts, so do not give a contact the same name as this.  A \`to:\` line

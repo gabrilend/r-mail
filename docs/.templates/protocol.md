@@ -77,8 +77,9 @@ attachment (see attachments, "Large message bodies").
 {"message_id": "uuid"}
 ```
 
-(Today a receiver's attachment cancellation is also sent as `/delete` with the
-message's id, which the sender cannot tell from a deletion — #407.)
+Cancelling one attachment is not a deletion: it is its own message,
+`attachment_cancel` (below), which names the attachment and leaves the
+message alone.
 
 **`POST /update-address`** — announce this mailbox's addresses (every start-up,
 and after an IP change):
@@ -107,7 +108,11 @@ These require the caller's contact entry to have `own = true` set.
 
 **`POST /api/file/outbox/<f>`** — upload an outbox file.
 
-**`GET /api/contacts`** / **`POST /api/contacts`** — read/write contacts file.
+**`GET /api/contacts`** / **`POST /api/contacts`** — read the contacts in
+sorted form with no comments; save that form back after editing.  A save is
+merged into the file: only contacts that differ are changed, comments and
+blank lines stay, and the merged file must read back as exactly what was
+posted or nothing is written (answer 500).
 
 **`GET /api/attachments`** / **`GET /api/attachments/<f>`** — list/download attachments.
 
@@ -130,9 +135,9 @@ The phone is sent the whole contacts file, every contact's token included.
 
 ### Unauthenticated (plaintext, no encryption)
 
-**`GET /`** — health check. Returns `{"ok":true,"name":"yourname"}` in plain HTTP
-to anyone who connects, so it reveals the mailbox's name (#410 removes it).
-Used by `validate-router-settings.sh` to test connectivity (it only needs an
+**`GET /`** — health check. Returns `{"ok":true}` in plain HTTP to anyone who
+connects — nothing about the mailbox, so it can test a port forward from
+outside without the token.  Used by `validate-router-settings.sh` to test connectivity (it only needs an
 answer).
 
 ### Message types
@@ -146,9 +151,17 @@ Every `/deliver` call includes a `type` field:
 | `attachment_request`  | sender -> receiver | consent request before file transfer |
 | `attachment_response` | receiver -> sender | accept or decline a consent request  |
 | `attachment_chunk`    | sender -> receiver | one piece of an accepted attachment  |
+| `attachment_cancel`   | either             | `{attachment_id}`: stop this one transfer.  From the receiver: they cancelled or refused it (the sender records *cancelled*).  From the sender: the author withdrew it (the receiver drops its pieces and form, and leaves a `withdrawn-<file>` note).  The message is untouched.  404 when there is no such transfer. |
 | `chunk_failed`        | either             | answered `ok`, nothing else          |
 
 Missing or unknown `type` values are rejected with 400.
+
+Any request may be answered `503` with `{"busy": true}`: the receiving
+daemon was in the middle of sending to the caller itself.  It is not an
+answer to the request — the caller retries it at its next sync (about 30
+seconds), without backing off and without trying the contact's other
+addresses.  Without it, two daemons that had something for each other at
+the same moment each waited out the other's timeout.
 
 ---
 

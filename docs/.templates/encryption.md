@@ -78,9 +78,10 @@ See "Mitigating traffic analysis" below for what you can do today via hooks.
 ### How the receiver knows who sent it
 
 rmail's messages carry no name in cleartext. Instead, the receiving daemon tries
-to decrypt the message using each contact's key, one at a time.  (One
-exception today: the plain-text health check, `GET /`, answers anyone who
-connects with the mailbox's name — #410 removes it.)
+to decrypt the message using each contact's key, one at a time.  (The
+plain-text health check, `GET /`, answers anyone who connects, but only with
+`{"ok":true}`: it says something is listening and nothing about whose
+mailbox it is.)
 
 The "seal" (authentication tag) is what tells it whether decryption worked.
 Here's how that check works: when the sender encrypts, AES-GCM produces a
@@ -170,8 +171,8 @@ again.
   `grep` for your token across `~/mail/` should find it exactly once, in
   `contacts`.  But every contact marked `own = true` (your phone) is sent the
   whole contacts file, every token included, and keeps a copy.  A save from
-  the phone writes its copy back, which today removes every comment from
-  `contacts` (#411).
+  the phone changes only the contacts that were changed, and keeps the
+  file's comments.
 
 ---
 
@@ -492,7 +493,7 @@ bastard took my wallet" heh what a rascal. I didn't know squirrels could do that
 |-------|-----------|------------|
 | Wire encryption | AES-256-GCM, random nonces | Length header in cleartext leaks approximate plaintext size (see #366) |
 | Authentication | Trial decryption with shared token | Only proves "knows the token" |
-| Metadata | No unencrypted headers in messages | IP addresses and timing visible; the plain-text health check names the mailbox (#410) |
+| Metadata | No unencrypted headers in messages | IP addresses and timing visible |
 | Replay | None | A recorded packet can be sent again and is acted on |
 | At rest | None (plaintext on disk) | Use full-disk encryption on the host |
 | Host isolation | Up to you | Dedicated device + separate network is ideal |

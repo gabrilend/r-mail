@@ -114,9 +114,8 @@ for form in ~/mail/inbox/*-consent-to-download-form; do
 done
 ```
 
-(Note that declining does not yet stop the sender offering the file again —
-#406 — so a denied sender's forms keep coming, and this script keeps
-denying them.)
+(A declined file is not offered again from the same message, so each
+denial is final for that file.)
 
 ---
 

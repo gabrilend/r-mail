@@ -124,8 +124,9 @@ schedule.  Agree with your contact before enabling.
 
 **Cost.** At most one packet per contact each time that contact's
 timer comes due (every 30 seconds at best), which is small.  An update
-made while the contact is not due is not sent later (#409), so the
-stream follows each contact's timer, not your tick.
+made while the contact is not due waits for their timer, and only the
+newest version is sent, so the stream follows each contact's timer, not
+your tick.
 
 **What it doesn't hide.** The *relationship* — that you have Bob
 as a contact at all.  An observer still sees your daemon making
@@ -335,7 +336,7 @@ for form in ~/mail/inbox/*-consent-to-download-form; do
 done
 ```
 
-(Declining does not yet stop the sender offering the file again — #406.)
+(A declined file is not offered again from the same message.)
 
 ### Audit log
 

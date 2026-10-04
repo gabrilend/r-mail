@@ -211,7 +211,9 @@ the mtime code, and the test works around both, with comments saying so:
   difference and never sends the edit. The same thing happens to an
   edit made while the recipient is unreachable. The test makes its edit
   while the sender is stopped: at startup every contact is due, so the
-  edit is sent at once.
+  edit is sent at once.  *Fixed 2026-10-04 by #409: each recipient keeps
+  the checksum it last answered for, and an update stays owed until
+  then.  The test's workaround is harmless and was left.*
 - **Two daemons that dial each other at once both stall, and the
   receiver gets duplicate messages.** A daemon answers incoming requests
   only between its own outgoing ones. When A and B dial each other at the
