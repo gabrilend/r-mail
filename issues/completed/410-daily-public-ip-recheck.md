@@ -212,3 +212,27 @@ The "one provider is enough" requirement needed no code change:
 
 The `math.randomseed` gotcha described above was real and is fixed centrally,
 which also repairs `shuffled_ip_services()`.
+
+### Follow-up 2026-10-04: the home-network address, and a boot with no network
+
+`nat.get_local_ip` asks the routing table which address it would send from
+to reach the internet, and that is the machine's home-network address.  It
+used to have a second guess for when the routing table had no answer: the
+first address in the interface list that was followed, somewhere later, by
+"scope global".  Lua's `.` crosses line ends, so that guess returned
+127.0.0.1 (loopback, always listed first) on every machine, and at boot,
+before the route existed, it was recorded.  Both of the owner's mailboxes
+held 127.0.0.1, so neither tried the other's `local-ip` (that needs both on
+one /24), and every LAN discovery packet announced "I'm at 127.0.0.1".
+
+Now:
+
+- no route means no answer (nil), and a loopback answer is refused;
+- a stored loopback value counts as no record, so replacing it is logged
+  as "recorded" and writes no "your address changed" notice;
+- `check_lan_ip_change` returns whether it found an address, and either
+  address not found -- at boot or on the timer -- brings the next check in
+  an hour (`addrchk.RETRY`) instead of 24-48 hours.
+
+Tested by `scripts/test-home-address.sh` (the stale-loopback case).  The
+no-route case is not tested: making the routing table empty needs root.

@@ -153,7 +153,6 @@ the file is sitting in, so the daemon already knows.
 The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size` — see [attachments](docs/.templates/attachments.md)) and three more:
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
-- `allow_peer_address_requests` — whether a contact may ask what address this mailbox has on file for it (used by phones after an IP change; default on).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
@@ -255,7 +254,7 @@ tcp dport 8025 accept
 sudo iptables -A INPUT -p tcp --dport 8025 -j ACCEPT
 ```
 
-That is enough for contacts reaching you over the internet. The daemon also listens for UDP on the same port and uses the multicast group 239.192.82.77 to find mailboxes on your own network, and it sends UDP probes to every address in your /24. Open UDP on the same port as well if you want mailboxes on one network to find each other.
+That is the only port to open: the daemon listens on TCP alone. Two mailboxes behind the same router reach each other at the home-network address in a contact's `local-ip` line, written by hand or announced by the other mailbox; nothing is broadcast to the network to find them. (Earlier versions also listened for UDP on the same port and sent to a multicast group; a UDP rule left over from then can be removed.)
 
 Note that your router AND your OS must have an open port in their firewalls. There are two firewalls.
 

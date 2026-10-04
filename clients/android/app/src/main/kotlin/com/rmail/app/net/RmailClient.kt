@@ -646,37 +646,6 @@ class RmailClient(
         }
     }
 
-    /**
-     * GET /peer-address — query this device's stored IP/port from a contact's daemon.
-     * Used for IP recovery when the home server's address has changed.
-     * contactToken is the token for the contact whose daemon we're querying.
-     */
-    fun getPeerAddress(contactToken: String): Pair<String, Int>? {
-        return try {
-            val contactKey = Crypto.keyFromToken(contactToken)
-            // Build the request manually using a different key
-            val reqText = "GET /peer-address HTTP/1.0\r\n\r\n"
-            Socket(host, port).use { sock ->
-                sock.soTimeout = 15_000
-                val out = sock.getOutputStream()
-                val inp = sock.getInputStream()
-                out.write(Crypto.encryptFrame(reqText.toByteArray(), contactKey))
-                out.flush()
-                val plaintext = Crypto.decryptFrame(inp, contactKey) ?: return null
-                val response = plaintext.toString(Charsets.UTF_8)
-                val headerEnd = response.indexOf("\r\n\r\n")
-                if (headerEnd < 0) return null
-                val statusLine = response.substring(0, response.indexOf("\r\n"))
-                if (!statusLine.contains(" 200 ")) return null
-                val body = response.substring(headerEnd + 4)
-                val obj = JSONObject(body)
-                Pair(obj.getString("ip"), obj.getInt("port"))
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     companion object {
         const val CHUNK_SIZE = 256 * 1024  // 256 KiB per chunk
 

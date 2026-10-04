@@ -116,7 +116,10 @@ Deliberately *not* extended to the other state files:
 1. Built: `addrset.mine`, `addrset.merge`, `addrset.write`,
    `addrset.write_local`, `addrset.same_lan`, `addrset.contact_on_lan`;
    `handle_update_address`; `sync_address_notifications`; the note's
-   removal in `run_sync_cycle`.  Test: `scripts/test-lan-address-learning.sh`.
+   removal in `run_sync_cycle`.  (The test once named here,
+   `scripts/test-lan-address-learning.sh`, tested addresses learned from
+   incoming connections, not announcements; it was deleted with that
+   learning by #418.  The announcement merge has no test of its own yet.)
 2. Phase 2: an owed announcement becomes a hidden file in the outbox
    (one per contact), visible to `on_send`, deletable by hand; the state
    file goes.  Test: an announcement deleted by hand is not sent.

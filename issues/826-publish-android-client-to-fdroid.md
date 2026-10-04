@@ -74,7 +74,8 @@ the server.
   are listed there -- but a bad first impression and noisy on networks.)  It tries every port on one host, and its
   LAN fallback about 3.8 million connections.  Slow, and indistinguishable
   from a port scan to anything watching the network.  Replace it with B8's
-  pairing, or LAN discovery the daemon answers.
+  pairing.  (Not LAN discovery: the daemon no longer answers any, #418 --
+  the owner rules out broadcasting to the network, 2026-10-04.)
 - ~~**B11. "Connect" does not connect.**~~ *Fixed 2026-09-22: Connect tests TCP reachability, then the token and own-device flag, and says which is wrong; "Save anyway" keeps the settings if the server is just off.*  It saves and moves on; a wrong
   token or address shows up later as a red sync-error banner.  Test the
   connection and say what is wrong, in words, before leaving Setup.

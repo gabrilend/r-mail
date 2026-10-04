@@ -1,5 +1,10 @@
 # #417 — LAN discovery files a found address under the contact it came from
 
+> **Removed 2026-10-04 by #418**, with the rest of LAN discovery (#415),
+> and `scripts/test-lan-discovery-names.sh` with it.  The rule it
+> established — no packet between mailboxes carries the sender's own name
+> — still holds everywhere else (#506).
+
 ## Status
 
 Completed 2026-09-22.  Tested by `scripts/test-lan-discovery-names.sh`.

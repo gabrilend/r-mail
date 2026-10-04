@@ -24,12 +24,12 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#415](completed/415-udp-lan-discovery-protocol.md) — UDP LAN Discovery Protocol**  When two rmail daemons are on the same LAN but their contacts files contain the public IP (required for external connectivity), communication fails if hairpin NAT is not supported by the router.
 - **[#416](completed/416-lan-discovery-router-ip-rewrite.md) — LAN Discovery Router IP Rewrite**  When a UDP broadcast is received, some routers rewrite the source IP address to their own IP (e.g., 192.168.0.1).
 - **[#417](completed/417-lan-discovery-files-address-under-the-contact.md) — LAN discovery files a found address under the contact it came from**  A discovery packet (request or answer) is identified by the contact whose token decrypts it, and the found address is filed under that contact's
+- **[#418](completed/418-drop-lan-auto-detection-for-multi-ip.md) — Drop LAN auto-detection and the unused /peer-address endpoint**  Complete 2026-10-04.
 
 ## Open
 
 - **[#409](409-announce-full-address-set.md) — Announce the full address set, and confirm it before clearing the notice**  Phase 1 built 2026-09-22 (see Status): announcements carry the whole address set (`ips`: hostname, public IPv4, IPv6; `local_ips` only to a contact on our LAN); the receiver merges it under the contact's pinned `ip`, files private addresses on its own /24 a...
 - **[#414](414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  When rmail detects insecure NAT-PMP/UPnP on a sender's router, it sends a warning to contacts.
-- **[#418](418-drop-lan-auto-detection-for-multi-ip.md) — Drop LAN auto-detection and the unused /peer-address endpoint**  Everything this issue would remove is still in the daemon: UDP LAN discovery (multicast and a subnet scan on a failed connection, #415, #416, #417), the learned-LAN-address table used in place of a contact's address, and the `/peer-address` request.
 - **[#419](419-wake-to-sync-availability-windows.md) — Wake-to-sync: scheduled availability windows for a machine that sleeps**  rmail assumes the daemon is listening.
 
 <!-- notes: kept when regenerated -->

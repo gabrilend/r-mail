@@ -91,9 +91,6 @@ and after an IP change):
 `ip` and `port` are kept for older peers; `ips` and `local_ips` are the full
 sets (a configured `hostname` first).
 
-**`GET /peer-address`** — returns the caller's stored IP:port (for IP recovery).
-Refused when `allow_peer_address_requests = false`.
-
 **`GET /deps`**, **`GET /deps/<name>`**, **`GET /install-script`** — the
 dependency list, one dependency, and the installer, for a contact building
 rmail.

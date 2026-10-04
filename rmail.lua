@@ -169,7 +169,6 @@ local cfg = {
         end
     end)(),
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
-    allow_peer_addr   = config.allow_peer_address_requests ~= false,
     libs              = config.libs,
     auto_port_forward = config.auto_port_forward == true,
     -- Where to mirror the log.  stderr always goes to whoever started the
@@ -521,15 +520,9 @@ end
 -- ---- Hostname support for contact.ip ------------------------------------
 --
 -- Contacts can set `.ip = hostname.example.com` instead of a raw IP.  Outbound
--- TCP already resolves hostnames via luasocket.  The inbound-comparison paths
--- (LAN optimisation, connection-timeout fallback, LAN discovery) do literal
--- string equality against a raw IP, so we need to resolve hostnames before
--- comparing.  Cache the resolution briefly — dynamic-DNS TTLs are measured
--- in seconds-to-minutes and we don't want to hit the resolver on every sync
--- cycle.
-
-local dns_cache = {}
-local DNS_TTL_SEC = 60
+-- TCP resolves hostnames itself (luasocket), at every connection.  There was
+-- a cached lookup here for comparing a contact's hostname with our own public
+-- address, used only by the same-house swap; both went with #418.
 
 -- True if the address is a bare IPv4 dotted quad.
 local function is_ipv4(addr)
@@ -591,7 +584,7 @@ function addrset.private_v6(addr)
 end
 
 -- Do two private IPv4 addresses plausibly share a LAN?  /24 is an
--- assumption, the same one LAN discovery already makes, and it errs toward
+-- assumption, and it errs toward
 -- "no": a false negative only skips the fast path, whereas a false positive
 -- would have us connect to a stranger's device on a foreign network that
 -- happens to use the same private range.
@@ -603,28 +596,6 @@ end
 
 local function is_hostname(addr)
     return addr ~= nil and addr ~= "" and not is_ipv4(addr) and not is_ipv6(addr)
-end
-
--- Resolve a contact address to a raw IP string, caching for DNS_TTL_SEC.
--- IPv4/IPv6 literals are returned unchanged.  Hostnames that fail to resolve
--- return nil (caller treats that as "no match").
-local function resolve_contact_host(addr)
-    if not is_hostname(addr) then return addr end
-    local now = os.time()
-    local entry = dns_cache[addr]
-    if entry and now - entry.t < DNS_TTL_SEC then
-        return entry.ip
-    end
-    local ip, err = socket.dns.toip(addr)
-    if ip then
-        dns_cache[addr] = {ip = ip, t = now}
-        return ip
-    end
-    -- log() isn't in scope this early in the file; stderr is fine for a
-    -- rare, recoverable condition.
-    io.stderr:write(string.format(
-        "DNS lookup failed for '%s': %s\n", addr, tostring(err)))
-    return nil
 end
 
 local function sanitize_filename(name)
@@ -1712,7 +1683,59 @@ function addrset.merge(existing_default, existing_indexed, announced)
     return result
 end
 
+-- {{{ local function migrate_lan_ip_lines
+-- DEPRECATED(#418): a transitional step, to be deleted once no contacts
+-- file anywhere still holds a `lan_ip` line.  Track its removal as its
+-- own issue when that day comes.
+--
+-- `name.lan_ip = X` was the old way of writing a contact's home-network
+-- address; `name.local-ip` (#409) replaced it, and reading already treats
+-- the old field as one more local-ip.  This rewrites the line itself so
+-- the file says what it means.  Three paths per line: the contact has no
+-- plain `local-ip` line yet -- it becomes that; it has one with this same
+-- address -- the old line is dropped as a duplicate; it has one with a
+-- different address -- it becomes the next numbered `local-ip[N]`.  Every
+-- conversion is logged.  Lines are taken and returned as a list.
+local function migrate_lan_ip_lines(lines)
+    -- What each contact already has: its plain local-ip value, the
+    -- highest local-ip[N] index, and every local-ip value.
+    local plain, top, values = {}, {}, {}
+    for _, line in ipairs(lines) do
+        local n, idx, v = line:match("^%s*([%w_%-]+)%.local%-ip%s*%[?(%d*)%]?%s*=%s*\"?([^\"%s]+)")
+        if n then
+            values[n] = values[n] or {}
+            values[n][v] = true
+            if idx == "" then plain[n] = v
+            else top[n] = math.max(top[n] or 0, tonumber(idx)) end
+        end
+    end
+    local out = {}
+    for _, line in ipairs(lines) do
+        local n, v = line:match("^%s*([%w_%-]+)%.lan_ip%s*=%s*\"?([^\"%s]+)")
+        if not n then
+            out[#out + 1] = line
+        elseif values[n] and values[n][v] then
+            log("contacts: dropped %s.lan_ip = %s (already a local-ip line)", n, v)
+        else
+            local field
+            if not plain[n] then
+                field, plain[n] = "local-ip", v
+            else
+                top[n] = (top[n] or 0) + 1
+                field = "local-ip[" .. top[n] .. "]"
+            end
+            values[n] = values[n] or {}
+            values[n][v] = true
+            out[#out + 1] = n .. "." .. field .. " = " .. v
+            log("contacts: %s.lan_ip = %s rewritten as %s.%s", n, v, n, field)
+        end
+    end
+    return out
+end
+-- }}}
+
 -- Normalise the contacts file:
+--   0. Old `lan_ip` lines become `local-ip` lines (#418, transitional).
 --   1. Scattered lines for the same contact are grouped together at the
 --      position of that contact's first line (#408 auto-grouping).
 --   2. The = signs within each grouped block are aligned.
@@ -1725,6 +1748,7 @@ local function align_contacts()
     for line in (text .. "\n"):gmatch("([^\n]*)\n") do
         lines[#lines + 1] = line
     end
+    lines = migrate_lan_ip_lines(lines)
 
     -- Pass 1: discover which contact each line belongs to and gather
     -- every line's index per contact, in file order.  first_index[n] is
@@ -1906,22 +1930,25 @@ function nat.get_local_ip()
     end
     if not ip_cmd then ip_cmd = "ip" end  -- hope it's in PATH
 
+    -- The address this machine would send from to reach the internet is
+    -- its address on the home network: the routing table's own answer.
+    -- No route (the network not up yet, as at boot) means no answer, nil.
+    --
+    -- There used to be a second guess here, the first address in the
+    -- interface list followed somewhere later by "scope global".  Lua's
+    -- `.` crosses line ends, so on any machine it returned 127.0.0.1 --
+    -- loopback, listed first -- and at boot, before the route existed,
+    -- that is what got recorded as this machine's home address
+    -- (2026-10-04: both of the owner's mailboxes held 127.0.0.1, so
+    -- neither tried the other's local address).  A loopback answer is
+    -- refused for the same reason: it is never the home network.
     local handle = io.popen(ip_cmd .. " route get 1.1.1.1 2>/dev/null")
     if not handle then return nil end
     local output = handle:read("*a")
     handle:close()
-    if output then
-        local ip = output:match("src%s+(%d+%.%d+%.%d+%.%d+)")
-        if ip then return ip end
-    end
-    handle = io.popen(ip_cmd .. " -4 addr show 2>/dev/null")
-    if not handle then return nil end
-    output = handle:read("*a")
-    handle:close()
-    if output then
-        return output:match("inet%s+(%d+%.%d+%.%d+%.%d+).*scope global")
-    end
-    return nil
+    local ip = output and output:match("src%s+(%d+%.%d+%.%d+%.%d+)")
+    if not ip or ip:match("^127%.") then return nil end
+    return ip
 end
 
 function nat.try_upnp_probe()
@@ -2658,13 +2685,6 @@ local function handle_update_address(data, sender)
             local shown = {}
             for _, m in ipairs(merged) do shown[#shown + 1] = m.addr end
             log("address set from %s: %s", sender, table.concat(shown, ", "))
-            -- Any cached lookup for a name we kept is now suspect.  A
-            -- contact we knew only by its key had no address, so nothing
-            -- was cached for it: indexing the cache with that missing
-            -- address used to throw, after the file was written, and the
-            -- sender was answered with an error for an update we had taken.
-            local old_addr = contacts[sender].ip
-            if old_addr then dns_cache[old_addr] = nil end
             applied_set = true
             announced_changed = true
         elseif #merged > 0 then
@@ -2691,14 +2711,13 @@ local function handle_update_address(data, sender)
     if next(fields) then write_contact_fields(sender, fields) end
     end
 
-    -- The set path logs its own, more informative line and has already
-    -- invalidated the DNS cache; saying "updated address for X" after it
-    -- would describe a single-field write that did not happen.
+    -- The set path logs its own, more informative line; saying "updated
+    -- address for X" after it would describe a single-field write that did
+    -- not happen.
     if not applied_set then
         if preserve_hostname then
             log("address update from %s: keeping hostname '%s' (will re-resolve to %s)",
                 sender, contacts[sender].ip, new_ip)
-            dns_cache[contacts[sender].ip] = nil
         else
             log("updated address for %s: %s:%s", sender, new_ip, tostring(new_port))
         end
@@ -2780,28 +2799,6 @@ local function recv_encrypted(sock, key)
     local ciphertext = packet:sub(13)
     return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
 end
-
--- {{{ encrypt_packet
--- Encrypt a raw packet for UDP/datagram use (no length prefix).
--- Returns nonce..ciphertext, or nil on error.
-local function encrypt_packet(key, plaintext)
-    local nonce = crypto.random_bytes(12)
-    local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
-    if not ciphertext then return nil end
-    return nonce .. ciphertext
-end
--- }}}
-
--- {{{ decrypt_packet
--- Decrypt a raw packet (nonce..ciphertext+tag).
--- Returns plaintext or nil on error/auth failure.
-local function decrypt_packet(key, packet)
-    if #packet < 28 then return nil end  -- 12 nonce + 16 tag minimum
-    local nonce = packet:sub(1, 12)
-    local ciphertext = packet:sub(13)
-    return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
-end
--- }}}
 
 -- Try to decrypt a raw packet (nonce..ciphertext+tag) against every known
 -- contact token. Returns (plaintext, contact_name) or (nil, nil).
@@ -2947,12 +2944,6 @@ local function http_read_encrypted_response(e)
     e.conn:close()
 end
 
--- Hook for LAN IP resolution. Set by main() to enable same-network optimization.
-local resolve_lan_host = nil
-
--- Hook for connection timeout. Set by main() to trigger LAN discovery on failure.
-local on_connection_timeout = nil
-
 -- ---- Answering while we wait on our own requests (#120, in part) ------------
 --
 -- A sync cycle runs on the main thread, and while it waits on its requests
@@ -3041,13 +3032,6 @@ local function http_post_batch(requests)
             entries[i] = { conn = nil, req = req, phase = "done", ok = false, data = {} }
             goto continue_batch
         end
-        if resolve_lan_host then
-            local lan_host = resolve_lan_host(req.host, req.port)
-            if lan_host and lan_host ~= host then
-                log("using LAN IP %s instead of %s", lan_host, host)
-                host = lan_host
-            end
-        end
         local conn = tcp_for(host)
         conn:settimeout(0)
         conn:connect(host, req.port)
@@ -3120,10 +3104,6 @@ local function http_post_batch(requests)
     for i, e in ipairs(entries) do
         if e.phase ~= "done" then
             log("timeout connecting to %s:%d", e.req.host, e.req.port)
-            -- Trigger LAN discovery for same-network contacts on connection failure
-            if on_connection_timeout then
-                pcall(on_connection_timeout, e.req.host, e.req.port)
-            end
             e.conn:close()
         end
         results[i] = {ok = e.ok, status = e.status, data = e.data, busy = e.busy}
@@ -6462,8 +6442,8 @@ local function sync_address_notifications(my_name)
     -- correct reading of "we still cannot reach them there".
     --
     -- Using our own announcement rather than a dedicated probe keeps this
-    -- free of new protocol surface, and avoids leaning on /peer-address,
-    -- which #418 removes as dead code.
+    -- free of new protocol surface; the old /peer-address request, which
+    -- nothing called, is gone (#418).
     local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
     if my_public and my_public ~= "" then
         for _, f in ipairs(list_notices(INBOX)) do
@@ -6607,20 +6587,10 @@ local function canonical_contacts_hash()
     return hex_sha256(serialize_contacts_canonical(load_contacts()))
 end
 
--- GET /peer-address — return the caller's stored address (ip/port) from our contacts file.
--- Used by phones to recover the home server's public IP after a dynamic IP change.
--- Available to any authenticated contact, not restricted to own-device entries.
-local function handle_peer_address(contact_name)
-    if not cfg.allow_peer_addr then
-        return 403, {error = "peer address requests disabled"}
-    end
-    local contacts = load_contacts()
-    local c = contacts[contact_name]
-    if not c then return 404, {error = "contact not found"} end
-    return 200, {ip = c.ip or "", port = c.port or ""}
-end
-
 -- GET /api/myaddress — return this daemon's current public IP and configured port.
+-- `lan_ip` is this machine's home-network address.  The phone keeps it and
+-- tries it first when it is on the same network (HostPicker, serverLanIp);
+-- #418 meant to drop it as unused, but that reader exists, so it stays.
 local function handle_api_myaddress(my_name, port)
     local ip = check_public_ip()
     local lan_ip = nat.get_local_ip()
@@ -7451,21 +7421,30 @@ end
 -- under LuaJIT's 60-upvalue limit per function)
 -- ============================================================
 
--- rmail multicast group address (239.x.x.x is organization-local scope)
-local MULTICAST_ADDR = "239.192.82.77"
-
+-- Returns true when this machine's home-network address was found, false
+-- when it was not (no route yet), so the caller can try again soon rather
+-- than a day and a half later.
 local function check_lan_ip_change(port)
     local new_lan_ip = nat.get_local_ip()
-    if not new_lan_ip then return end
+    if not new_lan_ip then
+        log("LAN IP: no route to the internet yet, so no home-network address -- will retry")
+        return false
+    end
     local stored_lan_ip = read_file(STATE .. "/lan_ip")
     if stored_lan_ip then stored_lan_ip = stored_lan_ip:match("^%s*(.-)%s*$") end
-    if stored_lan_ip and not stored_lan_ip:match("^%d+%.%d+%.%d+%.%d+$") then stored_lan_ip = nil end
+    -- Something that is not an address, or a loopback address recorded by
+    -- the old guess (see nat.get_local_ip), is no record at all: replaced
+    -- quietly, not reported as the machine having moved.
+    if stored_lan_ip and (not stored_lan_ip:match("^%d+%.%d+%.%d+%.%d+$")
+                          or stored_lan_ip:match("^127%.")) then
+        stored_lan_ip = nil
+    end
     write_file(STATE .. "/lan_ip", new_lan_ip)
-    if not stored_lan_ip then log("LAN IP recorded: %s", new_lan_ip); return end
-    if stored_lan_ip == new_lan_ip then return end
+    if not stored_lan_ip then log("LAN IP recorded: %s", new_lan_ip); return true end
+    if stored_lan_ip == new_lan_ip then return true end
     log("LAN IP changed: %s -> %s", stored_lan_ip, new_lan_ip)
     if cfg.auto_port_forward then
-        log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP"); return
+        log("auto port forward is enabled — UPnP/NAT-PMP mapping will use new LAN IP"); return true
     end
     write_file(INBOX .. "/lan-ip-changed", string.format(
         "Your local IP address changed from %s to %s.\n\n" ..
@@ -7473,154 +7452,26 @@ local function check_lan_ip_change(port)
         "to %s. Update your router's port forwarding rule to point to %s instead,\n" ..
         "or set a DHCP reservation / static IP so this doesn't happen again.",
         stored_lan_ip, new_lan_ip, port, stored_lan_ip, new_lan_ip))
+    return true
 end
 
-local function do_resolve_lan_host(lan_peers, host, target_port)
-    local my_public = read_file(STATE .. "/public_ip")
-    if not my_public then return nil end
-    my_public = my_public:match("^%s*(.-)%s*$")
-    if host ~= my_public then return nil end
-    local contacts = load_contacts()
-    for name, c in pairs(contacts) do
-        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) then
-            local lan_ip = (c.local_ips and c.local_ips[1]) or lan_peers[name]
-            if lan_ip then
-                log("same-network: using LAN IP %s for %s (instead of %s)", lan_ip, name, host)
-                return lan_ip
-            end
-        end
-    end
-    return nil
-end
+-- Until 2026-10-04 (#418) a same-house swap lived here: a request to our
+-- own public address was redirected to the contact's first local-ip, or to
+-- an address learned from their connections, whatever the address list
+-- said.  Removed: contact_endpoints already puts a contact's local-ip
+-- addresses first when they share our network, so the swap only did
+-- that job twice -- and when this machine's own address was recorded
+-- wrong (127.0.0.1, see nat.get_local_ip) it hid the mistake.
 
--- {{{ UDP LAN Discovery
-
-local function join_multicast_group(udp_socket)
-    local ok, err = udp_socket:setoption("ip-add-membership", {
-        multiaddr = MULTICAST_ADDR, interface = "0.0.0.0"
-    })
-    if ok then log("joined multicast group %s", MULTICAST_ADDR)
-    else log("failed to join multicast group: %s", tostring(err)) end
-    return ok
-end
-
-local function send_lan_discovery(contacts, my_name, my_port, my_public_ip)
-    local my_lan_ip = nat.get_local_ip()
-    if not my_lan_ip then return end
-    local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
-    local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
-    for name, c in pairs(contacts) do
-        if resolve_contact_host(c.ip) == my_public_ip and c.token and c.port then
-            -- #417: no name in the packet.  The receiver knows who sent it
-            -- from which contact's token opens it, and files the address
-            -- under its own name for that contact.
-            local payload = "RMAIL-DISCOVER " .. my_port .. " " .. my_lan_ip
-            local key = derive_key(c.token)
-            local encrypted = encrypt_packet(key, payload)
-            if encrypted then
-                local udp = socket.udp()
-                udp:setoption("ip-multicast-ttl", 1)
-                udp:sendto(encrypted, MULTICAST_ADDR, c.port)
-                udp:close()
-                if subnet_base then
-                    for i = 1, 254 do
-                        if i ~= my_last_octet then
-                            local udp2 = socket.udp()
-                            udp2:sendto(encrypted, subnet_base .. i, c.port)
-                            udp2:close()
-                        end
-                    end
-                end
-                log("LAN discovery: multicast + subnet scan for %s (port %d)", name, c.port)
-            end
-        end
-    end
-end
-
-local function handle_udp_discovery(data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip, lan_peers)
-    for name, c in pairs(contacts) do
-        if c.token then
-            local key = derive_key(c.token)
-            local plaintext = decrypt_packet(key, data)
-            if plaintext then
-                local disc_port, disc_lan_ip = plaintext:match("^RMAIL%-DISCOVER%s+(%d+)%s+(%S+)$")
-                -- #417: the token that decrypted this packet is what says
-                -- who sent it, so the address is filed under OUR name for
-                -- that contact -- the name every lookup uses.  The packet
-                -- carries no name of its own: a name chosen on the sender's
-                -- machine would only disagree with ours.
-                if disc_port and disc_lan_ip then
-                    lan_peers[name] = disc_lan_ip
-                    log("LAN discovery: %s is at %s (received request)", name, disc_lan_ip)
-                    local my_lan_ip = nat.get_local_ip()
-                    if not my_lan_ip then return end
-                    local resp_payload = "RMAIL-HERE " .. my_lan_ip
-                    local resp_encrypted = encrypt_packet(derive_key(c.token), resp_payload)
-                    if resp_encrypted then
-                        local udp = socket.udp()
-                        udp:sendto(resp_encrypted, disc_lan_ip, tonumber(disc_port))
-                        udp:close()
-                    end
-                    return
-                end
-                local here_lan_ip = plaintext:match("^RMAIL%-HERE%s+(%S+)$")
-                if here_lan_ip then
-                    lan_peers[name] = here_lan_ip  -- #417: see the request branch
-                    log("LAN discovery: %s is at %s (received response)", name, here_lan_ip)
-                    return
-                end
-            end
-        end
-    end
-end
-
-local function poll_udp_discovery(udp, contacts, my_name, my_port, my_public_ip, lan_peers)
-    while true do
-        local data, sender_ip, sender_port = udp:receivefrom()
-        if not data then break end
-        pcall(handle_udp_discovery, data, sender_ip, sender_port, contacts, my_name, my_port, my_public_ip, lan_peers)
-    end
-end
-
--- }}}
-
-local function do_on_connection_timeout(rt, host, target_port)
-    local my_public = read_file(STATE .. "/public_ip")
-    if not my_public then return end
-    my_public = my_public:match("^%s*(.-)%s*$")
-    if host ~= my_public then return end
-    local my_lan_ip = nat.get_local_ip()
-    if not my_lan_ip then return end
-    local contacts = load_contacts()
-    for name, c in pairs(contacts) do
-        if resolve_contact_host(c.ip) == host and tostring(c.port or "") == tostring(target_port) and c.token then
-            if rt.lan.discovery_sent[name] then return end
-            rt.lan.discovery_sent[name] = true
-            local payload = "RMAIL-DISCOVER " .. rt.port .. " " .. my_lan_ip  -- #417: no name
-            local key = derive_key(c.token)
-            local encrypted = encrypt_packet(key, payload)
-            if encrypted then
-                local udp = socket.udp()
-                udp:setoption("ip-multicast-ttl", 1)
-                udp:sendto(encrypted, MULTICAST_ADDR, c.port)
-                udp:close()
-                local subnet_base = my_lan_ip:match("^(%d+%.%d+%.%d+%.)")
-                local my_last_octet = tonumber(my_lan_ip:match("%.(%d+)$"))
-                if subnet_base then
-                    for i = 1, 254 do
-                        if i ~= my_last_octet then
-                            local udp2 = socket.udp()
-                            udp2:sendto(encrypted, subnet_base .. i, c.port)
-                            udp2:close()
-                        end
-                    end
-                end
-                log("LAN discovery: multicast + subnet scan on connection failure (looking for %s)", name)
-            end
-            return
-        end
-    end
-end
+-- LAN discovery lived here until 2026-10-04 (#418): an encrypted "are you
+-- here?" sent to a multicast group and to all 254 addresses of the home
+-- network, so two mailboxes behind one router could find each other's
+-- local addresses.  Removed, not replaced.  It handed the same packet to
+-- every device on the network -- the owner's rule is that traffic for a
+-- port goes to exactly one address -- and a contact's local address is
+-- written or announced as a `local-ip` line instead (#409).  The daemon
+-- no longer opens a network socket of its own besides its listening
+-- ones and the outgoing DNS lookups.
 
 -- ============================================================
 -- Request handler (extracted from main)
@@ -7706,50 +7557,11 @@ local function handle_request(rt, client, preread)
             if cc[contact_name] then
                 known_key = derive_key(cc[contact_name].token)
             end
-
-            -- Learn a same-house contact's home-network address from the
-            -- connection it just made to us (first request only).
-            --
-            -- The address a connection arrives from is only the contact's
-            -- own when it came straight across our network.  A contact
-            -- that reaches us through the router's loop-back (hairpin)
-            -- arrives from whichever device relayed it -- on a house with
-            -- two routers in a row, the outer one.  Recording that sent
-            -- every later message to the router instead of the contact
-            -- (September 2026: sorelu filed as 192.168.0.1 while this
-            -- machine sits on 192.168.1.x, every send refused).  So the
-            -- address is kept only if it shares our own /24, the same test
-            -- discovery and address announcements use.
-            --
-            -- Three paths: not a private address, or the contact is not
-            -- in our house (their address is not our public one) -- nothing
-            -- to learn; private but on another /24 -- a relay, said once
-            -- in the log and never kept; private and on our /24 -- kept,
-            -- unless discovery or an announcement already told us where
-            -- they are (those are asked, not guessed, so they win).
-            --
-            -- The relay check does not wait on "not already known": that a
-            -- router is passing a contact's traffic through is worth saying
-            -- whatever else we know about them.
-            local peer_ip = client:getpeername()
-            if peer_ip and contact_name and is_private_ipv4(peer_ip) then
-                local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
-                if cc[contact_name] and cc[contact_name].ip == my_public then
-                    local my_lan_ip = nat.get_local_ip()
-                    if not addrset.same_lan(peer_ip, my_lan_ip) then
-                        if not rt.lan.relayed[contact_name] then
-                            rt.lan.relayed[contact_name] = peer_ip
-                            log("LAN address: %s connected from %s, which is not on our network (%s) "
-                                .. "-- a router passing it through, not their address; not recorded",
-                                contact_name, peer_ip, tostring(my_lan_ip))
-                        end
-                    elseif not rt.lan.peers[contact_name] then
-                        rt.lan.peers[contact_name] = peer_ip
-                        log("LAN address: %s is at %s (connected to us from there)",
-                            contact_name, peer_ip)
-                    end
-                end
-            end
+            -- A same-house contact's home address used to be learned here,
+            -- from where its connection came from, and held in memory until
+            -- restart.  Removed 2026-10-04 (#418): a contact's local address
+            -- is its `local-ip` line, written or announced (#409), which
+            -- survives a restart and says where it came from.
         end
 
         local method, path, headers, body = parse_request_string(plaintext)
@@ -7777,8 +7589,6 @@ local function handle_request(rt, client, preread)
             local sha = ""; if hh then sha = (hh:read("*a") or ""):match("^(%x+)") or ""; hh:close() end
             send_raw_response(resp, 200, "application/x-shellscript", content, {["X-SHA256"] = sha})
         else send_response(resp, 404, {error = "install script not found"}) end
-    elseif method == "GET" and path == "/peer-address" then
-        local s, r = handle_peer_address(contact_name); send_response(resp, s, r)
     elseif path:match("^/api/") then
         if not is_own_device then
             send_response(resp, 403, {error = "own device required"})
@@ -7970,15 +7780,6 @@ local function run_sync_cycle(rt)
     local _ = w1 or w2 or w3 or w4 or w5 or w6 or w7
 end
 
-local function poll_udp_cycle(rt)
-    local my_public = read_file(STATE .. "/public_ip")
-    if my_public then
-        my_public = my_public:match("^%s*(.-)%s*$")
-        local contacts = load_contacts()
-        poll_udp_discovery(rt.lan.udp, contacts, rt.my_name, rt.port, my_public, rt.lan.peers)
-    end
-end
-
 -- ============================================================
 -- Init runtime — setup, validation, returns state table
 -- ============================================================
@@ -8047,12 +7848,13 @@ end
 function addrchk.run(rt)
     local pok, answered = pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(detect_ipv6_change, rt.my_name, rt.port)
-    pcall(check_lan_ip_change, rt.port)
+    local lok, lan_found = pcall(check_lan_ip_change, rt.port)
 
-    local got   = pok and answered ~= false
+    -- Either address not found counts as no answer: come back in an hour.
+    local got   = pok and answered ~= false and lok and lan_found == true
     local delay = addrchk.schedule(rt, got)
     if not got then
-        log("address check: no provider answered, retrying in %dm",
+        log("address check: an address could not be found, retrying in %dm",
             math.floor(delay / 60))
     else
         log("address check done, next in %dh%02dm",
@@ -8104,10 +7906,6 @@ local function init_runtime()
         -- see the `ctimer` table.  last_sync is kept only so an inotify
         -- trigger can still tell how long it has been since the last cycle.
         last_sync    = socket.gettime(),
-        -- peers: contact name -> home-network address we will send to.
-        -- relayed: contact name -> an address a connection came from that
-        -- was a router, not them; kept only so that is logged once.
-        lan = { udp = nil, peers = {}, relayed = {}, discovery_sent = {} },
         outbox_inotify_fd = nil,
     }
 
@@ -8233,11 +8031,7 @@ local function init_runtime()
         log("IPv6 not available: %s", tostring(srv6))
     end
 
-    rt.lan.udp = socket.udp()
-    assert(rt.lan.udp:setsockname("0.0.0.0", rt.port))
-    rt.lan.udp:settimeout(0)
-
-    log("listening on :%d (TCP%s + UDP)", rt.port, rt.server6 and "+IPv6" or "")
+    log("listening on :%d (TCP%s)", rt.port, rt.server6 and "+IPv6" or "")
 
     -- Router work, now that the port is actually ours.  Slow on a router
     -- that does not answer, and nothing above depends on it.
@@ -8255,9 +8049,13 @@ local function init_runtime()
         end
     end
 
-    pcall(detect_ip_change, rt.my_name, rt.port)
+    -- Whether the public and home-network addresses were both found.  At
+    -- boot the network is often not up yet; then the first timed re-check
+    -- comes in an hour (addrchk.RETRY), not a day and a half later.
+    local pub_ok, pub_answered = pcall(detect_ip_change, rt.my_name, rt.port)
     pcall(detect_ipv6_change, rt.my_name, rt.port)
-    pcall(check_lan_ip_change, rt.port)
+    local lan_ok, lan_found = pcall(check_lan_ip_change, rt.port)
+    rt.addresses_found = (pub_ok and pub_answered ~= false) and (lan_ok and lan_found == true)
     -- #115 requirement 1, the startup ping itself: tell every contact where
     -- we are, at boot.  Deliberately not a new mechanism -- it queues the
     -- same pending-address entry that a detected IP change queues, so it
@@ -8302,18 +8100,9 @@ local function init_runtime()
     -- Arm the daily re-check (#410).  Redrawn on boot rather than persisted:
     -- simpler, and it means a restart loop cannot pin the probe to one time
     -- of day.  The startup checks above have just run, so the first timed
-    -- one is a full draw away.
-    addrchk.schedule(rt, true)
-    join_multicast_group(rt.lan.udp)
-
-    -- Initial LAN discovery
-    pcall(function()
-        local my_public = read_file(STATE .. "/public_ip")
-        if my_public then
-            my_public = my_public:match("^%s*(.-)%s*$")
-            send_lan_discovery(load_contacts(), rt.my_name, rt.port, my_public)
-        end
-    end)
+    -- one is a full draw away -- unless one of them found nothing (the
+    -- network not up yet at boot), and then it is an hour away.
+    addrchk.schedule(rt, rt.addresses_found)
 
     return rt
 end
@@ -8403,13 +8192,6 @@ end
 
 local function main()
     local rt = init_runtime()
-
-    resolve_lan_host = function(host, target_port)
-        return do_resolve_lan_host(rt.lan.peers, host, target_port)
-    end
-    on_connection_timeout = function(host, target_port)
-        do_on_connection_timeout(rt, host, target_port)
-    end
 
     -- Active client coroutines: raw_socket -> {co, wait_type, wait_sock, last_activity}
     -- wait_type is "read" or "write", wait_sock is the raw socket to select on
@@ -8597,8 +8379,6 @@ local function main()
                 end
             end
 
-            rt.lan.discovery_sent = {}
-            pcall(poll_udp_cycle, rt)
             local ok, err = pcall(run_sync_cycle, rt)
             if not ok then log("sync error: %s", tostring(err)) end
             -- callers held while the cycle waited on its own requests

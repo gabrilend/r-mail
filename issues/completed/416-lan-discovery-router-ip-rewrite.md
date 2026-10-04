@@ -1,5 +1,7 @@
 # 416 - LAN Discovery Router IP Rewrite
 
+> **Removed 2026-10-04 by #418**, with the rest of LAN discovery (#415).
+
 ## Current Behavior
 
 When a UDP broadcast is received, some routers rewrite the source IP address to their own IP (e.g., 192.168.0.1). This causes LAN discovery to cache the router's IP instead of the peer's actual LAN IP.

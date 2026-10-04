@@ -14,7 +14,8 @@ put a pin in it and leave it as future concerns."
 - No message or packet between mailboxes carries the sender's own name.
   The LAN discovery packets used to, and #417 removed it (owner,
   2026-09-22: "I'm gonna update all the machines running rmail posthaste
-  so don't worry about backwards compatibility").  The one remaining place
+  so don't worry about backwards compatibility"); LAN discovery itself is
+  gone since 2026-10-04 (#418).  The one remaining place
   a mailbox states its own name is the plaintext health check, which
   answers anyone who connects.
 - So nothing can currently tell the owner that a contact names itself

@@ -1,5 +1,12 @@
 # 415 - UDP LAN Discovery Protocol
 
+> **Removed 2026-10-04 by #418.**  Built as described below, then taken
+> out: it sends the same packet to every device on the home network
+> (multicast, and all 254 addresses), which the owner rules out — traffic
+> for a port goes to exactly one address.  A same-house contact's address
+> is a `local-ip` line instead (#409).  Kept as the record of what was built
+> and why it went.
+
 ## Current Behavior
 
 When two rmail daemons are on the same LAN but their contacts files contain the public IP (required for external connectivity), communication fails if hairpin NAT is not supported by the router.

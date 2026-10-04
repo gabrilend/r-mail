@@ -176,9 +176,11 @@ jump around.
 - [ ] Successful connection → all pending ops run sequentially over same connection
 - [ ] Different contacts processed in parallel (coroutines)
 
-### LAN discovery (#415, #416)
-- [ ] UDP LAN discovery finds peers on same network
-- [ ] LAN discovery includes LAN IP in payload, multicast + subnet scan fallback
+### No LAN discovery (#418; discovery itself was #415, #416, removed 2026-10-04)
+- [ ] The daemon's startup line says "listening on :PORT (TCP…)" with no UDP, and `ss -uln` shows nothing on the mailbox port
+- [ ] Two mailboxes behind one router, each holding the other's `local-ip`, reach each other at that address
+- [ ] A contacts file with an old `name.lan_ip` line has it rewritten as `name.local-ip` on startup (`scripts/test-home-address.sh`)
+- [ ] After a boot where the network came up late, `.state/lan_ip` holds the machine's home address, never 127.0.0.1
 
 ### DNS hostnames in contacts (#405)
 - [ ] Contact with hostname in `.ip` field resolves and connects outbound

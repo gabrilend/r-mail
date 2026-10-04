@@ -67,7 +67,11 @@ Many consumer routers do not support this. If yours doesn't, contacts on your lo
 network can't reach you via your public IP — the packet is silently dropped.
 
 If your router doesn't support hairpin NAT, contacts on your local network should
-use your local IP address (e.g. `192.168.1.10`) instead of your public IP. LAN
+use your local IP address (e.g. `192.168.1.10`) instead of your public IP: a
+`yourname.local-ip = 192.168.1.10` line in their contacts file, which rmail
+tries first whenever they are on your network. Nothing finds this address
+automatically; it is written by hand, or arrives in an address announcement
+from a mailbox that already has one. LAN
 traffic bypasses the router's NAT entirely and goes directly between devices — no
 hairpin support needed, and no port forwarding rule required either.
 

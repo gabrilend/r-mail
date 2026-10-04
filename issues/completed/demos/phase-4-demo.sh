@@ -70,6 +70,6 @@ fi
 stop_all
 
 heading "Phase 4's tests"
-run_tests test-lan-address-learning.sh test-lan-discovery-names.sh
-show "(LAN discovery's naming test also failed before 2026-10-04 on this machine; see the phase 4 notes)"
+run_tests test-home-address.sh test-local-ip-delivery.sh
+show "(LAN discovery and its naming test were removed 2026-10-04, #418: a local-ip line says where a same-house contact is)"
 echo ""

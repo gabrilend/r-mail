@@ -38,7 +38,8 @@ So a wake is:
 
 What a wake *skips* is the one-time setup, not the IP check: port binding,
 UPnP/NAT-PMP probing (~8s against a router that ignores you), inotify
-watcher creation, multicast join. Those survive suspend.
+watcher creation. Those survive suspend. (There was a multicast join too,
+until LAN discovery was removed, #418.)
 
 ## Window length
 
