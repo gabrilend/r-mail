@@ -13,10 +13,10 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#502](completed/502-self-address-word-set-in-config.md) — Sending to yourself uses a word set in the config, not the mailbox name**  Why it was set aside: one field doing both jobs is fewer settings for the same result.
 - **[#503](completed/503-install-name-not-shown-to-contacts.md) — Install script: wrongly implies "your name" is shown to contacts**  During install the prompt for the user's name suggests that the value will be displayed to their contacts.
 - **[#504](completed/504-a-phone-contacts-save-keeps-comments.md) — Saving contacts from the phone keeps the file's comments**  The phone is sent the contacts in canonical form during sync and from `GET /api/contacts` (`serialize_contacts_canonical`: one `name.key = value` line per field, contacts sorted by name, keys sorted, no comments), edits that, and posts the whole of it back ...
+- **[#505](completed/505-remove-pii-from-state-files.md) — Remove PII from state files**  Reversed, and the reversal complete (2026-04-18; finished 2026-07-02 — see Status).
 
 ## Open
 
-- **[#505](505-remove-pii-from-state-files.md) — Remove PII from state files**  Reversed, and the reversal complete (2026-04-18; finished 2026-07-02 — see Status).
 - **[#506](506-notice-when-a-contact-names-itself-differently.md) — Notice when a contact calls itself by a different name**  Every name in a `contacts` file is chosen by the person who owns that file.
 
 <!-- notes: kept when regenerated -->

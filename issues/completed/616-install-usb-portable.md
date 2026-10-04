@@ -5,10 +5,11 @@
 The generator exists: `scripts/make-mailbox-drive.sh` writes a runnable
 mailbox onto a drive — the mailbox with its own config, hooks and
 launchers (`sync-with-contacts.sh` for one visit, `auto-sync.sh` to stay
-live until unplugged, #409), and the program for the host to run.  The
-status below records no check of a drive made by it, so the issue stays
-open until one is made, carried to a second machine and run there.  #617
-plans building a portable mailbox rather than copying one.
+live until unplugged, #409), and the program for the host to run.
+Completed 2026-10-04 on the owner's word (built means complete, re-open
+if needed).  No drive made by it has yet been recorded as carried to a
+second machine and run there.  #617 plans building a portable mailbox
+rather than copying one.
 
 
 ## Intended Behavior
@@ -134,7 +135,7 @@ moved to #618.
 
 ## Status
 
-Open.
+Complete (2026-10-04): the generator is built; see Current Behavior.
 
 **2026-09-22 (#409):** `run.sh` at the drive root is replaced by two
 launchers inside the mailbox, `sync-with-contacts.sh` (one visit) and

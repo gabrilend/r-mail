@@ -5,8 +5,9 @@
 Fixed in 01b0175 (see Status): the phone records each confirmed
 transfer in its sync state the moment the server acknowledges it, so a
 later failure in the same sync no longer makes it re-send what already
-arrived.  Kept open until the QA items in `q-a-tests.md` are ticked on a
-phone running a build that has it.
+arrived.  Completed 2026-10-04 on the owner's word (built means
+complete, re-open if needed); the QA items in `q-a-tests.md` remain the
+way to check it on a phone.
 
 
 ## Problem
@@ -76,5 +77,6 @@ commit makes the duplicate never exist, so nothing has to be filtered.
 ## Status
 
 Fixed in 01b0175 ("commit sync state incrementally"): every transfer
-commits its own state the moment the server acknowledges it.  Kept open
-only until the QA items are ticked; then move to completed/.
+commits its own state the moment the server acknowledges it.  Completed
+2026-10-04 by the owner's decision that a built issue is a complete one;
+the QA items stay in `q-a-tests.md`.

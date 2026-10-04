@@ -12,6 +12,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#801](completed/801-the-android-app-and-its-sync.md) — The Android app keeps a copy of each home mailbox, and syncs it**  The app holds any number of home mailboxes (`mailboxes.json` in its private storage), each a `MailboxConfig`:
 - **[#802](completed/802-android-hook-scripts-and-config-sync.md) — Android hook scripts and config sync**  Android clients should have their own config file that syncs with the home daemon (similar to how the contacts file syncs).
 - **[#803](completed/803-synced-phone-config-rejected.md) — Synced phone config (rejected)**  The original proposal was to give the Android client its own server-synced config file — separate from the desktop config, editable on both phone and desktop, kept in sync via the same hash-compare mechanism as contacts.
+- **[#804](completed/804-android-sync-state-all-or-nothing.md) — Android sync state is committed all-or-nothing, so proven uploads are re-sent**  Fixed in 01b0175 (see Status): the phone records each confirmed transfer in its sync state the moment the server acknowledges it, so a later failure in the same sync no longer makes it re-send what already arrived.
 - **[#805](completed/805-the-android-screens.md) — What the Android app shows, screen by screen**  The app (`ui/MainActivity.kt`, one `MainViewModel` holding the state) moves between screens by name:
 - **[#806](completed/806-android-compose-cursor-scroll.md) — Smart cursor-aware scrolling in Android compose screen**  When the user types in the compose screen and the cursor goes off-screen (behind the keyboard or above the viewport), the view doesn't follow intelligently.
 - **[#808](completed/808-android-error-box-persists-during-sync.md) — Keep "failed to connect" error visible during sync**  The "failed to connect" error box disappears while syncing.
@@ -28,7 +29,6 @@ regenerate it rather than editing above the notes line.  Counts:
 
 ## Open
 
-- **[#804](804-android-sync-state-all-or-nothing.md) — Android sync state is committed all-or-nothing, so proven uploads are re-sent**  Fixed in 01b0175 (see Status): the phone records each confirmed transfer in its sync state the moment the server acknowledges it, so a later failure in the same sync no longer makes it re-send what already arrived.
 - **[#807](807-android-keyboard-scroll-fix.md) — Android: fix scroll behavior when typing long messages**  When typing long messages on Android, the keyboard covers part of the text input area.
 - **[#818](818-android-inline-filename-in-message-view.md) — Move the message filename out of the top bar and into the message body**  In the Android message view (`ReadScreen`), the selected message's filename is rendered as the `TopAppBar` title (`ReadScreen.kt` around line 79: `title = { Text(filename) }`).
 - **[#820](820-android-attachment-picker-bottom-sheet.md) — Android: attachment "+" bottom sheet with a Photo Picker route**  Every "pick a file" in the app goes through one dialog of our own, `AttachmentSourcePicker.kt` (`rememberAttachmentSourcePicker(onPicked)`, which returns a function that opens the dialog).

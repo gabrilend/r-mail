@@ -5,9 +5,10 @@
 The generator exists: `scripts/make-installer-drive.sh` writes an
 installer drive — `install.sh` at its root (which runs the copy of
 `scripts/install.sh` it carries), a README, and the source tree without
-build products.  The status below records no check of a drive made by it,
-so the issue stays open until one is made and installed from on another
-machine.
+build products.  Completed 2026-10-04 on the owner's word (built means
+complete, re-open if needed).  No drive made by it has yet been recorded
+as installed from on another machine; that is the first thing to try if
+it is re-opened.
 
 
 ## Intended Behavior
@@ -97,4 +98,4 @@ User request 2026-04-17.
 
 ## Status
 
-Open.
+Complete (2026-10-04): the generator is built; see Current Behavior.

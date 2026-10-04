@@ -9,8 +9,9 @@ request to a contact not yet due is withheld and treated by its builder
 as an ordinary failure.  Any request *from* a contact makes that contact
 due at once.  Every start-up announces this mailbox's address to every
 contact (the "ping").  A mailbox with no contacts keeps one timer of its
-own.  Kept open for the owner's check; the follow-ups below record what
-was found since.
+own.  Completed 2026-10-04 on the owner's word ("if they're built then
+they're complete — we can re-open them if needed"); the follow-ups below
+record what was found since.
 
 
 ## Problem

@@ -22,13 +22,13 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#112](completed/112-the-sync-cycle.md) — The sync cycle: what goes out, in what order, and what it decides about each contact**  A sync cycle is the daemon's whole outgoing side.
 - **[#113](completed/113-fix-partial-send-for-large-payloads.md) — Fix Partial Send for Large Payloads**  Attachment chunk transfers fail with "chunk X/Y failed, will retry" even though regular messages work fine.
 - **[#114](completed/114-batch-sync-operations-per-contact.md) — Batch sync operations per contact with connection pre-check**  The sync cycle tries each operation independently.
+- **[#115](completed/115-per-contact-sync-timers.md) — Per-contact sync timers, startup ping, reset on inbound contact**  Built 2026-09-22 (see Status).
 - **[#116](completed/116-the-daemons-log.md) — What the daemon says, where, and how it tells the owner about problems**  Each log line — `YYYY-MM-DD HH:MM:SS` and a sentence — goes first to standard error, always (the journal under systemd, the terminal when run by hand), then to a plain file that can be tailed and grepped.
 - **[#117](completed/117-redirect-service-logs-to-tmp.md) — Redirect service logs to /tmp (RAM)**  The runit service at `/etc/sv/rmail/run` outputs directly to stdout/stderr 
 
 ## Open
 
 - **[#102](102-the-mailbox-is-the-installation.md) — The mailbox is the installation**  A mailbox is currently a directory of mail plus a set of pointers to things kept elsewhere: its config in `~/.config/rmail/`, its hook scripts in the git checkout, its program in the git checkout.
-- **[#115](115-per-contact-sync-timers.md) — Per-contact sync timers, startup ping, reset on inbound contact**  Built 2026-09-22 (see Status).
 - **[#118](118-coalesce-repeated-log-lines.md) — Coalesce repeated log lines into a repeat counter**  A single stuck condition floods the log with identical lines, one per sync cycle, forever.
 - **[#119](119-outbox-changes-during-a-sync-wait-for-a-timer.md) — An outbox change made during a sync waits for a timer**  The daemon learns about file changes from kernel file-change notices (inotify on Linux, kqueue on BSD/macOS) on `outbox/` and on `contacts`.
 - **[#120](120-blocking-sync-cycle-stalls-inbound.md) — A blocking sync cycle stalls inbound requests (head-of-line blocking)**  The main loop multiplexes with `socket.select()`, but `run_sync_cycle` is synchronous: it builds a batch of outbound ops and waits for them, real network timeouts included.

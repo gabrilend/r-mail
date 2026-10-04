@@ -7,7 +7,8 @@ are re-checked every 24 to 48 hours (a time drawn afresh each check, so it
 wanders through the day), and an hour after a check no provider answered.
 A changed public address is still confirmed by a second provider before
 contacts are told.  The time of the next check is drawn again at boot.
-Kept open for the owner's check.
+Completed 2026-10-04 on the owner's word: built means complete, and it
+can be re-opened if needed.
 
 
 ## Problem
