@@ -8,21 +8,29 @@ and stays running in the background.
 `install.sh` detects your init system and offers to set this up automatically.
 The manual formats are below. A copy of this guide built by the installer shows
 only your machine's service manager; `docs/.templates/service.md` in the
-repository has all four. Three things in them need replacing:
+repository has all four.
 
-**`/path/to/lua`** — your system lua (`which lua`), or the one the installer
-compiled, at `deps/lua/bin/lua` inside the checkout.
+Each example below is the installer's own template
+(`scripts/.templates/services/`), filled in with example values by
+`scripts/fill-guide-examples.lua` — so it is exactly the file the installer
+would write. In a copy of this guide built by the installer, the paths are
+already your real ones. What each value is:
 
-**`/path/to/rmail`** — the directory you cloned the code into. One checkout
-serves every mailbox on the machine; there is no per-mailbox copy of the
-daemon. Which mailbox a given daemon serves is decided entirely by its
+**`/home/you/programs/email`** — the directory you cloned the code into. One
+checkout serves every mailbox on the machine; there is no per-mailbox copy of
+the daemon. Which mailbox a given daemon serves is decided entirely by its
 second argument.
 
-**`/path/to/mailbox`** — the mailbox this service serves. `config` inside it
-is what the daemon is handed, and the mailbox served is the directory that
-file sits in. The argument is not optional: a daemon started without it stops
-with a usage message, because a machine can hold several mailboxes and there
-is nothing sensible to assume.
+**`/home/you/programs/email/deps/lua/bin/lua`** — the Lua the installer
+compiled, inside the checkout; or your system's Lua (`which lua`).
+
+**`/home/you/mail`** — the mailbox this service serves. `config` inside it is
+what the daemon is handed, and the mailbox served is the directory that file
+sits in. The argument is not optional: a daemon started without it stops with
+a usage message, because a machine can hold several mailboxes and there is
+nothing sensible to assume.
+
+**`YOURUSER`** — the user the daemon runs as, and whose mailbox it is.
 
 A mailbox holds its own config and its own hook scripts, but not the program.
 The exception is a mailbox on removable media, which carries a trimmed copy
@@ -74,53 +82,63 @@ systemd offers two modes:
 
 ### User service
 
+`~/.config/systemd/user/SERVICE-NAME.service`:
+
+<!-- {{{ example: systemd-user.service -->
 ```ini
-# ~/.config/systemd/user/rmail.service
 [Unit]
-Description=rmail messaging daemon
+Description=rmail messaging daemon (/home/you/mail)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config
+ExecStart=/home/you/programs/email/deps/lua/bin/lua /home/you/programs/email/rmail.lua /home/you/mail/config
 Restart=on-failure
 RestartSec=5
+StandardOutput=append:/tmp/SERVICE-NAME.log
+StandardError=append:/tmp/SERVICE-NAME.log
 
 [Install]
 WantedBy=default.target
 ```
+<!-- }}} example -->
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now rmail
-journalctl --user -u rmail -f
+systemctl --user enable --now SERVICE-NAME
+tail -f /tmp/SERVICE-NAME.log
 # to keep running after logout:
 loginctl enable-linger
 ```
 
 ### System service
 
+`/etc/systemd/system/SERVICE-NAME.service`:
+
+<!-- {{{ example: systemd-system.service -->
 ```ini
-# /etc/systemd/system/rmail.service
 [Unit]
-Description=rmail messaging daemon
+Description=rmail messaging daemon (/home/you/mail)
 After=network.target
 
 [Service]
 Type=simple
 User=YOURUSER
-ExecStart=/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config
+ExecStart=/home/you/programs/email/deps/lua/bin/lua /home/you/programs/email/rmail.lua /home/you/mail/config
 Restart=on-failure
 RestartSec=5
+StandardOutput=append:/tmp/SERVICE-NAME.log
+StandardError=append:/tmp/SERVICE-NAME.log
 
 [Install]
 WantedBy=multi-user.target
 ```
+<!-- }}} example -->
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now rmail
-journalctl -u rmail -f
+sudo systemctl enable --now SERVICE-NAME
+tail -f /tmp/SERVICE-NAME.log
 ```
 
 ---
@@ -129,18 +147,24 @@ journalctl -u rmail -f
 <!-- {{{ manager: runit -->
 ## runit
 
+`/etc/sv/SERVICE-NAME/run` (the installer writes it as `SERVICE-NAME-run` in
+the checkout):
+
+<!-- {{{ example: runit-run -->
 ```sh
-# /etc/sv/rmail/run
 #!/bin/sh
+# rmail runit service for the mailbox at /home/you/mail
+# Logs go to RAM-backed /tmp: no disk wear, gone on reboot.
 export HOME=/home/YOURUSER
-exec chpst -u YOURUSER /path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config >>/tmp/SERVICE-NAME.log 2>&1
+exec chpst -u YOURUSER /home/you/programs/email/deps/lua/bin/lua /home/you/programs/email/rmail.lua /home/you/mail/config >>/tmp/SERVICE-NAME.log 2>&1
 ```
+<!-- }}} example -->
 
 ```sh
-sudo mkdir -p /etc/sv/rmail
-sudo mv rmail-run /etc/sv/rmail/run
-sudo chmod +x /etc/sv/rmail/run
-sudo ln -s /etc/sv/rmail /var/service/
+sudo mkdir -p /etc/sv/SERVICE-NAME
+sudo cp SERVICE-NAME-run /etc/sv/SERVICE-NAME/run
+sudo chmod +x /etc/sv/SERVICE-NAME/run
+sudo ln -s /etc/sv/SERVICE-NAME /var/service/
 ```
 
 Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
@@ -151,25 +175,31 @@ Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 <!-- {{{ manager: openrc -->
 ## OpenRC
 
-```sh
-# /etc/init.d/rmail
-#!/sbin/openrc-run
+`/etc/init.d/SERVICE-NAME` (the installer writes it as `SERVICE-NAME-init` in
+the checkout):
 
-description="rmail messaging daemon"
-command="/path/to/lua"
-command_args="/path/to/rmail/rmail.lua /path/to/mailbox/config"
+<!-- {{{ example: openrc-init -->
+```sh
+#!/sbin/openrc-run
+# rmail openrc service for the mailbox at /home/you/mail
+# Logs to RAM-backed /tmp.
+
+description="rmail messaging daemon (/home/you/mail)"
+command="/home/you/programs/email/deps/lua/bin/lua"
+command_args="/home/you/programs/email/rmail.lua /home/you/mail/config"
 command_user="YOURUSER"
 command_background=true
 pidfile="/run/SERVICE-NAME.pid"
 output_log="/tmp/SERVICE-NAME.log"
 error_log="/tmp/SERVICE-NAME.log"
 ```
+<!-- }}} example -->
 
 ```sh
-sudo mv rmail-init /etc/init.d/rmail
-sudo chmod +x /etc/init.d/rmail
-sudo rc-update add rmail default
-sudo rc-service rmail start
+sudo cp SERVICE-NAME-init /etc/init.d/SERVICE-NAME
+sudo chmod +x /etc/init.d/SERVICE-NAME
+sudo rc-update add SERVICE-NAME default
+sudo rc-service SERVICE-NAME start
 ```
 
 Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
@@ -182,33 +212,44 @@ Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 
 NixOS uses systemd internally but service files placed in `/etc/systemd/system/`
 are overwritten on every `nixos-rebuild`. Instead, `install.sh` generates a
-`rmail.nix` file that defines the service declaratively. The generated file
-looks like this (yours will have your actual paths and port filled in):
+`SERVICE-NAME.nix` file that defines the service declaratively. When you use
+the system's Lua it looks like this:
 
+<!-- {{{ example: nixos-system-lua.nix -->
 ```nix
-{ config, ... }:
+{ config, pkgs, ... }:
+# rmail NixOS service for the mailbox at /home/you/mail
+# Logs to RAM-backed /tmp. One service per mailbox; the name carries the
+# mailbox path so a second mailbox adds a service rather than replacing this.
 
 let
   rmailPort = 8025;
 in {
   networking.firewall.allowedTCPPorts = [ rmailPort ];
 
-  systemd.services.rmail = {
-    description = "rmail messaging daemon";
+  systemd.services."SERVICE-NAME" = {
+    description = "rmail messaging daemon (/home/you/mail)";
     after = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
 
     serviceConfig = {
       Type = "simple";
-      User = "youruser";
+      User = "YOURUSER";
       Group = "users";
-      ExecStart = "/path/to/lua /path/to/rmail/rmail.lua /path/to/mailbox/config";
+      ExecStart = "${pkgs.lua5_4}/bin/lua /home/you/programs/email/rmail.lua /home/you/mail/config";
       Restart = "on-failure";
       RestartSec = 5;
+      StandardOutput = "append:/tmp/SERVICE-NAME.log";
+      StandardError = "append:/tmp/SERVICE-NAME.log";
     };
   };
 }
 ```
+<!-- }}} example -->
+
+With a Lua the installer compiled, the first line is `{ config, ... }:` and
+`ExecStart` names that Lua by its path instead of `${pkgs.lua5_4}`
+(`nixos-own-lua.nix`).
 
 Use the auto-generated version — `<service name>.nix` in the project root,
 e.g. `rmail-home-you-mail.nix` (see "Running multiple instances" for how the

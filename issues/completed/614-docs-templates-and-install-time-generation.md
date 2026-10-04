@@ -2,7 +2,11 @@
 
 ## Current Behavior
 
-Complete, including the extension of 2026-10-04 (owner: "yes please" to
+Complete, with both extensions of 2026-10-04 (the second: the guide's
+examples are the templates, filled by `scripts/fill-guide-examples.lua`,
+and checked by `scripts/test-service-templates.sh`).
+
+Built, including the first extension of 2026-10-04 (owner: "yes please" to
 moving the service files into templates and trimming the service guide
 to this machine's service manager).
 
@@ -210,12 +214,31 @@ One-shot:
    building, not part of the test: the old blocks no longer exist to
    compare against.
 
-## Possible next step (not part of this issue)
+## Second extension (2026-10-04): the guide's examples are the templates
 
-The examples in `service.md` are written by hand and have already
-drifted from the real files (the systemd examples lack the log lines the
-installer writes).  The guide could include each template, filled with
-example values, so the two can never disagree.
+The examples in `service.md` were written by hand and had drifted from
+the real files (the systemd examples lacked the log lines the installer
+writes; the NixOS one lacked the log lines and the mailbox comment).
+Owner, asked whether the guide should include the templates instead:
+"Yeah probably."
+
+- Each example in `docs/.templates/service.md` sits between
+  `<!-- {{{ example: TEMPLATE -->` and `<!-- }}} example -->`, and is
+  written there by `scripts/fill-guide-examples.lua` from
+  `scripts/.templates/services/TEMPLATE`, filled with the readable
+  example values the docs already use (`/home/you/programs/email`,
+  `/home/you/mail`, `SERVICE-NAME`, `YOURUSER`).  So the repository's
+  guide reads well, and the docs build then turns `/home/you/...` into
+  this machine's real paths as it does everywhere else.
+- `fill-guide-examples.lua --check` exits 1 naming any example that no
+  longer matches its template; `scripts/test-service-templates.sh` runs
+  it, so a template edited without re-running the tool fails the tests.
+- The docs build drops the example markers along with the manager ones.
+
+Steps: write the tool (it refuses a missing template, an unfilled
+placeholder, or an example with no end marker); replace each hand
+example in `service.md` with markers and run it; drop example markers in
+`generate_docs`; add the check to the test.
 
 ## Status
 

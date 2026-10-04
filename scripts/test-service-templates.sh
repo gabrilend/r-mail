@@ -145,6 +145,23 @@ else
     note_fail "unknown: did not keep all four sections, or did not say so"
 fi
 
+echo "guide examples"
+# The guide's example files are made from the templates; one that no
+# longer matches means a template was changed without re-running the tool.
+if "$DIR/scripts/fill-guide-examples.lua" --check "$DIR" > "$WORK/check.out" 2>&1; then
+    ok "every example in the guide matches its template"
+else
+    note_fail "$(head -1 "$WORK/check.out")"
+fi
+g=$(build_guide runit)
+if grep -q '^<!-- .* example' "$g"; then
+    note_fail "an example marker is left in the built guide"
+elif grep -q "^exec chpst -u YOURUSER " "$g"; then
+    ok "the built guide shows the runit example, without its markers"
+else
+    note_fail "the built guide does not show the runit example"
+fi
+
 echo "detection"
 word=$("$DIR/scripts/detect-service-manager.sh")
 case "$word" in

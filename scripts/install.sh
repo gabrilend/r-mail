@@ -1923,7 +1923,9 @@ generate_docs() {
     # A section marked "<!-- {{{ manager: X -->" ... "<!-- }}} manager: X -->"
     # is about one service manager.  The built copy keeps the section for
     # this machine's manager and drops the others, markers and all; the
-    # templates keep every section (#614).  With no manager found
+    # templates keep every section (#614).  The "example" markers round
+    # each example file (written by scripts/fill-guide-examples.lua) are
+    # dropped too, leaving the example.  With no manager found
     # (INIT_SYSTEM unknown), every section is kept, and that is said.
     if [ "${INIT_SYSTEM:-unknown}" = "unknown" ]; then
         info "no service manager found: the built guides keep every manager's section"
@@ -1941,6 +1943,7 @@ generate_docs() {
         awk -v keep="${INIT_SYSTEM:-unknown}" '
             /^<!-- \{\{\{ manager: / { block = $4; next }
             /^<!-- \}\}\} manager: / { block = ""; next }
+            /^<!-- \{\{\{ example: / || /^<!-- \}\}\} example -->$/ { next }
             block == "" || keep == "unknown" || block == keep { print }
         ' > "$out_dir/$name"
     done

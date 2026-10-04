@@ -1,6 +1,6 @@
 # Conversation Summary: 44efc473-3b08-4771-8b15-67e610ded2ae
 
-Generated on: 2026-10-04 14:51:31
+Generated on: 2026-10-04 15:20:50
 Models: claude-opus-5-5
 
 ## Contents
@@ -895,6 +895,229 @@ built docs, though the templates would still have all four.
 4. **The zip library:** may I update the two comments in `my-libs/zip` to the
    new issue numbers (#309 and #311a) so the copies match again? That's a
    different project, so I didn't touch it.
+
+--------------------------------------------------------------------------------
+
+### User Request 5
+
+> 1. Templates: do you want the service files moved into templates, the service
+> guide trimmed to this machine's service manager, both, or neither?
+
+yes please
+
+> 2. The rest of the discovery issue: none of it broadcasts, so it doesn't break
+> your one-address rule.
+
+great, let's delete these for now since we don't need them.
+
+> 3. Commit now? Should I commit the discovery deletion and the address fix now,
+> or wait until question 2 is settled and the issue is finished?
+
+we can commit when you get to a breaking point. A time to stop because we've
+concluded and finished up some tasks. Not if they're still in-progress, but
+*completed*.
+
+> 4. The zip library: may I update the two comments in my-libs/zip to the new
+> issue numbers (#309 and #311a) so the copies match again? That's a different
+> project, so I didn't touch it.
+
+sure?
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 5
+
+> I'll finish the discovery issue first and commit it, then do the templates,
+> then the zip comments. First, every remaining piece of the discovery issue in
+> the daemon:
+
+> I'll delete the learning step now. Before deleting the "where am I in your
+> contacts?" request, I'm checking that nothing in the phone app actually calls
+> it, since its comment claims phones use it.
+
+> Only defined, never called. Removing it from the daemon:
+
+> Removing it from the README and the protocol guide:
+
+> Now the address swap. It runs in four places; removing each:
+
+> With the swap gone, nothing calls the hostname-lookup helper any more; it only
+> existed to feed the swap. Checking it and its small cache:
+
+> Now checking the comment that mentioned the cache, and that the daemon still
+> parses:
+
+> The daemon side of the remaining pieces is gone and parses. I'm now pointing
+> the docs and issues away from the deleted test.
+
+> A message got through using the `local-ip` line alone, with no discovery and
+> no swap. I'm adding this test to the phase 4 demo, then rewriting the
+> discovery issue as a finished blueprint.
+
+> There are three changed lines, not two: the writer has one as well. Checking
+> the rest of the zip folder for other old rmail issue numbers:
+
+> The renumbering map confirms the old #405 is now #309 and the old #404a is now
+> #311a. Five places in all: the reader (2), the writer (1), and the two
+> description files beside them.
+
+> The zip test passes. Previewing a commit in the `ai-stuff` repository limited
+> to the four zip files:
+
+> It takes exactly the five edited lines and nothing else. Committing:
+
+*[commit] 48d4f0b2a in ai-stuff - Zip library: rmail's issue numbers brought up to date after its renumbering*
+
+> The zip fix is committed. Now the full rmail test run, in the background,
+> before committing the discovery work:
+
+> While the tests run, I'm reading the service guide's layout to plan the
+> templates work.
+
+> I'm checking whether an existing issue covers this before writing a new one.
+> The completed "documents built from templates at install time" issue is the
+> obvious candidate:
+
+> Now the implementation steps for the extension, at the end of the issue:
+
+> I'm moving this detection into its own small script, so the installer and the
+> docs builder can't disagree about which service manager the machine runs.
+
+> It says runit, which is right. Replacing the installer's inline detection with
+> a call to it, and adding the template-filling function:
+
+> Now each of the six inline blocks becomes a single call. Re-reading that part
+> of the installer:
+
+> 112 lines removed, exactly the six blocks, and it parses. Putting it in place:
+
+> The six calls sit exactly where the blocks were, with the existing `chmod` and
+> messages kept. Now the service guide: fold markers round each manager's
+> section.
+
+> Now the docs builder: after filling in the paths, it keeps only the section
+> for this machine's service manager and drops the markers. When no manager is
+> found it keeps every section and says so.
+
+> The docs builder borrows the installer's function and calls `info`, so I'm
+> checking that both scripts define it, then giving `generate-docs.sh` the
+> detected manager:
+
+> One problem: the function looks for templates inside the program folder, so
+> the sample program folder must be the real checkout. I'm switching both
+> renders to that path:
+
+> Every case passes. One untidy line: the first lift complained that the scratch
+> file didn't exist yet. Creating the file first fixes that:
+
+> Clean now. Next a real run of `generate-docs.sh` for this machine, to check
+> the standalone script works end to end:
+
+> This machine's guide now shows only the runit section, plus the sections every
+> reader needs. Checking on the full test run:
+
+> The run is on its first test, which is a slow one. While it runs I'm writing
+> up the reopened templates issue as finished:
+
+> The issue is written up. Waiting for the full test run before committing
+> anything:
+
+> `test-edit-delivery` failed this time; it passed in the previous run, and the
+> daemon has changed since. Reading why:
+
+> It passes alone. Waiting for the rest of the full run:
+
+> The preview takes exactly this session's work, split cleanly between the two
+> issues. Committing the discovery removal first, naming only its files:
+
+*[commit] 128d467e3 in r-mail - Mailboxes no longer look for each other on the home network; a contact's local address is written down instead*
+
+> Committed. Now the templates work:
+
+*[commit] 72badcb15 in r-mail - Service files come from templates, and the service guide shows only this machine's service manager*
+
+> Both are committed. Checking the working tree for stale staged copies left by
+> the moves:
+
+All four things you approved are done and committed, the working tree is clean,
+and every test passes. I kept one item you said to delete, because the phone
+uses it.
+
+## Discovery and the rest of its issue
+
+Deleted:
+
+- the multicast and the 254-address scan;
+- the step that swapped in a contact's local address;
+- the step that learned local addresses from incoming connections;
+- the "where am I in your contacts?" request, its setting, and the phone's
+  function for it;
+- a small hostname cache that only the swap used.
+
+Old `lan_ip` contact lines are rewritten as `local-ip` lines when a mailbox
+starts.
+
+**Kept, against what you approved:** the local-address field in the answer your
+phone gets from its home computer. I described it to you as unused, but the
+phone app stores that address and tries it first when picking where to connect.
+Deleting it would have taken that away. If you still want it gone, it's a few
+lines.
+
+**The 127.0.0.1 fix is in this commit.** Your mailboxes had recorded their own
+home address as loopback, and the swap step was hiding the mistake. A new test,
+`test-local-ip-delivery.sh`, checks that two mailboxes in one house now deliver
+to each other using only their `local-ip` lines.
+
+I removed an unused function from the phone app's code but didn't rebuild the
+app. Nothing called that function, so the change is safe.
+
+## Service files and the service guide
+
+- The six service files the installer writes are now template files in
+  `scripts/.templates/services/`. Filled with the same values, all six are byte
+  for byte identical to what the installer wrote before. I checked this with
+  paths containing `&` and `|`, which are special characters for the
+  substitution tool.
+- The service guide built into `docs/` shows only your machine's service
+  manager. Yours shows runit, plus the sections everyone needs. The templates in
+  the repository still have all four.
+- One small script now decides which service manager a machine runs, and both
+  the installer and the docs builder use it.
+- `test-service-templates.sh` checks all of this.
+
+## Zip library
+
+I updated the comments in `my-libs/zip` to the new issue numbers and committed
+only those five lines in the `ai-stuff` repository. That repository has a lot of
+other uncommitted work, which I left alone. rmail's zip test passes again.
+
+## Tests
+
+All 27 tests pass. Two failed during the full runs and passed when run alone:
+the "busy" test and the edit-delivery test. Both times, a test mailbox couldn't
+take its port because something else held it for a moment. Every test port is in
+the 59000s, inside the range Linux uses for its own outgoing connections
+(32768–60999), so this will keep happening now and then. Moving the test ports
+below 32768 would fix it.
+
+## For you to do
+
+- **Restart the mailboxes:** run `./restart-mailboxes.sh`. Both mailboxes are on
+  its list, and it will ask for your sudo password. Until then they keep running
+  this morning's code, still with discovery and still holding 127.0.0.1 as their
+  home address.
+- **Firewall:** the UDP rule for ports 8025 and 8026 isn't needed any more. It's
+  root's to remove.
+
+## Questions
+
+1. **Test ports:** move every test port below 32768 so these random failures
+   stop?
+2. **The phone's local-address field:** keep it, or remove it too?
+3. **Guide examples:** the examples in the service guide are written by hand,
+   and they've already drifted from the real service files. The systemd examples
+   are missing the log lines the installer writes. Should the guide include the
+   actual templates instead, filled with example values, so they can't drift?
 
 --------------------------------------------------------------------------------
 
