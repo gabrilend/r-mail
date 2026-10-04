@@ -10,9 +10,10 @@
 # restarts each mailbox's service from a list kept at the top of this
 # file, then checks that each one is running again.
 #
-# This file is built for one machine, from the template at
-# scripts/.templates/restart-mailboxes.sh, by scripts/make-restart-script.sh
-# (the installer runs that the first time).  It is not tracked by git, so
+# This file, scripts/restart-mailboxes.sh, is built for one machine from
+# the template at scripts/.templates/restart-mailboxes.sh, by
+# scripts/make-restart-script.sh (the installer runs that the first time;
+# rebuilding with --force keeps the list).  It is not tracked by git, so
 # the list below belongs to this machine and survives every update.  The
 # template holds a restart method for each kind of service manager; this
 # copy keeps only the one this machine uses.  (#622)
@@ -250,7 +251,7 @@ ask_for_names() {
 # move keeps the old one open for the reader, where one rewritten in
 # place would shift the text under it.
 write_list() {
-    _self="$DIR/restart-mailboxes.sh"
+    _self="$DIR/scripts/restart-mailboxes.sh"
     _count=$(grep -c '^MAILBOX_SERVICES=' "$_self")
     if [ "$_count" != 1 ]; then
         err "$_self has $_count list lines (MAILBOX_SERVICES=...), expected exactly 1"
@@ -306,11 +307,11 @@ main() {
         fi
         case " $MAILBOX_SERVICES " in
             *" $_add "*)
-                ok "$_add is already listed in $DIR/restart-mailboxes.sh"
+                ok "$_add is already listed in $DIR/scripts/restart-mailboxes.sh"
                 exit 0 ;;
         esac
         if write_list "${MAILBOX_SERVICES:+$MAILBOX_SERVICES }$_add"; then
-            ok "added $_add to the list in $DIR/restart-mailboxes.sh"
+            ok "added $_add to the list in $DIR/scripts/restart-mailboxes.sh"
             exit 0
         fi
         exit 1
@@ -323,7 +324,7 @@ main() {
     if [ "$_mode" = check ]; then
         _services="${_given:-$MAILBOX_SERVICES}"
         if [ -z "$_services" ]; then
-            err "the list in $DIR/restart-mailboxes.sh is empty"
+            err "the list in $DIR/scripts/restart-mailboxes.sh is empty"
             exit 1
         fi
         _missing=""
@@ -357,7 +358,7 @@ main() {
             exit 1
         fi
     else
-        err "the list in $DIR/restart-mailboxes.sh is empty, and there is no terminal to ask on"
+        err "the list in $DIR/scripts/restart-mailboxes.sh is empty, and there is no terminal to ask on"
         info "give the service names as arguments, or run this once by hand to fill the list"
         exit 1
     fi

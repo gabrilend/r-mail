@@ -119,8 +119,8 @@ fresh_checkout() {
 
 # {{{ set_list <checkout> <names>
 set_list() {
-    sed "s/^MAILBOX_SERVICES=.*/MAILBOX_SERVICES=\"$2\"/" "$1/restart-mailboxes.sh" > "$1/list.tmp"
-    cat "$1/list.tmp" > "$1/restart-mailboxes.sh"
+    sed "s/^MAILBOX_SERVICES=.*/MAILBOX_SERVICES=\"$2\"/" "$1/scripts/restart-mailboxes.sh" > "$1/list.tmp"
+    cat "$1/list.tmp" > "$1/scripts/restart-mailboxes.sh"
     rm -f "$1/list.tmp"
 }
 # }}}
@@ -132,7 +132,7 @@ for m in runit systemd openrc nixos; do
         note_fail "$m: the builder failed"
         continue
     fi
-    b="$c/restart-mailboxes.sh"
+    b="$c/scripts/restart-mailboxes.sh"
     blocks=$(grep -c '^# {{{ manager: ' "$b")
     if [ "$blocks" = 1 ] && grep -q "^# {{{ manager: $m\$" "$b" \
        && grep -q "^DIR=\"$c\"\$" "$b" && grep -q "^SERVICE_MANAGER=\"$m\"\$" "$b" \
@@ -153,16 +153,20 @@ c=$(fresh_checkout keep)
 "$BUILDER" runit "$c" > /dev/null
 set_list "$c" "mail-a"
 "$BUILDER" runit "$c" > /dev/null
-if grep -q '^MAILBOX_SERVICES="mail-a"$' "$c/restart-mailboxes.sh"; then
+if grep -q '^MAILBOX_SERVICES="mail-a"$' "$c/scripts/restart-mailboxes.sh"; then
     ok "a second build kept the list"
 else
     note_fail "a second build overwrote the list"
 fi
+# --force rebuilds from the template (a marker line stands in for a
+# template change) and carries the list across.
+echo "# stale copy" >> "$c/scripts/restart-mailboxes.sh"
 "$BUILDER" --force runit "$c" > /dev/null
-if grep -q '^MAILBOX_SERVICES=""$' "$c/restart-mailboxes.sh"; then
-    ok "--force replaced it"
+if grep -q '^MAILBOX_SERVICES="mail-a"$' "$c/scripts/restart-mailboxes.sh" \
+   && ! grep -q '^# stale copy$' "$c/scripts/restart-mailboxes.sh"; then
+    ok "--force rebuilt it and kept the list"
 else
-    note_fail "--force did not replace it"
+    note_fail "--force did not rebuild it, or lost the list"
 fi
 
 echo "runit: the list, arguments, unknown names, a service that stays down"
@@ -170,7 +174,7 @@ c=$(fresh_checkout runit)
 "$BUILDER" runit "$c" > /dev/null
 set_list "$c" "mail-a mail-b"
 : > "$CALLS"
-if "$c/restart-mailboxes.sh" > "$WORK/out" 2>&1 \
+if "$c/scripts/restart-mailboxes.sh" > "$WORK/out" 2>&1 \
    && grep -q "^sudo sv restart $SVDIR/mail-a\$" "$CALLS" \
    && grep -q "^sudo sv restart $SVDIR/mail-b\$" "$CALLS"; then
     ok "every listed service restarted, through sudo"
@@ -179,16 +183,16 @@ else
     info "$(cat "$WORK/out")"
 fi
 : > "$CALLS"
-"$c/restart-mailboxes.sh" mail-b > "$WORK/out" 2>&1
+"$c/scripts/restart-mailboxes.sh" mail-b > "$WORK/out" 2>&1
 if grep -q "restart $SVDIR/mail-b\$" "$CALLS" && ! grep -q "restart $SVDIR/mail-a\$" "$CALLS" \
-   && grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/restart-mailboxes.sh"; then
+   && grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/scripts/restart-mailboxes.sh"; then
     ok "a name given as an argument is restarted instead, and the list is unchanged"
 else
     note_fail "an argument did not replace the list for one run"
 fi
 : > "$CALLS"
 set_list "$c" "mail-a no-such-mailbox"
-if "$c/restart-mailboxes.sh" > "$WORK/out" 2>&1; then
+if "$c/scripts/restart-mailboxes.sh" > "$WORK/out" 2>&1; then
     note_fail "an unknown name did not fail the run"
 elif grep -q restart "$CALLS"; then
     note_fail "an unknown name failed the run, but only after restarting others"
@@ -198,7 +202,7 @@ else
     note_fail "an unknown name failed the run without naming it"
 fi
 set_list "$c" "mail-a mail-b"
-if STUB_DOWN="mail-b" "$c/restart-mailboxes.sh" > "$WORK/out" 2>&1; then
+if STUB_DOWN="mail-b" "$c/scripts/restart-mailboxes.sh" > "$WORK/out" 2>&1; then
     note_fail "a service that stayed down did not fail the run"
 elif grep -q "mail-b is not running" "$WORK/out"; then
     ok "a service that stays down fails the run, and is named"
@@ -210,27 +214,27 @@ echo "--add and --check: what the installer uses"
 c=$(fresh_checkout add)
 "$BUILDER" runit "$c" > /dev/null
 : > "$CALLS"
-"$c/restart-mailboxes.sh" --add mail-a > /dev/null
-"$c/restart-mailboxes.sh" --add mail-b > /dev/null
-"$c/restart-mailboxes.sh" --add mail-a > /dev/null
-if grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/restart-mailboxes.sh" && ! grep -q restart "$CALLS"; then
+"$c/scripts/restart-mailboxes.sh" --add mail-a > /dev/null
+"$c/scripts/restart-mailboxes.sh" --add mail-b > /dev/null
+"$c/scripts/restart-mailboxes.sh" --add mail-a > /dev/null
+if grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/scripts/restart-mailboxes.sh" && ! grep -q restart "$CALLS"; then
     ok "--add appends each name once and restarts nothing"
 else
     note_fail "--add did not build the list as expected"
-    info "$(grep MAILBOX_SERVICES= "$c/restart-mailboxes.sh")"
+    info "$(grep MAILBOX_SERVICES= "$c/scripts/restart-mailboxes.sh")"
 fi
-if "$c/restart-mailboxes.sh" --add "bad name" > /dev/null 2>&1; then
+if "$c/scripts/restart-mailboxes.sh" --add "bad name" > /dev/null 2>&1; then
     note_fail "--add accepted a name with a space"
 else
     ok "--add refuses a name that is not a service name"
 fi
-if "$c/restart-mailboxes.sh" --check > /dev/null 2>&1 && ! grep -q restart "$CALLS"; then
+if "$c/scripts/restart-mailboxes.sh" --check > /dev/null 2>&1 && ! grep -q restart "$CALLS"; then
     ok "--check passes when every listed service is installed, and restarts nothing"
 else
     note_fail "--check failed with every service installed"
 fi
-"$c/restart-mailboxes.sh" --add not-installed-yet > /dev/null
-if "$c/restart-mailboxes.sh" --check > "$WORK/out" 2>&1; then
+"$c/scripts/restart-mailboxes.sh" --add not-installed-yet > /dev/null
+if "$c/scripts/restart-mailboxes.sh" --check > "$WORK/out" 2>&1; then
     note_fail "--check passed with a listed service that is not installed"
 elif grep -q not-installed-yet "$WORK/out"; then
     ok "--check fails on a service not installed yet, and names it"
@@ -242,7 +246,7 @@ echo "the empty list: asked on a terminal, refused without one"
 c=$(fresh_checkout ask)
 "$BUILDER" runit "$c" > /dev/null
 : > "$CALLS"
-if "$c/restart-mailboxes.sh" < /dev/null > "$WORK/out" 2>&1; then
+if "$c/scripts/restart-mailboxes.sh" < /dev/null > "$WORK/out" 2>&1; then
     note_fail "an empty list with no terminal did not fail"
 elif grep -q restart "$CALLS"; then
     note_fail "an empty list with no terminal restarted something"
@@ -252,15 +256,15 @@ fi
 # script(1) gives the restart script a terminal; the names arrive on it
 # as typed lines, the last one blank.
 printf 'mail-a\nnot a name\nmail-b\n\n' |
-    script -qec "$c/restart-mailboxes.sh" /dev/null > "$WORK/out" 2>&1
-if grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/restart-mailboxes.sh" \
+    script -qec "$c/scripts/restart-mailboxes.sh" /dev/null > "$WORK/out" 2>&1
+if grep -q '^MAILBOX_SERVICES="mail-a mail-b"$' "$c/scripts/restart-mailboxes.sh" \
    && grep -q "restart $SVDIR/mail-a\$" "$CALLS" && grep -q "restart $SVDIR/mail-b\$" "$CALLS"; then
     ok "the typed names were saved into the list (the bad one refused) and restarted"
 else
     note_fail "the typed names were not saved and restarted"
-    info "$(grep MAILBOX_SERVICES= "$c/restart-mailboxes.sh")"
+    info "$(grep MAILBOX_SERVICES= "$c/scripts/restart-mailboxes.sh")"
 fi
-if sh -n "$c/restart-mailboxes.sh" && [ -x "$c/restart-mailboxes.sh" ]; then
+if sh -n "$c/scripts/restart-mailboxes.sh" && [ -x "$c/scripts/restart-mailboxes.sh" ]; then
     ok "the rewritten script still parses and is executable"
 else
     note_fail "the rewritten script is broken"
@@ -270,7 +274,7 @@ echo "systemd, openrc and nixos: each restart sent the right way"
 c=$(fresh_checkout systemd)
 "$BUILDER" systemd "$c" > /dev/null
 : > "$CALLS"
-"$c/restart-mailboxes.sh" mail-a mail-b > "$WORK/out" 2>&1
+"$c/scripts/restart-mailboxes.sh" mail-a mail-b > "$WORK/out" 2>&1
 if grep -q '^systemctl user restart mail-a.service$' "$CALLS" \
    && ! grep -q '^sudo systemctl --user' "$CALLS" \
    && grep -q '^sudo systemctl restart mail-b.service$' "$CALLS"; then
@@ -282,7 +286,7 @@ fi
 c=$(fresh_checkout openrc)
 "$BUILDER" openrc "$c" > /dev/null
 : > "$CALLS"
-"$c/restart-mailboxes.sh" mail-a > "$WORK/out" 2>&1
+"$c/scripts/restart-mailboxes.sh" mail-a > "$WORK/out" 2>&1
 if grep -q '^sudo rc-service mail-a restart$' "$CALLS"; then
     ok "openrc: restarted through sudo"
 else
@@ -291,7 +295,7 @@ fi
 c=$(fresh_checkout nixos)
 "$BUILDER" nixos "$c" > /dev/null
 : > "$CALLS"
-"$c/restart-mailboxes.sh" mail-b > "$WORK/out" 2>&1
+"$c/scripts/restart-mailboxes.sh" mail-b > "$WORK/out" 2>&1
 if grep -q '^sudo systemctl restart mail-b.service$' "$CALLS"; then
     ok "nixos: restarted through sudo"
 else

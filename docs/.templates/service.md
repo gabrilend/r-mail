@@ -350,8 +350,8 @@ but only once each is restarted. A running daemon keeps the program it loaded
 when it started.
 
 ```sh
-/home/you/programs/email/restart-mailboxes.sh                # every listed mailbox
-/home/you/programs/email/restart-mailboxes.sh kuvalu-notes   # just this one, this once
+/home/you/programs/email/scripts/restart-mailboxes.sh                # every listed mailbox
+/home/you/programs/email/scripts/restart-mailboxes.sh kuvalu-notes   # just this one, this once
 ```
 
 The list of service names sits at the top of that script, and belongs to this
@@ -372,9 +372,9 @@ service is checked to be running afterwards. Restarting a runit, OpenRC,
 NixOS or systemd system service goes through `sudo`; a systemd user service
 does not need it.
 
-To rebuild it (say, after changing service manager):
-`scripts/make-restart-script.sh --force <runit|systemd|openrc|nixos>`. That
-empties the list.
+To rebuild it (after the template changes, or after changing service manager):
+`scripts/make-restart-script.sh --force <runit|systemd|openrc|nixos>`. The
+list is carried over into the rebuilt script.
 
 ### Starting a daemon by hand
 

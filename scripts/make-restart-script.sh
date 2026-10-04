@@ -10,16 +10,18 @@
 # built from docs/.templates/.  (#622)
 #
 # The template holds one folded block per service manager (runit,
-# systemd, openrc, nixos).  The built script keeps only the block for the
-# manager named here, with the program folder filled in and the list
-# empty.  An existing built script holds the owner's list, so it is never
-# overwritten unless --force says so.  The installer runs this when no
-# built script exists yet.
+# systemd, openrc, nixos).  The built script, scripts/restart-mailboxes.sh,
+# keeps only the block for the manager named here, with the program folder
+# filled in.  An existing built script holds the owner's list, so it is
+# left alone unless --force says to rebuild it -- and a rebuild carries
+# the list over, so updating the template never loses anyone's mailboxes.
+# The installer runs this when no built script exists yet.
 #
 # Usage:
 #   scripts/make-restart-script.sh <manager>                 for this checkout
 #   scripts/make-restart-script.sh <manager> /path           for another checkout
-#   scripts/make-restart-script.sh --force <manager> [/path] replace an existing one
+#   scripts/make-restart-script.sh --force <manager> [/path] rebuild an existing
+#                                                            one, keeping its list
 #
 # <manager> is runit, systemd, openrc or nixos.
 #
@@ -37,7 +39,7 @@ DIR=""
 for _arg in "$@"; do
     case "$_arg" in
         --force) FORCE=true ;;
-        -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) err "unknown option: $_arg"; exit 1 ;;
         *)
             # the first plain argument is the manager, the second the folder
@@ -51,7 +53,7 @@ DIR="${DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 DIR=$(echo "$DIR" | sed 's|/*$||')
 
 TEMPLATE="$DIR/scripts/.templates/restart-mailboxes.sh"
-BUILT="$DIR/restart-mailboxes.sh"
+BUILT="$DIR/scripts/restart-mailboxes.sh"
 
 if [ ! -f "$TEMPLATE" ]; then
     err "no template at $TEMPLATE"
@@ -70,10 +72,16 @@ case " $KNOWN " in
     *) err "the template has no block for '$MANAGER' (it has: $KNOWN)"; exit 1 ;;
 esac
 
-# An existing built script holds this machine's list: kept, unless asked.
-if [ -f "$BUILT" ] && ! $FORCE; then
-    ok "kept the existing $BUILT (its list is this machine's)"
-    exit 0
+# An existing built script holds this machine's list.  Without --force it
+# is kept as it is; with --force it is rebuilt, and its list is carried
+# into the new one.
+KEPT_LIST=""
+if [ -f "$BUILT" ]; then
+    if ! $FORCE; then
+        ok "kept the existing $BUILT (its list is this machine's)"
+        exit 0
+    fi
+    KEPT_LIST=$(sed -n 's/^MAILBOX_SERVICES="\(.*\)"$/\1/p' "$BUILT")
 fi
 
 # {{{ sed_escape
@@ -95,7 +103,8 @@ awk -v keep="$MANAGER" '
     /^# \}\}\} manager: / { if (block == keep) print; block = ""; next }
     block == "" || block == keep { print }
 ' "$TEMPLATE" |
-    sed -e "s|@PROGRAM_DIR@|$esc_dir|" -e "s|@SERVICE_MANAGER@|$MANAGER|" > "$BUILT.new"
+    sed -e "s|@PROGRAM_DIR@|$esc_dir|" -e "s|@SERVICE_MANAGER@|$MANAGER|" \
+        -e "s|^MAILBOX_SERVICES=\"\"\$|MAILBOX_SERVICES=\"$(sed_escape "$KEPT_LIST")\"|" > "$BUILT.new"
 
 # Checked before it replaces anything: exactly one manager block, the
 # right one, every placeholder filled, and the shell can read it.
@@ -118,4 +127,8 @@ fi
 chmod 755 "$BUILT.new"
 mv "$BUILT.new" "$BUILT"
 ok "built $BUILT for $MANAGER"
-info "the installer adds each mailbox it sets up; run with the list empty, it asks for the names"
+if [ -n "$KEPT_LIST" ]; then
+    info "kept its list: $KEPT_LIST"
+else
+    info "the installer adds each mailbox it sets up; run with the list empty, it asks for the names"
+fi

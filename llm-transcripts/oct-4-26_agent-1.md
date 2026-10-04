@@ -1,6 +1,6 @@
 # Conversation Summary: 44efc473-3b08-4771-8b15-67e610ded2ae
 
-Generated on: 2026-10-04 15:20:50
+Generated on: 2026-10-04 15:28:48
 Models: claude-opus-5-5
 
 ## Contents
@@ -1118,6 +1118,179 @@ below 32768 would fix it.
    and they've already drifted from the real service files. The systemd examples
    are missing the log lines the installer writes. Should the guide include the
    actual templates instead, filled with example values, so they can't drift?
+
+--------------------------------------------------------------------------------
+
+### User Request 6
+
+Hi where are we at with issue file 714?
+
+> - Firewall: the UDP rule for ports 8025 and 8026 isn't needed any more. It's
+> root's to remove.
+
+tell me the command to do so?
+
+[ritz@kuvalu r-mail]$ mv ./restart-mailboxes.sh ./scripts
+[ritz@kuvalu r-mail]$ cd scripts
+
+
+<pasted_content id="c98d">
+$ ./restart-mailboxes.sh
+
+rmail: restarting mailboxes (runit)
+
+Password:
+  ok   restarted kuvalu-mail
+  ok   restarted kuvalu-notes
+
+  ok   kuvalu-mail is running
+  ok   kuvalu-notes is running
+
+  every mailbox restarted
+</pasted_content id="c98d">
+
+
+>   2. The phone's local-address field: keep it, or remove it too?
+
+what's the argument for removing it? My understanding is that we first assume
+the user is at home when they're using their phone, so we try the local address
+first, then if they aren't, they try the public IP. Is that right?
+
+> 3. Guide examples: the examples in the service guide are written by hand, and
+> they've already drifted from the real service files. The systemd examples are
+> missing the log lines the
+>      installer writes. Should the guide include the actual templates instead, filled with example values, so they can't drift?
+
+Yeah probably
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 6
+
+> I'll answer your questions first, then build the guide examples from the
+> templates. Starting with issue 714, and with what this machine's firewall
+> files hold for UDP:
+
+> I'm reopening the docs-templates issue for this; it already lists this as its
+> "possible next step":
+
+> The tool has a bug: the way it splits and rejoins lines would drop the file's
+> final newline, so it would report a change on every run. Fixing that:
+
+> Now rewriting the service guide: the introduction explains the example values,
+> and each hand-written example becomes a marked spot the tool fills.
+
+> Now running the tool: first in checking mode, which should report all six
+> empty examples as out of date, then for real.
+
+> The runit example now reads exactly as the installer writes it. Next, the docs
+> builder drops the example markers as well as the manager markers:
+
+> The marker check I just wrote is wrong: it pipes the output of a silent `grep
+> -q` into another grep, so it can never fail. Fixing it:
+
+> On this machine the built guide shows its real paths, and the runit example is
+> exactly what the installer writes. Completing the issue: updating its current
+> behavior, then moving it to completed.
+
+*[commit] 6bcb94729 in r-mail - The service guide's examples are now the installer's own templates, so they cannot drift*
+
+Everything is committed except your moved restart script. Issue 714 hasn't been
+started.
+
+## Issue 714: publish a message as a web page
+
+Nothing is built yet. The design is written and nearly complete:
+
+- You write `to: url` in an outbox message instead of a contact's name.
+- rmail adds a `URL:` line to the file, with an address made of dictionary
+  words.
+- Anyone who has that address can open the message in a browser, with images
+  shown inline and other files offered as downloads.
+- It's served over plain HTTP on its own port, with no JavaScript. Light and
+  dark themes come from the reader's browser settings.
+
+Three questions in it are still open. They need your answers before building
+starts:
+
+1. **The word list for the addresses:** ship a ready-made list with rmail, or
+   build one at install time from the machine's dictionary
+   (`/usr/share/dict/words`)?
+2. **Is publishing part of sending?** Does it pass through the same send steps
+   as a normal message, or is it entirely separate, triggered only by `to: url`?
+3. **Private files below `to: url`:** an `attach:` line applies to every `to:`
+   line above it in the message. So `to: url` publishes every file listed after
+   it, including one meant only for a contact further down. Should rmail guard
+   against that, or is it up to whoever writes the message?
+
+## Firewall commands
+
+The UDP rule is in both firewall files, IPv4 and IPv6. These remove it from the
+running firewall and from the saved files that load at boot, and fix the two
+comments that say "tcp+udp":
+
+```sh
+sudo iptables -D INPUT -p udp -m multiport --dports 8025,8026 -j ACCEPT
+sudo ip6tables -D INPUT -p udp -m multiport --dports 8025,8026 -j ACCEPT
+sudo sed -i '/-A INPUT -p udp -m multiport --dports 8025,8026 -j ACCEPT/d' /etc/iptables/iptables.rules /etc/iptables/ip6tables.rules
+sudo sed -i 's/tcp+udp/tcp    /' /etc/iptables/iptables.rules
+```
+
+To check: `sudo iptables -S INPUT` should list 8025,8026 for TCP only. `grep -n
+udp /etc/iptables/*.rules` should show only the DHCP lines and the
+virtual-machine lines.
+
+## The phone's local-address field
+
+Your understanding is close, with one refinement: the phone doesn't assume it's
+at home, it checks.
+
+- **Local addresses first:** from the list typed into the phone's settings, plus
+  the one the home computer reports. Each is tried only if the phone's own
+  current address is on the same home network (same first three numbers, e.g.
+  192.168.1.x). If so, it gets 1 second to answer.
+- **Public addresses next:** 3 seconds each.
+- **In a café:** the phone's address is something else, so it never knocks on
+  192.168.1.100, which on that network would be a stranger's device.
+
+**The case for removing it** is weak:
+
+- It overlaps with the local-address list you can type into the phone's
+  settings.
+- The phone only learns it after it has already connected once, and forgets it
+  when the app restarts.
+
+**The case for keeping it:** without it, a phone that's never been told the home
+address has to go out and back through the router while you're at home, and many
+routers won't route traffic back in like that.
+
+I'd keep it.
+
+## Guide examples: done
+
+Each example in the service guide is now written by a small tool,
+`scripts/fill-guide-examples.lua`, from the same template the installer fills.
+So the guide shows the exact file the installer writes. On this machine the
+built guide shows your real paths. The templates test fails if a template
+changes without the guide being refreshed. It's committed, and the tests pass.
+
+## You moved `restart-mailboxes.sh` into `scripts/`
+
+The restart worked. The mailbox logs now show TCP only, and the home address
+recorded as 192.168.1.100. But the rest of the setup still expects the script in
+the main folder:
+
+- **Git:** the ignore rule only covers the main folder, so git now lists
+  `scripts/restart-mailboxes.sh` as a new file. It could get committed, list and
+  all.
+- **The installer** looks for it in the main folder, finds nothing, and builds a
+  fresh one there with an empty list. Then it offers to restart from that one.
+- **Adding a name:** `--add` would fail. The script edits its own list at the
+  path it was built for, which is still the main folder.
+
+Should `scripts/` be its home? I'd recommend it. If yes, I'll move it there in
+the builder, the installer, the ignore rule, the guide and the test, and keep
+your current list.
 
 --------------------------------------------------------------------------------
 

@@ -2,8 +2,11 @@
 
 ## Current Behavior
 
-Built 2026-10-04.  `restart-mailboxes.sh` in the program folder restarts
-every mailbox service on its list and checks each is running again.  It
+Built 2026-10-04.  `scripts/restart-mailboxes.sh` restarts every mailbox
+service on its list and checks each is running again.  (It was first
+built in the program folder's top level; the owner moved it into
+`scripts/` the same day, "yeah" to making that its home, and everything
+that names it followed.)  It
 is built per machine from a tracked template, for that machine's service
 manager only, and git ignores the built copy.  The installer builds it,
 adds each mailbox service it sets up to the list, and at its end offers
@@ -90,24 +93,25 @@ machine's service manager.
    it runs.  `SVDIR` and `INITD` can point elsewhere (the tests use
    that); `RMAIL_RESTART_SETTLE` shortens the wait for the tests.
 2. `scripts/make-restart-script.sh <manager> [DIR]`: builds
-   `<DIR>/restart-mailboxes.sh` from the template, keeping only the
-   block for `<manager>` and filling in the folder and manager.  The
+   `<DIR>/scripts/restart-mailboxes.sh` from the template, keeping only
+   the block for `<manager>` and filling in the folder and manager.  The
    managers it accepts are read from the template's block markers.
    Checks the result has exactly one block, no unfilled placeholder,
    and parses, before it replaces anything.  Keeps an existing built
-   script unless given `--force`.
+   script unless given `--force`, which rebuilds it and carries its
+   list into the new one.
 3. `scripts/install.sh`: in the service step, records whether a service
    was set up; once the manager is known, calls the builder, then
    `--add` for a service set up this run.  At the very end, the restart
    step described above, with `restart_mailboxes` in the yes/no option
    keys and the help text.
-4. `.gitignore`: `/restart-mailboxes.sh`.
+4. `.gitignore`: `/scripts/restart-mailboxes.sh`.
 5. `scripts/test-restart-mailboxes.sh`: builds the script into a
    scratch folder for each manager, with stand-in `sv`, `systemctl`,
    `rc-service` and `sudo` commands on the path that record what they
    were asked to do.  Checks: one manager's block kept; an unknown
-   manager refused; an existing built script kept, `--force` replacing
-   it; the list restarted through sudo; arguments overriding the list
+   manager refused; an existing built script kept, `--force` rebuilding
+   it with its list; the list restarted through sudo; arguments overriding the list
    without changing it; an unknown name stopping the run before any
    restart; a service that stays down failing the run; `--add` adding
    each name once and refusing a bad one; `--check` passing and

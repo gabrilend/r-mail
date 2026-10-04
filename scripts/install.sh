@@ -205,7 +205,7 @@ Boolean prompts (--flag = yes, --no-flag = no, --flag=yes|no|1|0 also work):
   --user-service          When setting up a service, use a user-level one
                           (no root required)
   --restart-mailboxes     At the end, restart every mailbox listed in
-                          restart-mailboxes.sh so each runs this version
+                          scripts/restart-mailboxes.sh so each runs this version
                           (uses sudo except for systemd user services)
 
 Fully unattended example:
@@ -1886,7 +1886,7 @@ fi
 if [ "$INIT_SYSTEM" != "unknown" ]; then
     "$ROOT/scripts/make-restart-script.sh" "$INIT_SYSTEM" "$ROOT"
     if $SERVICE_SET_UP; then
-        "$ROOT/restart-mailboxes.sh" --add "$RMAIL_SERVICE"
+        "$ROOT/scripts/restart-mailboxes.sh" --add "$RMAIL_SERVICE"
     fi
 fi
 
@@ -1989,19 +1989,19 @@ fi
 # NixOS and a systemd system service, a service this run wrote is only
 # installed once the owner runs the commands printed above.  That is
 # said, with what to run afterwards, rather than treated as an error.
-if [ -x "$ROOT/restart-mailboxes.sh" ]; then
+if [ -x "$ROOT/scripts/restart-mailboxes.sh" ]; then
     echo ""
-    if "$ROOT/restart-mailboxes.sh" --check; then
+    if "$ROOT/scripts/restart-mailboxes.sh" --check; then
         if ask_yn restart_mailboxes "Restart every listed mailbox now, so each runs this version? (uses sudo)"; then
-            "$ROOT/restart-mailboxes.sh"
+            "$ROOT/scripts/restart-mailboxes.sh"
         else
             info "Not restarted.  Each mailbox keeps running the version it started with"
-            info "until you run: $ROOT/restart-mailboxes.sh"
+            info "until you run: $ROOT/scripts/restart-mailboxes.sh"
         fi
     else
         # the check said why: a list still empty, or a service not yet
         # installed
         info "Not restarting (see the line above).  Once that is resolved, run"
-        info "    $ROOT/restart-mailboxes.sh"
+        info "    $ROOT/scripts/restart-mailboxes.sh"
     fi
 fi
