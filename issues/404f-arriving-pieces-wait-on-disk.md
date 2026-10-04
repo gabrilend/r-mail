@@ -56,6 +56,11 @@ someone who wants that.  Because:
   of the folder — not where they wait.  Pieces on disk are no more
   trusted than pieces in RAM: nothing reads them except the checks.
 
+The same folder also holds the *outgoing* packed copies (the packer
+writes `rmail-<id>.zip` into `paths.pending`).  Since attachments cannot
+be edited once offered (#408), that copy is the one every recipient must
+get, so it too must survive a reboot: it moves to disk with the pieces.
+
 What stays in RAM: progress that means nothing after a reboot — the
 progress files of #328, which stay as they are.
 

@@ -25,13 +25,29 @@ own record (#406): a recipient is offered the file until it is complete
 or answered for them, whenever they are reached.  The packed zip is
 removed only when every recipient's record is complete or answered.
 
+**Attachments cannot be edited once offered** (owner, 2026-10-02: "We
+shouldn't be able to edit attachments, I don't think").  Every recipient
+gets the same bytes: the copy packed when the file was first offered.
+Today that is not so.  A packed copy is shared only while some transfer
+still holds it (`release_zip` deletes it when the last one finishes),
+and it lives in `paths.pending`, which defaults to `/tmp`, a RAM disk on
+the owner's machine.  A recipient reached after the copy was released,
+or anyone after a reboot, gets a fresh packing of whatever is at the
+path *now* — so edits currently leak through.  The packed copy must be
+kept until every recipient has answered, and kept on disk (#404f).
+Because #406 keys answers by path, this is what makes "declined
+`photo.jpg`" mean one fixed file.
+
 ## Suggested Implementation Steps
 
 1. Drop the removal of `attach:` lines on completion; mark the recipient
    complete in the message's state instead.
-2. Remove the packed zip when no recipient still needs it.
+2. Keep the packed zip, recorded in the message's state, until no
+   recipient still needs it; never pack the path a second time for the
+   same message.  Remove it then.
 3. Test: two stand-in contacts, one unreachable; the first completes; the
-   second, reached later, is offered and receives the file.
+   second, reached later, is offered and receives the file.  Change the
+   file on disk between the two: the second receives the original bytes.
 4. Correct the attachments template (the line is not removed) and
    regenerate.
 
