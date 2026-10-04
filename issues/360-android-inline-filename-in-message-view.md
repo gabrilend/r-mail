@@ -1,6 +1,6 @@
 # #360 — Move the message filename out of the top bar and into the message body
 
-## Problem
+## Current Behavior
 
 In the Android message view (`ReadScreen`), the selected message's
 filename is rendered as the `TopAppBar` title (`ReadScreen.kt` around
@@ -11,7 +11,7 @@ never see the whole name.
 The top bar is a fixed-width container, so trying to fit an arbitrary
 filename into it will always fight the surrounding iconography.
 
-## Proposed fix
+## Intended Behavior
 
 - **Remove the filename from the `TopAppBar` title slot.** The top bar
   can either go title-less or show something stable (e.g. the mailbox
@@ -34,7 +34,7 @@ The injected filename line is **Android UI sugar only**. It must not:
 Treat it purely as a prefix rendered at view time. The underlying
 `MailMessage.content` is unchanged.
 
-## Implementation notes
+## Suggested Implementation Steps
 
 - `ReadScreen.kt` is the only file that should need changes. The
   filename is already passed in as a parameter.

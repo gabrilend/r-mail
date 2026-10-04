@@ -1,6 +1,15 @@
 # rmail monitor program
 
-## Vision
+## Current Behavior
+
+No monitor exists.  Each mailbox runs alone as its own service
+(#new-running-as-a-service); nothing lists the mailboxes on a machine or
+their versions, except the installer's scan of existing installs when it
+runs.  Since #382 a mailbox's config is the `config` file inside it (the
+`~/.config/rmail/config-*` path below is from before).
+
+
+## Intended Behavior
 
 A system-level program that manages rmail instances on a machine. Think of
 it as the "mailboxes" view from the Android app, but for the computer — a
@@ -51,7 +60,7 @@ interface — the monitor is another hook consumer/producer.
 - Version history browser with the development narrative
 - Could be TUI (terminal), or serve a local web UI, or both
 
-## Implementation thoughts
+## Suggested Implementation Steps
 - Detect instances: scan for running processes with `rmail.lua` in the
   command line, or scan `~/.config/rmail/config-*` files
 - Version: rmail needs a `--version` flag or a version constant in the source

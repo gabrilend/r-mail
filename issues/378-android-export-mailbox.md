@@ -1,6 +1,6 @@
 # #378 — Android: export mailbox to a user-chosen location
 
-## Problem
+## Current Behavior
 
 On Android the mailbox lives in `context.filesDir`
 (`data/MailStore.kt:21-25`):
@@ -63,7 +63,7 @@ adjacent as requested, but visually separated from the red section.
 exactly the requested layout — Material places `dismissButton` to the
 left of `confirmButton`.
 
-## Proposed design
+## Intended Behavior
 
 ### Selection UI
 
@@ -105,6 +105,15 @@ Separately from file export, a `FileProvider` would let a single message
 go straight out through `ACTION_SEND` to any app.  That is arguably the
 more common "pass it to another app" case and is small on its own —
 could ship first, or as part of this.
+
+## Suggested Implementation Steps
+
+1. Answer the open questions below.
+2. Build the export as designed above, from the entry points listed in
+   "Where the entry points go", with `DeviceExport` (which already copies
+   single attachments out to the device's shared folders) as the model.
+3. Test on a phone (no Android SDK on this machine): export a mailbox with
+   messages and attachments, and open the result in a file manager.
 
 ## Open questions
 

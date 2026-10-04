@@ -1,5 +1,15 @@
 # Remove PII from state files
 
+## Current Behavior
+
+Reversed, and the reversal complete (2026-04-18; finished 2026-07-02 —
+see Status).  State files are plain mirrors of the files they describe:
+contact names in them are names, readable with `cat` and fixable with
+`sed`.  Values hashed by the abandoned steps are read back and rewritten
+as names on load (`unmigrate_hashed_keys`).  A contact rename is the
+owner's to carry through the state files (see "Recovery path").
+
+
 ## Status: reversed (complete 2026-04-18)
 
 Steps 1–5 landed in commits between 2026-03 and 2026-04; step 6 was
@@ -110,7 +120,7 @@ for step 5's `token_hash`.  Renames become a user-serviced
 operation (see "Recovery path" below), which is fine on fully
 plaintext state because it's a few lines of `sed`.
 
-## Decision
+## Intended Behavior
 
 - **Revert steps 1, 2, 3, 4, 5, 6.**
 - **Delete the rename-detection block** in `sync_outbox`
@@ -124,7 +134,7 @@ State files become what they should have been all along: **plaintext
 mirrors of the source-of-truth files (`contacts`, `inbox/`,
 `outbox/`), inspectable with `cat` and fixable with `sed`.**
 
-## Revert plan
+## Suggested Implementation Steps
 
 For each step, what to undo and what to preserve:
 

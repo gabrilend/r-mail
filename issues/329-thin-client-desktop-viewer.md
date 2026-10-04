@@ -1,5 +1,19 @@
 # #329 — Thin client sync daemon for laptops
 
+## Current Behavior
+
+Built: a thin client in Lua that mirrors a home mailbox into a local
+folder and syncs it through the phone API (#new-the-phone-api), making
+only outbound connections.  Its code is shared by every platform in
+`clients/shared/` (`rmail-client.lua`, `protocol.lua`, `sync.lua`,
+`store.lua`, `watcher.lua`); each platform folder holds an installer, a
+`run` script and its file watcher: `clients/linux/` (inotify),
+`clients/macos/` (`rmail_fswatch.c`), `clients/windows/`
+(`rmail_fswatch_win.c`).  Their install scripts are named per platform
+(#351).  The "Current state" below lists the earlier Linux-only layout.
+The stretch goals are not started.
+
+
 ## Problem
 
 Laptops are unreliable as rmail hosts. When you leave home, your public IP
@@ -12,7 +26,7 @@ when you're at the location where you set it up. Take your laptop to a
 coffee shop and you're cut off from incoming messages until the recovery
 handshake succeeds (if it does).
 
-## Solution
+## Intended Behavior
 
 A sync daemon that mirrors a local mailbox directory from a home rmail
 daemon. Same file-based philosophy as rmail itself — the user reads and
@@ -55,6 +69,12 @@ Implemented in `clients/linux/`:
 - `lib/protocol.lua` — wire protocol client (all API endpoints)
 - `lib/sync.lua` — sync cycle (mirrors Android SyncManager)
 - `lib/store.lua` — local mailbox state management
+
+## Suggested Implementation Steps
+
+1. Built: `clients/shared/*.lua`, the three platform folders.  The guide
+   is `docs/.templates/thin-client.md`.
+2. Remaining: the stretch goals below, each its own issue when taken up.
 
 ## Stretch goals
 

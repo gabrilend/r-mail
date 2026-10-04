@@ -1,5 +1,15 @@
 # #379 — Re-check public IP once per day at a random time
 
+## Current Behavior
+
+Built 2026-09-22 (see Status): the public IPv4, IPv6 and LAN addresses
+are re-checked every 24 to 48 hours (a time drawn afresh each check, so it
+wanders through the day), and an hour after a check no provider answered.
+A changed public address is still confirmed by a second provider before
+contacts are told.  The time of the next check is drawn again at boot.
+Kept open for the owner's check.
+
+
 ## Problem
 
 Public IP detection runs **exactly once, at startup**.
@@ -56,7 +66,7 @@ From the 2026-09-21 discussion:
    an interval offset from boot.
 3. **One provider is enough** for the routine probe.
 
-## Proposed design
+## Intended Behavior
 
 ### Scheduling
 
@@ -131,6 +141,13 @@ question in case the intent was to drop confirmation entirely.
 notifications sequence.  The daily check should call it, not
 reimplement it.  The only change inside it would be the single-provider
 probe path.
+
+## Suggested Implementation Steps
+
+1. `rmail.lua`: `addrchk.schedule`, `addrchk.run` (the three checks and
+   the retry), `rt.next_addr_check` in `main`'s sleep, `detect_ip_change`
+   returning whether any provider answered; the generator reseeded at each
+   check.
 
 ## Open questions
 

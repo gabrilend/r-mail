@@ -1,6 +1,16 @@
 # #361 — Generate a portable rmail *installer* drive
 
-## Goal
+## Current Behavior
+
+The generator exists: `scripts/make-installer-drive.sh` writes an
+installer drive — `install.sh` at its root (which runs the copy of
+`scripts/install.sh` it carries), a README, and the source tree without
+build products.  The status below records no check of a drive made by it,
+so the issue stays open until one is made and installed from on another
+machine.
+
+
+## Intended Behavior
 
 A script in the source tree that produces a USB drive someone can hand
 to another person: they plug it in, read `README.md`, run `install.sh`,
@@ -37,7 +47,7 @@ Top level of the drive:
 - `source-code/` holds everything else so the drive root stays tidy
   and the two "front-door" files are obvious.
 
-## The generator script
+## Suggested Implementation Steps
 
 - Lives in the source tree (e.g. `scripts/make-installer-drive.sh`).
 - Detects mounted flash drives by label. All drives use the same

@@ -1,0 +1,175 @@
+# The phase re-sort of October 2026 (issue 402): old issue number -> new.
+#
+# Read by scripts/renumber-issues.lua.  Nine phases, foundations first:
+# a lower phase is what higher phases stand on, and inside a phase the
+# issues others build on come first.  "new-..." lines are blueprints
+# written for functionality that was built without an issue.  To undo the
+# move, swap the two columns and run the tool again.
+#
+# Owner, 2026-10-04: the nine themes as proposed; "you know how to number
+# phases"; the Android blueprints written in this pass.
+
+# ---- 1  The daemon's core: one mailbox, the main loop, the sync cycle, encryption
+new-one-daemon-one-mailbox            101
+382                                   102
+100                                   103
+403                                   104
+new-encrypted-frames                  105
+410                                   106
+104                                   107
+106                                   108
+201                                   109
+103                                   110
+new-file-watchers-wake-the-sync       111
+new-the-sync-cycle                    112
+204                                   113
+324                                   114
+377                                   115
+new-the-daemons-log                   116
+205                                   117
+371                                   118
+396                                   119
+387                                   120
+397                                   121
+
+# ---- 2  Messages as files: the outbox format, edits, deletes, dates, hooks
+new-a-message-is-a-file               201
+363                                   202
+101                                   203
+362                                   204
+356                                   205
+399                                   206
+306                                   207
+409                                   208
+new-deletes-travel-both-ways          209
+323                                   210
+374                                   211
+new-hooks                             212
+325                                   213
+368                                   214
+
+# ---- 3  Attachments and consent
+new-consent-before-any-byte           301
+105                                   302
+202                                   303
+328                                   304
+346                                   305
+355                                   306
+391                                   307
+349                                   308
+405                                   309
+327                                   310
+404                                   311
+404a                                  311a
+404b                                  311b
+404c                                  311c
+404d                                  311d
+404e                                  311e
+404f                                  311f
+406                                   312
+407                                   313
+408                                   314
+372                                   315
+
+# ---- 4  Addresses and networking: our own address, announcing it, NAT, IPv6, the LAN
+353                                   401
+new-announcing-a-new-address          402
+312                                   403
+300                                   404
+311                                   405
+304                                   406
+354                                   407
+347                                   408
+388                                   409
+379                                   410
+new-automatic-port-forwarding         411
+302                                   412
+303                                   413
+398                                   414
+102                                   415
+203                                   416
+393                                   417
+365                                   418
+389                                   419
+
+# ---- 5  Contacts, identity and privacy of saved state
+new-the-contacts-file                 501
+394                                   502
+338                                   503
+411                                   504
+348                                   505
+395                                   506
+
+# ---- 6  Installation, services, portable drives, the documents
+345                                   601
+333                                   602
+334                                   603
+335                                   604
+336                                   605
+337                                   606
+340                                   607
+341                                   608
+342                                   609
+343                                   610
+344                                   611
+381                                   612
+new-running-as-a-service              613
+350                                   614
+376                                   615
+339                                   616
+385                                   617
+361                                   618
+383                                   619
+384                                   620
+402                                   621
+
+# ---- 7  Helper scripts, the door for the owner's own devices, desktop tools
+new-the-helper-scripts                701
+326                                   702
+364                                   703
+330                                   704
+331                                   705
+332                                   706
+310                                   707
+352                                   708
+new-the-phone-api                     709
+200                                   710
+329                                   711
+351                                   712
+301                                   713
+380                                   714
+
+# ---- 8  The Android client
+new-the-android-app-and-its-sync      801
+307                                   802
+308                                   803
+386                                   804
+new-the-android-screens               805
+316                                   806
+313                                   807
+317                                   808
+318                                   809
+319                                   810
+320                                   811
+321                                   812
+322                                   813
+315                                   814
+357                                   815
+358                                   816
+359                                   817
+360                                   818
+373                                   819
+375                                   820
+378                                   821
+369                                   822
+314                                   823
+309                                   824
+305                                   825
+392                                   826
+
+# ---- 9  Privacy against people watching the network; new transports
+366                                   901
+367                                   902
+401                                   903
+370                                   904
+390                                   905

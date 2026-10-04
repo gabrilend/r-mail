@@ -1,6 +1,6 @@
 # #389 — Wake-to-sync: scheduled availability windows for a machine that sleeps
 
-## Problem
+## Current Behavior
 
 rmail assumes the daemon is listening. A laptop that suspends is
 unreachable while it sleeps, so contacts' deliveries fail and — since
@@ -18,7 +18,7 @@ Waking to run a sync cycle only helps **outbound**. rmail is push:
 contacts deliver *to* us. Waking, finding nothing because nobody could
 reach us, and sleeping again accomplishes nothing.
 
-## Design: announce, then hold a window open
+## Intended Behavior
 
 The missing piece is that our announcement is an authenticated inbound
 request *to them*, which hits `ctimer.saw_inbound` and resets **their**
@@ -63,6 +63,14 @@ that is what suspended means. It would need Wake-on-LAN, and:
   sleeping host, which needs a static ARP entry. Fragile.
 - WoWLAN (WoL over WiFi) is poorly supported and frequently broken.
 - This machine is on WiFi (`wlo1`), so the wired path does not apply.
+
+## Suggested Implementation Steps
+
+1. A machine that wakes runs the daemon with `--once` (which already
+   announces, syncs and stays reachable for a window, then exits), from a
+   wake hook or a timer at the interval below.
+2. Test: a mailbox run with `--once=30` delivers what was owed to it while
+   it was away and exits after the window.
 
 ## Priority
 

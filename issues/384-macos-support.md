@@ -1,6 +1,14 @@
 # #384 — Running rmail on macOS
 
-## Summary
+## Current Behavior
+
+rmail runs on Linux only.  The macOS file watcher (`rmail_kqueue.c`) was
+written but has never been compiled or run (see "How far the untested
+code has actually been checked"); there is no launchd service and no Mac
+binary of the bundled programs.
+
+
+## Intended Behavior
 
 macOS is a Unix and most of rmail would work there unchanged, because
 most of rmail is Lua.  Three things stand between it and running: one
@@ -61,7 +69,7 @@ needs a live file descriptor for the life of the watch.  So `add_watch`
 opens the path and hands the descriptor back as the watch descriptor,
 and `close` releases them.
 
-## Suggested implementation steps
+## Suggested Implementation Steps
 
 Ordered so that each one is useful on its own.
 

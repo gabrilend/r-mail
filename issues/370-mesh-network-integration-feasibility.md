@@ -1,6 +1,6 @@
 # #370 — Mesh network compatibility: thin shim via hooks
 
-## Summary
+## Intended Behavior
 
 rmail assumes IP routing: contacts are `ip`/`port` tuples, the wire
 protocol is TCP-framed AES-GCM.  A contact unreachable over IP is
@@ -58,7 +58,7 @@ want."
 
 Option 3 is what this issue proposes.
 
-## The shim: what's already in place
+## Current Behavior
 
 rmail already ships the two pieces this needs:
 
@@ -83,7 +83,7 @@ script that:
 
 rmail's daemon never learns what Reticulum is.
 
-## What actually needs to change in the repo
+## Suggested Implementation Steps
 
 1. **Document it.**  Add a "Mesh networks / alternate transports"
    section to `docs/.templates/scripting-tutorial.md` showing the

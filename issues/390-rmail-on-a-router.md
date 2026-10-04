@@ -1,6 +1,12 @@
 # #390 — Run rmail on a router
 
-## Why
+## Current Behavior
+
+rmail does not run on a router.  Feasibility was assessed on 2026-09-22
+(below); nothing is built.
+
+
+## Intended Behavior
 
 The router is the one machine in the house that is always on, never moves,
 and **holds the public IP directly**. Running the daemon there removes
@@ -28,7 +34,7 @@ Good. OpenWrt packages everything the daemon needs:
 - `libopenssl` — `rmail_crypto.c` uses the EVP API (`EVP_sha256`,
   AES-256-GCM) plus the Lua C API, both present
 
-## Work required
+## Suggested Implementation Steps
 
 1. **Cross-compile the C modules** — `rmail_crypto.so` and
    `rmail_inotify.so` for MIPS and ARM. This is the same road as #383

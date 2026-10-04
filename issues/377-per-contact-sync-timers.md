@@ -1,5 +1,18 @@
 # #377 — Per-contact sync timers, startup ping, reset on inbound contact
 
+## Current Behavior
+
+Built 2026-09-22 (see Status).  Every contact has its own timer: due at
+start-up; after a cycle that reached them, due again in 30 s (± 30 s);
+after one that did not, the interval grows by 6 minutes up to 2 hours.  A
+request to a contact not yet due is withheld and treated by its builder
+as an ordinary failure.  Any request *from* a contact makes that contact
+due at once.  Every start-up announces this mailbox's address to every
+contact (the "ping").  A mailbox with no contacts keeps one timer of its
+own.  Kept open for the owner's check; the follow-ups below record what
+was found since.
+
+
 ## Problem
 
 The sync cadence is a **single global timer** shared by every contact,
@@ -72,7 +85,7 @@ From the 2026-09-21 discussion, in the user's framing:
    contact's** timer to the floor — not everyone's.
 4. **Ceiling of 2h** for now (replacing the current 30s test value).
 
-## Proposed design
+## Intended Behavior
 
 ### Timer state
 
@@ -131,6 +144,18 @@ Timers could live purely in memory (reset to floor on every restart) or
 be persisted to `.state/`.  In-memory is simpler and self-correcting;
 persisted avoids a restart loop re-storming a long-dead contact.
 Leaning in-memory for v1 given restarts are rare.
+
+## Suggested Implementation Steps
+
+1. `rmail.lua`, the `ctimer` table: `get`, `is_due`, `mark_success`,
+   `mark_failure`, `saw_inbound`, `time_to_due`, `refresh_self`,
+   `jittered`.
+2. The gate in `http_post_batch_with_fallback`; the once-per-cycle outcome
+   pass and the op-less sweep in `run_sync_cycle`; `saw_inbound` in
+   `handle_request` after a frame decrypts; the start-up announcement in
+   `init_runtime`; `main` sleeps until `ctimer.time_to_due`.
+3. Tests: `scripts/test-edit-delivery.sh` (an edit made while not due),
+   `scripts/test-mailbox-selection.sh` (the mailbox's own timer).
 
 ## Open questions
 

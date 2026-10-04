@@ -1,12 +1,27 @@
 # #347 — Multiple IPs per contact with auto-reordering and unified address type
 
+## Current Behavior
+
+Phases 1–4 are built (see Status): a contact may have `ip[N]`/`port[N]`
+lines after its pinned `ip`; reading builds one ordered list of places to
+try; a request that gets no answer is tried at the others in turn, and an
+indexed address that answers moves up the file; scattered lines of one
+contact are gathered together.  Of the field defect's required fix (end of
+this file): (1) holds — the canonical writer skips computed fields, the
+phone save strips them and since #411 merges and must read back as sent;
+(2) holds — every writer edits single lines (`write_contact_fields`,
+promotion, the address-set writers), none rewrites a contact whole;
+(3) is **not built** — a `name.endpoints` / `name.ips` line holding
+`table: 0x…` left by an old version is still not removed on load.
+
+
 ## Problem
 
 A contact currently has a single `.ip` field. That's brittle: if the
 contact has both a LAN and WAN address, or a DDNS hostname as a fallback,
 or a stable IPv6 alongside a changing IPv4, we can only pick one.
 
-## Desired behavior
+## Intended Behavior
 
 ### Multiple IPs per contact
 
@@ -69,6 +84,17 @@ this issue generalises to "n addresses of mixed type" on top of that.
 When the daemon connects, if the address that succeeds is not the first
 one in the list, move it to the top of that contact's block on disk. The
 fast path for future connections then matches reality.
+
+## Suggested Implementation Steps
+
+1. Built: `contactfile.parse` (indexed lines, folding `ipv6`),
+   `contact_hosts`, `contact_endpoints`, `http_post_batch_raw` (the other
+   addresses in turn), `promote_contact_index`, `promote_contact_address`,
+   `align_contacts`.
+2. Remaining (defect item 3): in `contactfile.parse`, skip a line whose
+   field is `endpoints` or `ips`, and have `align_contacts` drop such lines
+   from the file with one log line saying so.  Test: a contacts file
+   holding `x.endpoints = "table: 0x1"` loads cleanly and loses that line.
 
 ## Source
 

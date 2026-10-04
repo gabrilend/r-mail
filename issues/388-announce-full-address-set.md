@@ -1,5 +1,18 @@
 # #388 — Announce the full address set, and confirm it before clearing the notice
 
+## Current Behavior
+
+Phase 1 built 2026-09-22 (see Status): announcements carry the whole
+address set (`ips`: hostname, public IPv4, IPv6; `local_ips` only to a
+contact on our LAN); the receiver merges it under the contact's pinned
+`ip`, files private addresses on its own /24 as `local-ip`, and writes the
+file only when the set really changed.  A real change leaves a hidden
+`.address-update-<name>` note that queues our own announcement as a test,
+removed by the first request that reaches them.  Phase 2 — owed
+announcements as files in the mailbox rather than
+`.state/pending-address.json` — is not started.
+
+
 ## Problem
 
 An address announcement sends **one** address and overwrites **one** field.
@@ -23,7 +36,7 @@ reachable from any particular contact — that depends on the contact's
 network position, which only the contact can discover. Picking one address
 to send is the wrong shape for the problem.
 
-## Intended behavior
+## Intended Behavior
 
 ### Announce the set, not an address
 
@@ -97,6 +110,16 @@ Deliberately *not* extended to the other state files:
   are removed as transfers complete. Verified empty in normal operation.
 - `inbox.json` / `outbox.json` — per-recipient delivery bookkeeping, not
   documents. Highest risk, least benefit. Leave last if ever.
+
+## Suggested Implementation Steps
+
+1. Built: `addrset.mine`, `addrset.merge`, `addrset.write`,
+   `addrset.write_local`, `addrset.same_lan`, `addrset.contact_on_lan`;
+   `handle_update_address`; `sync_address_notifications`; the note's
+   removal in `run_sync_cycle`.  Test: `scripts/test-lan-address-learning.sh`.
+2. Phase 2: an owed announcement becomes a hidden file in the outbox
+   (one per contact), visible to `on_send`, deletable by hand; the state
+   file goes.  Test: an announcement deleted by hand is not sent.
 
 ## Status
 

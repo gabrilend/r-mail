@@ -1,5 +1,14 @@
 # #386 — Android sync state is committed all-or-nothing, so proven uploads are re-sent
 
+## Current Behavior
+
+Fixed in 01b0175 (see Status): the phone records each confirmed
+transfer in its sync state the moment the server acknowledges it, so a
+later failure in the same sync no longer makes it re-send what already
+arrived.  Kept open until the QA items in `q-a-tests.md` are ticked on a
+phone running a build that has it.
+
+
 ## Problem
 
 `SyncManager.sync()` wraps its entire body in one `try`/`catch`, and
@@ -36,7 +45,7 @@ was reachable, so a late step in the sequence timed out.
 Note the interaction: #377 and #387 make this *rarer*, not fixed. Any
 exception after the upload loop still discards the whole commit.
 
-## Fix
+## Intended Behavior
 
 Persist state incrementally, as each side effect is confirmed, rather
 than batching one commit at the end. Recording a filename in the sync
@@ -46,6 +55,15 @@ class of duplicate impossible.
 The general rule: state describing "what the server already has" should
 be written when the server confirms it, not when the whole cycle
 happens to finish.
+
+## Suggested Implementation Steps
+
+1. `clients/android/.../sync/SyncManager.kt`: `store.writeSyncState`
+   after every download, upload and removal the server confirms, and once
+   more at the end for the bookkeeping that has no transfer of its own.
+2. Check on a phone (no Android SDK on this machine): interrupt a sync
+   after its uploads (turn off the network), let the next one run, and
+   confirm the server logged each upload once.
 
 ## Explicitly not the fix
 

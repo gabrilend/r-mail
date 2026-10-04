@@ -1,6 +1,16 @@
 # #365 — Drop LAN auto-detection and the unused /peer-address endpoint
 
-## Summary
+## Current Behavior
+
+Everything this issue would remove is still in the daemon: UDP LAN
+discovery (multicast and a subnet scan on a failed connection, #102,
+#203, #393), the learned-LAN-address table used in place of a contact's
+address, and the `/peer-address` request.  Since #388 a contact's LAN
+address can be written, or announced, as `local-ip`, which is the
+explicit route this issue would keep.
+
+
+## Intended Behavior
 
 #347 shipped per-contact multi-IP (`ip[N]`/`port[N]`) plus Phase 2
 connection-failure fallback plus Phase 3 address-promotion.  The
@@ -111,7 +121,7 @@ couple of releases, or once the `lan_ip` field is presumed extinct in
 the wild).  Track its removal as a follow-up issue once #365's other
 phases are in.
 
-## Phases
+## Suggested Implementation Steps
 
 1. **Phase 1 — migrate `c.lan_ip` and stop reading it.**
    - Add the `lan_ip` → `ip[N]` rewrite to `align_contacts`.

@@ -38,7 +38,7 @@ even if its operator wants one.
 
 These are the same feature.  Build the mechanism once and it serves both.
 
-## Current state
+## Current Behavior
 
 **No build identity exists.**  Searching the daemon for a version
 constant finds only an unrelated UUID version-nibble and some comments.
@@ -83,7 +83,7 @@ the moments a modified daemon actually changes hands, so whatever
 identity stamp this issue introduces has to survive being copied onto a
 drive by those generators, where no git checkout is present.
 
-## Proposed mechanism
+## Intended Behavior
 
 Three pieces, in dependency order.
 
@@ -137,6 +137,13 @@ clients (`clients/android`, `clients/linux`, and the desktop viewer of
 digest disagree, or who answers with no identity at all.  Design the
 copy so an ordinary user reads it as "is this person's mail program
 normal?" rather than as a license notice.
+
+## Suggested Implementation Steps
+
+1. The build stamp (mechanism 1); then where the source is (2); then the
+   request that asks for both (3); then where a person sees it (4) — each
+   a step with its own test, in that order, once the open questions are
+   answered.
 
 ## Relevant code and files
 

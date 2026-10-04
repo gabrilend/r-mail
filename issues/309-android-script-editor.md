@@ -1,5 +1,11 @@
 # In-app script editor for Android (low priority)
 
+## Current Behavior
+
+The app has no script editor and runs no scripts: hooks run only on the
+home daemon (#new-hooks), written with a computer's editor.
+
+
 ## Overview
 
 Users manage **phone-side** hook scripts from inside the rmail app.
@@ -59,7 +65,7 @@ Before designing the UI we need answers:
 This is the main reason the issue is low priority: without a
 satisfying answer here, the UI work is premature.
 
-## Design (contingent on the execution-environment questions)
+## Intended Behavior
 
 ### Script storage
 
@@ -99,6 +105,13 @@ Two new screens are implied but their entry points are undefined:
   screen, which button?
 
 Both answers should be recorded here before any UI work starts.
+
+## Suggested Implementation Steps
+
+1. Answer the execution-environment questions above (what a phone script
+   is written in, and what it may touch).
+2. Then script storage, the editor, the hook configuration, each with its
+   own sub-issue.
 
 ## Inter-device use
 

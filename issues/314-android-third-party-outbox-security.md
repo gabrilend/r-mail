@@ -7,19 +7,26 @@ with access to those directories could write a file that gets automatically
 encrypted and sent to the home daemon as a trusted message. The daemon has no
 way to distinguish "written by rmail app" from "written by malicious app."
 
-## Current state
+## Current Behavior
 
 Right now, outbox writes only happen through our own code (Compose screen ->
 MainViewModel.saveOutboxFile -> MailStore.writeOutbox). The triggerSync() call
 is in MainViewModel, not in a filesystem watcher, so only our UI can trigger
 sends.
 
-## Security model
+## Intended Behavior
 
 All traffic sent to the home daemon must originate from:
 - Our own app code
 - Our own editor (compose screen)
 - Our own mailboxes
+
+## Suggested Implementation Steps
+
+1. Nothing to build while the outbox is written only by the app's own
+   code.  Before any filesystem-watching auto-send is added (or a share
+   target from other apps), design how a file proves it came from the
+   app — the questions below.
 
 ## Future investigation: third-party app integration
 

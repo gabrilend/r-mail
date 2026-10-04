@@ -1,6 +1,6 @@
 # #366 — Wire-level random padding to blunt size-based traffic analysis
 
-## Problem
+## Current Behavior
 
 `docs/encryption.md` has, for a while, described a "random padding"
 step inside the wire frame:
@@ -36,7 +36,7 @@ The encryption.md misdescription was fixed separately in the same
 sweep; this issue tracks making the doc accurate in the other
 direction — actually implementing what the doc used to claim.
 
-## Design
+## Intended Behavior
 
 ### Padding inside the ciphertext, not outside it
 
@@ -140,7 +140,7 @@ not dangerous.
   Power-of-2 bucketing keeps a small amount of signal.  Users who
   want tighter normalization opt into #367 (body-as-attachment).
 
-## Implementation notes
+## Suggested Implementation Steps
 
 - Touch `encrypt_packet`, `decrypt_packet`, `send_encrypted`,
   `recv_encrypted` (`rmail.lua:1862-1880`, `rmail.lua:1824-1860`).

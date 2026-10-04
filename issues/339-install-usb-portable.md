@@ -1,6 +1,17 @@
 # #339 — Generate a portable rmail *mailbox* drive
 
-## Goal
+## Current Behavior
+
+The generator exists: `scripts/make-mailbox-drive.sh` writes a runnable
+mailbox onto a drive — the mailbox with its own config, hooks and
+launchers (`sync-with-contacts.sh` for one visit, `auto-sync.sh` to stay
+live until unplugged, #388), and the program for the host to run.  The
+status below records no check of a drive made by it, so the issue stays
+open until one is made, carried to a second machine and run there.  #385
+plans building a portable mailbox rather than copying one.
+
+
+## Intended Behavior
 
 A script in the source tree that produces a USB drive which **is** a
 running rmail mailbox. Plug it into any Linux host whose router
@@ -46,7 +57,7 @@ Design notes:
   `os.execute` go through) resolves the relative paths reliably on any
   host.
 
-## The generator script
+## Suggested Implementation Steps
 
 - Lives in the source tree (e.g. `scripts/make-mailbox-drive.sh`).
 - Shares the flash-drive detection logic with #361 (same

@@ -1,6 +1,6 @@
 # #372 — Self-delivery silently drops attachments (loopback must still use the chunk system)
 
-## Problem
+## Current Behavior
 
 Sending a message to your own name (`to: sorelu` on the sorelu
 mailbox) delivers the **body only** — any `attach:` files are silently
@@ -71,7 +71,7 @@ system.**  What loopback *can* skip is the interactive consent prompt
 (you don't need to ask yourself for permission), but the actual
 transfer + reassembly + verification must run.
 
-## Proposed direction (not final)
+## Intended Behavior
 
 Make the self-delivery branch route attachments through the existing
 chunk machinery with consent **auto-accepted**, rather than skipping
@@ -87,6 +87,17 @@ them:
   step is local — the chunk reassembly should run in-process against
   the already-uploaded `.uploads/…` staging rather than opening a TCP
   socket to ourselves.  (Exact mechanism TBD — see open questions.)
+
+## Suggested Implementation Steps
+
+1. Answer the open questions (an in-process path or a loopback socket;
+   where auto-consent lives).
+2. The self-delivery branch of `sync_outbox` offers each `attach:` path to
+   the mailbox itself through the answers record (#406) and the packed
+   copy (#408), with consent given at once; the unpacking and filing are
+   the receiver's own (#404).
+3. Test: a message to oneself with two attachments; both arrive in
+   `attachments/` byte for byte, and no consent form is left.
 
 ## Open questions
 

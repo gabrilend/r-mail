@@ -1,6 +1,6 @@
 # #367 — Send message body as a fixed-chunk attachment for size obfuscation
 
-## Problem
+## Current Behavior
 
 Wire-level padding (#366) blunts size disclosure for short messages,
 but it does so per-message with diminishing returns as messages get
@@ -26,7 +26,7 @@ contains.  Take a message of any size, pad it to a multiple of
 the chunk size, send it as an attachment, and the size of every
 chunk is fixed — an observer sees only how many chunks went.
 
-## Proposal
+## Intended Behavior
 
 Add an `on_send` hook (or a daemon-level config flag — see
 "Open question" below) that transforms an outgoing message into:
@@ -129,7 +129,7 @@ into both sides' mailboxes that installs the hooks in one step.
   We don't try to make it indistinguishable from a "real" user
   attachment.
 
-## Implementation notes
+## Suggested Implementation Steps
 
 - The `on_send` hook's stdout replaces the outgoing body (see
   `hooks.on_send` usage around `rmail.lua:3370` in the current

@@ -1,6 +1,6 @@
 # #369 — Android UI for contact-named outbox folders (blocked on #368)
 
-## Problem
+## Current Behavior
 
 #368 adds a daemon-side feature: files in `~/mail/outbox/<contact>/`
 get sent to that contact automatically, with nested directory
@@ -19,7 +19,7 @@ the phone's outbox view — a confusing blind spot.
 daemon's directory semantics in the Compose UI; it assumes the
 on-disk layout, state keys, and wire protocol are already in place.
 
-## Proposal
+## Intended Behavior
 
 The Android outbox needs to:
 
@@ -158,7 +158,7 @@ work on most recently" mental model.
 - **Browser-style breadcrumb nav.** The tree depth should stay
   shallow in practice; path prefixes in the row are enough.
 
-## Implementation sketch
+## Suggested Implementation Steps
 
 - Extend the outbox data model to include
   `{contact: String?, path: String}` per entry — `contact` is

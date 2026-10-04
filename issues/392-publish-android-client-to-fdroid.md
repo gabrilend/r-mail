@@ -1,6 +1,14 @@
 # #392 — Publish the Android client on F-Droid
 
-## Goal
+## Current Behavior
+
+The app is built from source with `scripts/compile-android.sh` and
+installed by hand; it is in no store.  A newcomer cannot get from first
+launch to a first message alone, and F-Droid's reviewers would stop on
+points of their own — each listed below.
+
+
+## Intended Behavior
 
 Someone who has never heard of rmail finds it on F-Droid, installs it, and
 gets from first launch to a first message without a developer standing
@@ -11,7 +19,7 @@ also stop on a few points of their own.
 problems with no issue yet are listed as B1-B20 and should each become one
 (or be fixed directly and struck off here).
 
-## F-Droid inclusion itself
+## Suggested Implementation Steps
 
 What is already fine (verified 2026-09-22): dependencies are AndroidX,
 Compose, WorkManager, documentfile and coroutines only -- no Play Services,

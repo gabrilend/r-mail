@@ -1,6 +1,6 @@
 # #368 — Contact-named outbox folders: drop a file in, it sends to that contact
 
-## Problem
+## Current Behavior
 
 The current outbox workflow puts the recipient inside the file, as
 `to: <name>` at the top of the header block. That's fine for
@@ -22,7 +22,7 @@ That's the right default when the directory name doesn't match a
 contact. When it *does* match a contact, the user almost certainly
 meant "send these to alice."
 
-## Proposal
+## Intended Behavior
 
 If `~/mail/outbox/<NAME>/` exists and `<NAME>` matches an entry in
 `contacts`, the daemon treats every regular file directly inside
@@ -232,7 +232,7 @@ file that was in it, recursively.
 - **Binary-body first-class support on the wire.** Not regressed
   by this feature, not advanced either.
 
-## Implementation sketch
+## Suggested Implementation Steps
 
 Rough order of changes in `sync_outbox`:
 

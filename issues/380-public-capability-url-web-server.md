@@ -1,10 +1,18 @@
 # #380 — Public capability-URL web server ("send to a browser")
 
+## Current Behavior
+
+Nothing is built: the daemon serves only the sealed protocol and the
+plain one-line health answer (#410); there is no web server and no
+reserved `to:` word.  The design below is complete apart from "Still
+open".
+
+
 > Renumbered from #376 on 2026-09-21: #376 was taken by
 > `376-daemon-source-offer-and-build-identity.md`, filed on another
 > machine and pushed first.
 
-## Goal
+## Intended Behavior
 
 Let a user publish a single outbox message as a **public web page**
 anyone can open in a browser — no contact entry, no token, no rmail
@@ -364,6 +372,14 @@ public_url_words = 5
   dictionary (`/usr/share/dict/words`) at install time?
 - Does the publish path need any interaction with the send pipeline, or
   is it wholly separate, keyed off the reserved `to:`?
+
+## Suggested Implementation Steps
+
+1. Answer "Still open" below.
+2. Build in the order of the sections above: the trigger word, the HTTP
+   listener on its own port, the URL words, the rendering, attachments and
+   folders, lifetime, start-up and logging, the config keys — each tested
+   against a page fetched with `curl`.
 
 ## Origin
 

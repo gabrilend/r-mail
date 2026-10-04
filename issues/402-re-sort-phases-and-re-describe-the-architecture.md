@@ -2,10 +2,41 @@
 
 ## Status
 
-Open — planned 2026-09-23, deferred by the owner until before release:
-"let's write the blueprints and renumbering into an issue file and come
-back to it later."  Nothing started.  Numbered 402 only because phase 3 is
-full; this issue is itself renumbered by the work it describes.
+In progress since 2026-10-04 — planned 2026-09-23 and deferred by the
+owner until before release ("let's write the blueprints and renumbering
+into an issue file and come back to it later"); taken up on 2026-10-04:
+"can we work on this?"  Numbered 402 only because phase 3 is full; this
+issue is itself renumbered by the work it describes.
+
+**Decided 2026-10-04** (the open questions below, answered):
+
+1. The nine themes, as proposed — "Use these nine".
+2. Foundations first across phases too: "you know how to number phases".
+   So a phase stands on the ones before it.  One consequence: the door the
+   home daemon opens for the owner's own devices (the phone API) sits in
+   phase 7, before the desktop thin client that uses it, and the Android
+   client (phase 8) stands on it.
+3. The Android blueprints are written in this pass, by the same session
+   as the rest.
+
+**Done so far (2026-10-04):**
+
+- 17 blueprints written for what was built without an issue
+  (`issues/completed/new-*.md`, numbered by the mapping); a planned
+  eighteenth, on attachment pieces, was dropped because #105 already
+  describes them.
+- The 30 open issues missing the three required sections restructured
+  without losing their text (built ones state what exists in a new
+  Current Behavior; design sections renamed); `validate-issues` reports
+  no findings.
+- `scripts/renumber-issues.lua` and its test `scripts/test-renumber-issues.sh`.
+- The mapping, `notes/phase-renumbering-2026-10.map`.
+- `scripts/generate-phase-progress.lua`, which writes each phase's
+  progress file from the issue files.
+
+**Still to do:** run the renumbering; generate the progress files and
+move the old ones' history into notes; the table of contents with every
+phase; a demo per phase and the root script that picks one.
 
 ## Current Behavior
 
@@ -115,15 +146,13 @@ Before release:
 
 ## Open Questions
 
-1. **Are the nine themes right?**  Anything grouped wrongly, or missing a
-   phase of its own?
-2. **Does "foundations first" apply across phases too?**  The proposal puts
-   the daemon's core in phase 1 and the Android client in phase 8; the
-   phone depends on almost everything below it, which fits, but the owner's
-   rules also say the last issue finished is often from phase 1 or 2.
-3. **The Android client's own history.**  Its issues are written by
-   different sessions, some on the laptop.  Should the Android specialist
-   write phase 8's blueprints?
+All three answered 2026-10-04 (see Status):
+
+1. **Are the nine themes right?**  Yes, as proposed.
+2. **Does "foundations first" apply across phases too?**  Yes — left to
+   this session's judgment ("you know how to number phases").
+3. **The Android client's own history.**  Phase 8's blueprints are written
+   in this pass.
 
 ## Related
 

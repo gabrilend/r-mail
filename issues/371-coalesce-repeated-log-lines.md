@@ -1,6 +1,6 @@
 # #371 — Coalesce repeated log lines into a repeat counter
 
-## Problem
+## Current Behavior
 
 A single stuck condition floods the log with identical lines, one per
 sync cycle, forever.  Real capture from 2026-07-10 (one unreachable
@@ -66,7 +66,7 @@ what it means.  They're complementary and should both stay:
 - #324 turns `fail, fail, fail` → `unreachable: aurelia` (one line/cycle).
 - #371 turns that one-line-per-cycle stream → `unreachable: aurelia ×15`.
 
-## Proposed design
+## Intended Behavior
 
 Keep the last emitted message (the formatted string **without** its
 timestamp prefix) plus a small amount of run state:
@@ -118,6 +118,17 @@ flush).  Single, non-repeated lines print exactly as they do today
   small LRU of recent distinct messages could catch this, but it
   reorders output and complicates timestamp bookkeeping — out of scope
   for v1.
+
+## Suggested Implementation Steps
+
+1. Settle the crux first (open questions): exact-match coalescing is of
+   little use while the two worst repeaters carry a different address or
+   id on every line.  Since this was filed, #377 and #324 removed most of
+   the repetition at its source (backoff; one "unreachable contacts" line
+   per cycle) — measure what still repeats before building.
+2. If still wanted: the run state beside `log` in `rmail.lua`; the flush
+   triggers (a different line, K repeats, T seconds, shutdown); a test that
+   logs one line 120 times and finds the summary lines.
 
 ## Timestamp preservation — options to brainstorm
 
