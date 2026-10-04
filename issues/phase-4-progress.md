@@ -16,6 +16,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#405](completed/405-dns-hostnames-in-contacts.md) — DNS hostnames in contacts file**  Allow contacts to use DNS hostnames (e.g.
 - **[#406](completed/406-ipv6-support.md) — IPv6 support**  IPv6 gives every device a globally unique address.
 - **[#407](completed/407-per-ip-ports.md) — Per-IP ports in the contacts file**  `contact.port` is a single scalar that applies to every address in `contact.ips` (see #408 for the multi-IP model).
+- **[#408](completed/408-multiple-ips-per-contact.md) — Multiple IPs per contact with auto-reordering and unified address type**  Phases 1–4 are built (see Status): a contact may have `ip[N]`/`port[N]` lines after its pinned `ip`; reading builds one ordered list of places to try; a request that gets no answer is tried at the others in turn, and an indexed address that answers moves ...
 - **[#410](completed/410-daily-public-ip-recheck.md) — Re-check public IP once per day at a random time**  Built 2026-09-22 (see Status): the public IPv4, IPv6 and LAN addresses are re-checked every 24 to 48 hours (a time drawn afresh each check, so it wanders through the day), and an hour after a check no provider answered.
 - **[#411](completed/411-automatic-port-forwarding.md) — Asking the router to forward the port, and warning contacts when the router allows it**  A mailbox behind a home router can only be reached if the router forwards its port to this machine.
 - **[#412](completed/412-update-port-forwarding-lan-ip.md) — Update port forwarding after LAN IP change (optional)**  sorelu's LAN IP changed from 192.168.0.8 to 192.168.1.60.
@@ -26,7 +27,6 @@ regenerate it rather than editing above the notes line.  Counts:
 
 ## Open
 
-- **[#408](408-multiple-ips-per-contact.md) — Multiple IPs per contact with auto-reordering and unified address type**  Phases 1–4 are built (see Status): a contact may have `ip[N]`/`port[N]` lines after its pinned `ip`; reading builds one ordered list of places to try; a request that gets no answer is tried at the others in turn, and an indexed address that answers moves ...
 - **[#409](409-announce-full-address-set.md) — Announce the full address set, and confirm it before clearing the notice**  Phase 1 built 2026-09-22 (see Status): announcements carry the whole address set (`ips`: hostname, public IPv4, IPv6; `local_ips` only to a contact on our LAN); the receiver merges it under the contact's pinned `ip`, files private addresses on its own /24 a...
 - **[#414](414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  When rmail detects insecure NAT-PMP/UPnP on a sender's router, it sends a warning to contacts.
 - **[#418](418-drop-lan-auto-detection-for-multi-ip.md) — Drop LAN auto-detection and the unused /peer-address endpoint**  Everything this issue would remove is still in the daemon: UDP LAN discovery (multicast and a subnet scan on a failed connection, #415, #416, #417), the learned-LAN-address table used in place of a contact's address, and the `/peer-address` request.

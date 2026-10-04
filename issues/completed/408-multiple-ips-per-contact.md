@@ -11,8 +11,10 @@ this file): (1) holds — the canonical writer skips computed fields, the
 phone save strips them and since #504 merges and must read back as sent;
 (2) holds — every writer edits single lines (`write_contact_fields`,
 promotion, the address-set writers), none rewrites a contact whole;
-(3) is **not built** — a `name.endpoints` / `name.ips` line holding
-`table: 0x…` left by an old version is still not removed on load.
+(3) was decided against (2026-10-04): the owner removed every damaged
+`table: 0x…` line by hand and none remain, and with (1) and (2) holding
+nothing can write a new one, so a load-time cleanup would guard against
+a damage that can no longer happen.  Complete.
 
 
 ## Problem
@@ -91,10 +93,12 @@ fast path for future connections then matches reality.
    `contact_hosts`, `contact_endpoints`, `http_post_batch_raw` (the other
    addresses in turn), `promote_contact_index`, `promote_contact_address`,
    `align_contacts`.
-2. Remaining (defect item 3): in `contactfile.parse`, skip a line whose
-   field is `endpoints` or `ips`, and have `align_contacts` drop such lines
-   from the file with one log line saying so.  Test: a contacts file
-   holding `x.endpoints = "table: 0x1"` loads cleanly and loses that line.
+2. Not built, by decision (defect item 3): skipping and dropping
+   `endpoints` / `ips` lines on load.  The owner cleaned every damaged
+   line by hand (2026-10-04, "there's no more table: 0x... contacts
+   left. I removed them all"), and items 1 and 2 stop new ones being
+   written.  If a damaged line is ever seen again, it means a writer has
+   regressed; fix that writer rather than adding a cleanup.
 
 ## Source
 
@@ -242,6 +246,8 @@ version.  So the live code no longer *reproduces* it, but nothing
 3. **Self-healing cleanup.**  On load, strip any `name.endpoints` /
    `name.ips` line whose value matches `^"?table: 0x` so residual
    corruption from older versions repairs itself instead of lingering.
+   *Decided against 2026-10-04* — see Suggested Implementation Steps,
+   step 2.
 
 **Field remediation done 2026-07-12:** the six `table:` lines were
 removed from the live file by hand and a stray trailing `"` on
