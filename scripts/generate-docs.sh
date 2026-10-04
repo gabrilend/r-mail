@@ -23,6 +23,9 @@
 # Usage:
 #   scripts/generate-docs.sh                           # for ~/mail
 #   RMAIL_MAIL_DIR=~/notes/rmail scripts/generate-docs.sh
+#   RMAIL_SERVICE_MANAGER=systemd scripts/generate-docs.sh
+#                          # the service guide for systemd rather than for
+#                          # this machine's manager (unknown keeps all four)
 #   scripts/generate-docs.sh /path/to/checkout         # some other checkout
 #
 # Exit status is 0 when the docs were written, 1 otherwise.
@@ -37,6 +40,12 @@ INSTALLER="$DIR/scripts/install.sh"
 # show one of them, so it shows this one.
 ROOT="$DIR"
 MAIL_DIR=$(echo "${RMAIL_MAIL_DIR:-$HOME/mail}" | sed "s|^~|$HOME|" | sed 's|/*$||')
+
+# Which service manager's sections the guides keep: this machine's, asked
+# of the same script the installer asks (#614).  RMAIL_SERVICE_MANAGER
+# names another (runit, systemd, openrc, nixos, or unknown for all four),
+# for building the guides for a machine other than this one.
+INIT_SYSTEM="${RMAIL_SERVICE_MANAGER:-$("$DIR/scripts/detect-service-manager.sh")}"
 
 ok()   { printf "  \033[32mok\033[0m   %s\n" "$*"; }
 err()  { printf "  \033[31merror\033[0m %s\n" "$*" >&2; }

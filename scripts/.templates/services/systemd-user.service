@@ -1,0 +1,14 @@
+[Unit]
+Description=rmail messaging daemon (@MAILBOX@)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@LUA_BIN@ @ROOT@/rmail.lua @CONFIG_FILE@
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:@SERVICE_LOG@
+StandardError=append:@SERVICE_LOG@
+
+[Install]
+WantedBy=default.target

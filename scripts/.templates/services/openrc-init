@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+# rmail openrc service for the mailbox at @MAILBOX@
+# Logs to RAM-backed /tmp.
+
+description="rmail messaging daemon (@MAILBOX@)"
+command="@LUA_BIN@"
+command_args="@ROOT@/rmail.lua @CONFIG_FILE@"
+command_user="@USER@"
+command_background=true
+pidfile="/run/@SERVICE@.pid"
+output_log="@SERVICE_LOG@"
+error_log="@SERVICE_LOG@"

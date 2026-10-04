@@ -1717,28 +1717,41 @@ else
     done
 fi
 
-# detect NixOS first — it uses systemd internally but service files
-# are overwritten on rebuild, so it needs its own handling
-NIXOS=false
-[ -f /etc/NIXOS ] && NIXOS=true
+# Which service manager this machine runs: nixos, systemd, runit, openrc
+# or unknown.  Decided in one script, which the docs build also asks, so
+# the service written and the guide shown always agree (#614).
+INIT_SYSTEM=$("$ROOT/scripts/detect-service-manager.sh")
 
-# detect init system via PID 1, fall back to tool detection
-INIT_SYSTEM="unknown"
-if $NIXOS; then
-    INIT_SYSTEM="nixos"
-elif [ -f /proc/1/comm ]; then
-    case "$(cat /proc/1/comm 2>/dev/null)" in
-        systemd)     INIT_SYSTEM="systemd" ;;
-        runit)       INIT_SYSTEM="runit"   ;;
-        openrc-init) INIT_SYSTEM="openrc"  ;;
-    esac
-fi
-if [ "$INIT_SYSTEM" = "unknown" ]; then
-    if   command -v systemctl  >/dev/null 2>&1; then INIT_SYSTEM="systemd"
-    elif command -v sv         >/dev/null 2>&1; then INIT_SYSTEM="runit"
-    elif command -v rc-service >/dev/null 2>&1; then INIT_SYSTEM="openrc"
+# fill_service_template TEMPLATE OUTPUT — write one service file from
+# scripts/.templates/services/TEMPLATE, with every @NAME@ replaced by the
+# value this run knows.  Each value is escaped, so a path holding | \ or &
+# comes through unchanged.  A placeholder left over means the template
+# asks for a value this function does not know: that stops the install,
+# with the file removed, rather than writing a service that names
+# "@SOMETHING@" as a path.  (#614)
+fill_service_template() {
+    _tmpl="$ROOT/scripts/.templates/services/$1"
+    if [ ! -f "$_tmpl" ]; then
+        err "no service template at $_tmpl"
+        exit 1
     fi
-fi
+    sed \
+        -e "s|@SERVICE_LOG@|$(sed_escape_replacement "$RMAIL_SERVICE_LOG")|g" \
+        -e "s|@SERVICE@|$(sed_escape_replacement "$RMAIL_SERVICE")|g" \
+        -e "s|@MAILBOX@|$(sed_escape_replacement "$RMAIL_MAIL")|g" \
+        -e "s|@PORT@|$(sed_escape_replacement "${NIX_PORT:-}")|g" \
+        -e "s|@ROOT@|$(sed_escape_replacement "$ROOT")|g" \
+        -e "s|@CONFIG_FILE@|$(sed_escape_replacement "$CONFIG_FILE")|g" \
+        -e "s|@LUA_BIN@|$(sed_escape_replacement "$LUA_BIN")|g" \
+        -e "s|@HOME@|$(sed_escape_replacement "$HOME")|g" \
+        -e "s|@USER@|$(sed_escape_replacement "$(whoami)")|g" \
+        "$_tmpl" > "$2"
+    if grep -q '@[A-Z_]*@' "$2"; then
+        err "$2 still has a placeholder after filling: $(grep -o '@[A-Z_]*@' "$2" | head -1)"
+        rm -f "$2"
+        exit 1
+    fi
+}
 
 # Whether this run wrote a service for this mailbox; if so, its name goes
 # on the restart list (#622).
@@ -1784,65 +1797,9 @@ elif ask_yn setup_service "Set up rmail to run as a service?"; then
             # if they compiled local lua, use that literal path directly.
             # NixOS service logs to /tmp (RAM-backed) to avoid disk wear
             if echo "$LUA_BIN" | grep -q '^/nix/store/'; then
-                cat > "$NIX_FILE" <<NIX
-{ config, pkgs, ... }:
-# rmail NixOS service for the mailbox at $RMAIL_MAIL
-# Logs to RAM-backed /tmp. One service per mailbox; the name carries the
-# mailbox path so a second mailbox adds a service rather than replacing this.
-
-let
-  rmailPort = $NIX_PORT;
-in {
-  networking.firewall.allowedTCPPorts = [ rmailPort ];
-
-  systemd.services."$RMAIL_SERVICE" = {
-    description = "rmail messaging daemon ($RMAIL_MAIL)";
-    after = [ "network.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "$(whoami)";
-      Group = "users";
-      ExecStart = "\${pkgs.lua5_4}/bin/lua $ROOT/rmail.lua $CONFIG_FILE";
-      Restart = "on-failure";
-      RestartSec = 5;
-      StandardOutput = "append:$RMAIL_SERVICE_LOG";
-      StandardError = "append:$RMAIL_SERVICE_LOG";
-    };
-  };
-}
-NIX
+                fill_service_template nixos-system-lua.nix "$NIX_FILE"
             else
-                cat > "$NIX_FILE" <<NIX
-{ config, ... }:
-# rmail NixOS service for the mailbox at $RMAIL_MAIL
-# Logs to RAM-backed /tmp. One service per mailbox; the name carries the
-# mailbox path so a second mailbox adds a service rather than replacing this.
-
-let
-  rmailPort = $NIX_PORT;
-in {
-  networking.firewall.allowedTCPPorts = [ rmailPort ];
-
-  systemd.services."$RMAIL_SERVICE" = {
-    description = "rmail messaging daemon ($RMAIL_MAIL)";
-    after = [ "network.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "$(whoami)";
-      Group = "users";
-      ExecStart = "$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE";
-      Restart = "on-failure";
-      RestartSec = 5;
-      StandardOutput = "append:$RMAIL_SERVICE_LOG";
-      StandardError = "append:$RMAIL_SERVICE_LOG";
-    };
-  };
-}
-NIX
+                fill_service_template nixos-own-lua.nix "$NIX_FILE"
             fi
             ok "generated $NIX_FILE"
             echo ""
@@ -1860,22 +1817,7 @@ NIX
                 SERVICE_FILE="$SERVICE_DIR/$RMAIL_SERVICE.service"
                 mkdir -p "$SERVICE_DIR"
                 # systemd user service logs to /tmp (RAM-backed)
-                cat > "$SERVICE_FILE" <<SERVICE
-[Unit]
-Description=rmail messaging daemon ($RMAIL_MAIL)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:$RMAIL_SERVICE_LOG
-StandardError=append:$RMAIL_SERVICE_LOG
-
-[Install]
-WantedBy=default.target
-SERVICE
+                fill_service_template systemd-user.service "$SERVICE_FILE"
                 ok "created $SERVICE_FILE"
                 systemctl --user daemon-reload
                 systemctl --user enable "$RMAIL_SERVICE"
@@ -1889,23 +1831,7 @@ SERVICE
             else
                 SERVICE_FILE="$ROOT/$RMAIL_SERVICE.service"
                 # systemd system service logs to /tmp (RAM-backed)
-                cat > "$SERVICE_FILE" <<SERVICE
-[Unit]
-Description=rmail messaging daemon ($RMAIL_MAIL)
-After=network.target
-
-[Service]
-Type=simple
-User=$(whoami)
-ExecStart=$LUA_BIN $ROOT/rmail.lua $CONFIG_FILE
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:$RMAIL_SERVICE_LOG
-StandardError=append:$RMAIL_SERVICE_LOG
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
+                fill_service_template systemd-system.service "$SERVICE_FILE"
                 ok "generated $SERVICE_FILE"
                 echo ""
                 echo "  Run these commands to install the system service:"
@@ -1920,13 +1846,7 @@ SERVICE
             SERVICE_FILE="$ROOT/$RMAIL_SERVICE-run"
             # runit service logs to /tmp (RAM-backed) to avoid disk wear
             # and prevent output from appearing on pre-login TTY
-            cat > "$SERVICE_FILE" <<SERVICE
-#!/bin/sh
-# rmail runit service for the mailbox at $RMAIL_MAIL
-# Logs go to RAM-backed /tmp: no disk wear, gone on reboot.
-export HOME=$HOME
-exec chpst -u $(whoami) $LUA_BIN $ROOT/rmail.lua $CONFIG_FILE >>$RMAIL_SERVICE_LOG 2>&1
-SERVICE
+            fill_service_template runit-run "$SERVICE_FILE"
             chmod +x "$SERVICE_FILE"
             ok "generated $SERVICE_FILE"
             echo ""
@@ -1941,20 +1861,7 @@ SERVICE
         openrc)
             SERVICE_FILE="$ROOT/$RMAIL_SERVICE-init"
             # openrc service logs to /tmp (RAM-backed) to avoid disk wear
-            cat > "$SERVICE_FILE" <<SERVICE
-#!/sbin/openrc-run
-# rmail openrc service for the mailbox at $RMAIL_MAIL
-# Logs to RAM-backed /tmp.
-
-description="rmail messaging daemon ($RMAIL_MAIL)"
-command="$LUA_BIN"
-command_args="$ROOT/rmail.lua $CONFIG_FILE"
-command_user="$(whoami)"
-command_background=true
-pidfile="/run/$RMAIL_SERVICE.pid"
-output_log="$RMAIL_SERVICE_LOG"
-error_log="$RMAIL_SERVICE_LOG"
-SERVICE
+            fill_service_template openrc-init "$SERVICE_FILE"
             ok "generated $SERVICE_FILE"
             echo ""
             echo "  Run these commands to install the service:"
@@ -2013,6 +1920,15 @@ generate_docs() {
     esc_root=$(sed_escape_replacement "$ROOT")
     esc_mail=$(sed_escape_replacement "$MAIL_DIR")
 
+    # A section marked "<!-- {{{ manager: X -->" ... "<!-- }}} manager: X -->"
+    # is about one service manager.  The built copy keeps the section for
+    # this machine's manager and drops the others, markers and all; the
+    # templates keep every section (#614).  With no manager found
+    # (INIT_SYSTEM unknown), every section is kept, and that is said.
+    if [ "${INIT_SYSTEM:-unknown}" = "unknown" ]; then
+        info "no service manager found: the built guides keep every manager's section"
+    fi
+
     for tmpl in "$templates_dir"/*.md; do
         [ -f "$tmpl" ] || continue
         local name
@@ -2021,7 +1937,12 @@ generate_docs() {
             -e "s|/home/you/programs/email/deps/lua/bin/lua|$esc_shebang|g" \
             -e "s|/home/you/programs/email|$esc_root|g" \
             -e "s|/home/you/mail|$esc_mail|g" \
-            "$tmpl" > "$out_dir/$name"
+            "$tmpl" |
+        awk -v keep="${INIT_SYSTEM:-unknown}" '
+            /^<!-- \{\{\{ manager: / { block = $4; next }
+            /^<!-- \}\}\} manager: / { block = ""; next }
+            block == "" || keep == "unknown" || block == keep { print }
+        ' > "$out_dir/$name"
     done
 
     # looking-for-docs.md deliberately stays in place.  It's the only

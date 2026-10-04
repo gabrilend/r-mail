@@ -6,7 +6,9 @@ until you start it again. Setting it up as a service means it starts automatical
 and stays running in the background.
 
 `install.sh` detects your init system and offers to set this up automatically.
-The manual formats are below. Three things in them need replacing:
+The manual formats are below. A copy of this guide built by the installer shows
+only your machine's service manager; `docs/.templates/service.md` in the
+repository has all four. Three things in them need replacing:
 
 **`/path/to/lua`** — your system lua (`which lua`), or the one the installer
 compiled, at `deps/lua/bin/lua` inside the checkout.
@@ -58,6 +60,7 @@ there is no single log to name.
 
 ---
 
+<!-- {{{ manager: systemd -->
 ## systemd
 
 systemd offers two modes:
@@ -121,7 +124,9 @@ journalctl -u rmail -f
 ```
 
 ---
+<!-- }}} manager: systemd -->
 
+<!-- {{{ manager: runit -->
 ## runit
 
 ```sh
@@ -141,7 +146,9 @@ sudo ln -s /etc/sv/rmail /var/service/
 Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 
 ---
+<!-- }}} manager: runit -->
 
+<!-- {{{ manager: openrc -->
 ## OpenRC
 
 ```sh
@@ -168,7 +175,9 @@ sudo rc-service rmail start
 Logs: `tail -f /tmp/SERVICE-NAME.log` or `./scripts/view-logs.sh`
 
 ---
+<!-- }}} manager: openrc -->
 
+<!-- {{{ manager: nixos -->
 ## NixOS
 
 NixOS uses systemd internally but service files placed in `/etc/systemd/system/`
@@ -233,6 +242,7 @@ The daemon also keeps its own rotating log in RAM,
 older copy; the `log_file` setting moves it).
 
 ---
+<!-- }}} manager: nixos -->
 
 ## Running multiple instances
 

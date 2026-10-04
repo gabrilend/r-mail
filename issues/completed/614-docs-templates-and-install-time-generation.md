@@ -1,5 +1,51 @@
 # Treat docs/ as build artifacts generated from docs/.templates/
 
+## Current Behavior
+
+Complete, including the extension of 2026-10-04 (owner: "yes please" to
+moving the service files into templates and trimming the service guide
+to this machine's service manager).
+
+- The documents are built from `docs/.templates/` as described in the
+  rest of this file, and the built `service.md` keeps only the section
+  for this machine's service manager (all four when none is found, with
+  a line saying so).  The templates keep every section.
+- The six service files the installer can write are templates in
+  `scripts/.templates/services/`, filled by `fill_service_template`.
+  Filled with the same values, they are byte for byte what the inline
+  blocks they replaced wrote (checked 2026-10-04 for all six, with paths
+  holding `&` and `|`).
+- `scripts/detect-service-manager.sh` is the one place that decides the
+  service manager; the installer and `generate-docs.sh` both ask it.
+- `scripts/test-service-templates.sh` checks all of it.
+
+Before the extension, every build kept every section, and the service
+files' text lived inside `scripts/install.sh` as blocks filled in by the
+shell.  The restart script (#622) was the first thing built the
+template way, one folded block per service manager.
+
+## Intended Behavior (2026-10-04 extension)
+
+- **Service files come from templates**: `scripts/.templates/services/`,
+  one file per kind the installer writes — systemd user service, systemd
+  system service, runit `run` script, OpenRC init script, and NixOS
+  module (one using the system's Lua, one using a Lua given by path).
+  Each holds `@NAME@` placeholders for the values the installer knows
+  (mailbox, program folder, config file, Lua, log file, service name,
+  user, home folder, port).  The installer fills one in and refuses if
+  any placeholder is left unfilled.  The files written are byte for byte
+  what the inline blocks wrote.
+- **The documents keep only this machine's service manager**:
+  `service.md` marks each manager's section with
+  `<!-- {{{ manager: X -->` … `<!-- }}} manager: X -->`, and the docs
+  build keeps the section for this machine's manager and drops the
+  others.  The templates still hold every section, so the versions in
+  the repository stay complete.  With no manager found, every section is
+  kept and the build says so.
+- **One place decides the service manager**: a small script prints it
+  (`nixos`, `systemd`, `runit`, `openrc` or `unknown`), used by the
+  installer and by `generate-docs.sh`, so the two can never disagree.
+
 ## Overview
 
 Several docs reference paths that depend on the user's install location —
@@ -134,9 +180,47 @@ One-shot:
 6. Commit templates + install + gitignore + README + signpost
 7. Run install once locally to verify generation works
 
+## Suggested Implementation Steps (2026-10-04 extension)
+
+1. `scripts/detect-service-manager.sh`: the detection that was inline in
+   `install.sh` (NixOS by `/etc/NIXOS`, then process 1's name, then which
+   manager's command exists), printing one word.  `install.sh` sets
+   `INIT_SYSTEM` from it.
+2. `scripts/.templates/services/`: `systemd-user.service`,
+   `systemd-system.service`, `runit-run`, `openrc-init`,
+   `nixos-system-lua.nix`, `nixos-own-lua.nix`, copied from the inline
+   blocks with the shell values replaced by `@MAILBOX@`, `@ROOT@`,
+   `@CONFIG_FILE@`, `@LUA_BIN@`, `@SERVICE_LOG@`, `@SERVICE@`, `@USER@`,
+   `@HOME@`, `@PORT@`.
+3. `install.sh`: `fill_service_template <template> <output>` substitutes
+   them (escaped with `sed_escape_replacement`) and fails if an `@NAME@`
+   is left; each inline block becomes one call.
+4. `docs/.templates/service.md`: fold markers round each manager's
+   section.  `generate_docs` keeps the section for `INIT_SYSTEM` (all of
+   them when it is `unknown`, with a line saying so);
+   `generate-docs.sh` gets `INIT_SYSTEM` from the detection script, or
+   from `RMAIL_SERVICE_MANAGER` to build the guide for another machine.
+5. `scripts/test-service-templates.sh`: lifts `sed_escape_replacement`,
+   `fill_service_template` and `generate_docs` out of `install.sh` (as
+   `generate-docs.sh` does) and checks every template fills with no
+   placeholder left and `| & \` intact, that an unknown placeholder
+   stops the fill and leaves no file, that the guide built for each
+   manager has that section only, and all four for `unknown`.  The
+   byte-for-byte match with the old blocks was a one-time check while
+   building, not part of the test: the old blocks no longer exist to
+   compare against.
+
+## Possible next step (not part of this issue)
+
+The examples in `service.md` are written by hand and have already
+drifted from the real files (the systemd examples lack the log lines the
+installer writes).  The guide could include each template, filled with
+example values, so the two can never disagree.
+
 ## Status
 
-Complete.  Landed in 3fd6b32 (initial system + migration); every
+Complete 2026-10-04, extension included.  The original work landed in
+3fd6b32 (initial system + migration); every
 install.sh run since then regenerates docs/*.md from the templates.
 `docs/looking-for-docs.md` stays in place alongside the generated
 files (no longer deleted by generate_docs — that was the one

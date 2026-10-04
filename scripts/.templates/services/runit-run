@@ -1,0 +1,5 @@
+#!/bin/sh
+# rmail runit service for the mailbox at @MAILBOX@
+# Logs go to RAM-backed /tmp: no disk wear, gone on reboot.
+export HOME=@HOME@
+exec chpst -u @USER@ @LUA_BIN@ @ROOT@/rmail.lua @CONFIG_FILE@ >>@SERVICE_LOG@ 2>&1
