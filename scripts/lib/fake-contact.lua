@@ -23,6 +23,8 @@
 --   local fake = require("fake-contact").new(DIR, "127.0.0.1", port, token)
 --   local status, answer = fake:post_json("/deliver", {type = "attachment_request", ...})
 --   local status, body   = fake:request("GET", "/api/attachments/x")
+--   local web, status, body = fake:web_post("GET", "/")   -- as a browser must send it
+--   local bytes = fake:raw("PUT / HTTP/1.1\r\n\r\n")      -- anything at all
 
 local M = {}
 
@@ -80,6 +82,61 @@ function M:request(method, path, body)
     local head_end = plain:find("\r\n\r\n", 1, true)
     if not status or not head_end then error("fake-contact: unreadable answer: " .. plain:sub(1, 80)) end
     return status, plain:sub(head_end + 4)
+end
+-- }}}
+
+-- {{{ function M:raw
+-- Send `bytes` exactly as given on a fresh connection and return
+-- everything the daemon sent back before it closed ("" for nothing).
+-- For openings no honest contact sends: plain web requests, a frame
+-- inside a web POST, letters that are no request at all.
+function M:raw(bytes)
+    local conn = assert(self.socket.tcp())
+    conn:settimeout(15)
+    assert(conn:connect(self.host, self.port))
+    assert(conn:send(bytes))
+    local got, err, partial = conn:receive("*a")
+    conn:close()
+    return got or partial or ""
+end
+-- }}}
+
+-- {{{ function M:seal
+-- One request sealed as a whole frame: the 4-byte length, nonce and
+-- ciphertext, exactly as M:request puts it on the wire.
+function M:seal(method, path, body)
+    body = body or ""
+    local text = method .. " " .. path .. " HTTP/1.1\r\n" ..
+                 "Content-Length: " .. #body .. "\r\n\r\n" .. body
+    local nonce = self.crypto.random_bytes(12)
+    local sealed = self.crypto.aes_gcm_encrypt(self.key, nonce, text)
+    return uint32_be(#nonce + #sealed) .. nonce .. sealed
+end
+-- }}}
+
+-- {{{ function M:web_post
+-- Send one request the way a web page has to: the sealed frame as the
+-- body of a plain POST, behind the request line and headers a browser
+-- writes and the page cannot remove.  `declared` overrides the
+-- Content-Length (to lie in it); omit it for the true length.
+-- Returns (web status, decrypted inner status, inner body); the inner two
+-- are nil when the web answer carried no frame that decrypts.
+function M:web_post(method, path, body, declared)
+    local frame = self:seal(method, path, body)
+    local reply = self:raw("POST / HTTP/1.1\r\nHost: " .. self.host .. ":" .. self.port ..
+        "\r\nUser-Agent: Mozilla/5.0 (rmail test)\r\nOrigin: http://localhost\r\n" ..
+        "Sec-Fetch-Mode: no-cors\r\nContent-Type: text/plain\r\n" ..
+        "Content-Length: " .. (declared or #frame) .. "\r\n\r\n" .. frame)
+    local web_status = tonumber(reply:match("^HTTP/%S+ (%d+)"))
+    local head_end = reply:find("\r\n\r\n", 1, true)
+    if not head_end then return web_status end
+    local packet = reply:sub(head_end + 4 + 4)  -- past the headers and the frame's length
+    local plain = #packet >= 28 and
+        self.crypto.aes_gcm_decrypt(self.key, packet:sub(1, 12), packet:sub(13))
+    if not plain then return web_status end
+    local inner = tonumber(plain:match("^HTTP/%S+ (%d+)"))
+    local inner_end = plain:find("\r\n\r\n", 1, true)
+    return web_status, inner, inner_end and plain:sub(inner_end + 4)
 end
 -- }}}
 

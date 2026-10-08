@@ -30,6 +30,35 @@ inside TLS and became a leak when the encryption moved.  Nothing read it.
 What the design has to keep handling: a port-forward test from outside,
 without the token.  It still works, since it needs only an answer.
 
+**How a connection's opening is told apart** (since 2026-10-08).  The
+health check used to be recognised by the exact bytes `GET `; every other
+opening was read as a frame's 4-byte length.  A web page cannot send bare
+bytes — the browser writes a request line and headers before the body —
+so a page that POSTed a sealed frame arrived as the "length" `POST` =
+1,347,375,956, over the 64 MiB limit, and was dropped unread.  Found while
+planning a feedback box on the HTML docs.  Now the first byte decides: a
+legal length (28 bytes to 64 MiB) always starts 0x00–0x04, a web request
+with a capital letter (0x41 and up), so neither can be mistaken for the
+other.  A dispatch table on the method then answers:
+
+- `GET` — the health answer above, then closed.
+- `POST` — headers skipped; the body must be exactly one frame (declared
+  Content-Length = 4 + the frame's own length, else `400`), read and
+  trial-decrypted like any other.  The sealed answer is sent back as the
+  body of a `200` web reply so a browser sees a well-formed answer; the
+  connection then closes.  It opens nothing a bare frame does not.
+- any other method — `405` with `Allow: GET, POST`, logged.
+- capital letters with no request line — closed, nothing said.
+
+Both places that read an opening use it: the main request loop, and the
+code that answers callers while a sync cycle waits (#120).  A caller held
+there keeps how it must be answered (bare frame or web reply) in its held
+record, and the main loop hands that whole record on.
+
+Not built here, and wanted before a token is ever published on a page: a
+contact mark that allows only plain message delivery (today a token also
+allows `/delete` and `/update-address`).
+
 ## Intended Behavior
 
 As above.  The documents' claim that no name is sent in cleartext is
@@ -48,6 +77,19 @@ true.
   answered 200 with exactly `{"ok":true}`; the configured name appears
   nowhere in the reply, headers included; the validator's own kind of
   probe still gets an answer.
+- `rmail.lua`, the frame-in-a-web-request section beside the frame
+  readers: the opening-byte rule and the method dispatch table; sealing a
+  frame is split from sending it so a frame can go out inside a web reply.
+  The request loop and the busy-while-sending answerer call it.
+- Test: `scripts/test-frame-in-web-request.sh` — bare frames still work
+  and keep the connection; a frame in a POST is answered in a web reply
+  and a message sent that way lands in the inbox; wrong key, wrong length,
+  other methods and non-requests are refused.  `test-busy-while-sending.sh`
+  gains a browser-style caller answered busy, and one held and answered
+  after the cycle.  `scripts/lib/fake-contact.lua` gains the raw and
+  web-POST ways of calling.
+- Docs: protocol guide ("A frame sent from a web page", other methods);
+  encryption guide (the browser's headers travel in cleartext).
 
 ## Related documents
 

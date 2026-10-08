@@ -2762,14 +2762,20 @@ local function parse_uint32_be(s)
     return a * 16777216 + b * 65536 + c * 256 + d
 end
 
--- Send a length-prefixed encrypted packet over sock.
--- Packet format: [4-byte length][12-byte nonce][ciphertext+16-byte tag]
-local function send_encrypted(sock, key, plaintext)
+-- Seal plaintext into one length-prefixed frame, or false when the
+-- cipher refused it.
+-- Frame format: [4-byte length][12-byte nonce][ciphertext+16-byte tag]
+local function seal_frame(key, plaintext)
     local nonce      = crypto.random_bytes(12)
     local ciphertext = crypto.aes_gcm_encrypt(key, nonce, plaintext)
     if not ciphertext then return false end
-    local data       = uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
-    -- Send all data, handling partial sends (important for large payloads)
+    return uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
+end
+
+-- Send every byte of data, handling partial sends (important for large
+-- payloads).  Kept apart from sealing so a frame can also go out inside
+-- a web reply (unwrap_web_request).
+local function send_all(sock, data)
     sock:settimeout(30)  -- allow time for large transfers
     local sent = 0
     while sent < #data do
@@ -2785,6 +2791,13 @@ local function send_encrypted(sock, key, plaintext)
     return true
 end
 
+-- Send a length-prefixed encrypted packet over sock.
+local function send_encrypted(sock, key, plaintext)
+    local data = seal_frame(key, plaintext)
+    if not data then return false end
+    return send_all(sock, data)
+end
+
 -- Receive and decrypt a length-prefixed encrypted packet.
 -- Returns plaintext string or nil on error / auth failure.
 local function recv_encrypted(sock, key)
@@ -2798,6 +2811,151 @@ local function recv_encrypted(sock, key)
     local nonce      = packet:sub(1, 12)
     local ciphertext = packet:sub(13)
     return crypto.aes_gcm_decrypt(key, nonce, ciphertext)
+end
+
+-- ---- A frame inside a web request --------------------------------------------
+--
+-- A connection normally opens with a frame's 4-byte big-endian length.
+-- Lengths run from 28 bytes to 64 MiB, so that first byte is always
+-- 0x00-0x04.  A web request opens with its method in capital letters, 0x41
+-- and up.  So one byte tells the two apart, and no legal length can be
+-- mistaken for a request, nor a request for a length.
+--
+-- Until 2026-10-08 only the exact bytes "GET " were recognised and the rest
+-- read as a length.  A web page cannot send bare bytes -- the browser always
+-- writes a request line and headers before the body, and the page can
+-- neither remove nor reorder them -- so a page's POST arrived as the length
+-- "POST" = 50 4F 53 54 = 1,347,375,956 bytes, over the 64 MiB limit, and was
+-- dropped unread.  Found while planning a feedback box on the HTML docs.
+--
+-- What each opening gets (a dispatch table, `by_method`):
+--   a length (first byte below 0x41)  the frame, read as always; the answer
+--                                     goes back as a bare frame and the
+--                                     connection may carry more requests
+--   GET                               the plaintext health answer (#106),
+--                                     then closed
+--   POST                              headers skipped; the body must be
+--                                     exactly one frame (Content-Length ==
+--                                     4 + its length) and is then read and
+--                                     checked like any other.  The sealed
+--                                     answer goes back as the body of a
+--                                     web reply, so a browser sees a
+--                                     well-formed answer, then closed
+--   any other method                  405, naming GET and POST, then closed
+--   letters that are no request line  closed with nothing said
+--
+-- A POST opens nothing a bare frame does not: the frame inside still has to
+-- decrypt with a contact's key before anything is done with it.
+--
+-- unwrap_web_request(sock, first4) returns (first4 of the frame, envelope),
+-- or nothing when the connection was answered here and is finished.  The
+-- envelope is a record:
+--   reply       function(sock, key, plaintext) -> boolean: seals and sends
+--               the answer the way this caller can read it
+--   keep_alive  boolean: whether the connection may carry another request
+local unwrap_web_request
+do
+    -- {{{ local function send_web_reply
+    local function send_web_reply(sock, key, plaintext)
+        local frame = seal_frame(key, plaintext)
+        if not frame then return false end
+        return send_all(sock,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" ..
+            "Content-Length: " .. #frame .. "\r\nConnection: close\r\n\r\n" .. frame)
+    end
+    -- }}}
+
+    local envelope = {
+        bare = {reply = send_encrypted, keep_alive = true},
+        web  = {reply = send_web_reply, keep_alive = false},
+    }
+
+    -- {{{ local function answer_plain
+    -- An unencrypted web answer, for callers that hold no key.  `extra` is
+    -- further header lines, each ending in \r\n, or "".
+    local function answer_plain(sock, status_line, extra, data)
+        local body = json.encode(data)
+        sock:send("HTTP/1.1 " .. status_line .. "\r\nContent-Type: application/json\r\n" ..
+            extra .. "Content-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
+    end
+    -- }}}
+
+    -- {{{ local function skip_headers
+    -- Read header lines up to the blank line that ends them.  Returns the
+    -- declared Content-Length (0 when none was declared), or false when the
+    -- connection ended first.
+    local function skip_headers(sock)
+        local declared = 0
+        while true do
+            local line = sock:receive("*l")
+            if not line then return false end
+            if line == "" then return declared end
+            local n = line:lower():match("^content%-length:%s*(%d+)%s*$")
+            if n then declared = tonumber(n) end
+        end
+    end
+    -- }}}
+
+    -- {{{ local function refuse_method
+    local function refuse_method(sock, declared, method)
+        log("refused a web %s request: only GET and POST are understood", method)
+        answer_plain(sock, "405 Method Not Allowed", "Allow: GET, POST\r\n",
+            {error = "only GET and POST"})
+    end
+    -- }}}
+
+    local by_method = {
+        -- {{{ GET
+        -- Plaintext health check: lets a person test a port forward from
+        -- outside without the token.  It answers anyone, so it says
+        -- nothing about the mailbox -- only that something is listening.
+        -- (It once carried this mailbox's name.  That was harmless when
+        -- rmail spoke TLS and this answer travelled inside it; when
+        -- encryption moved into each frame, commit 60d309e kept the answer
+        -- in the clear and the name came with it, published to anyone who
+        -- asked.  Nothing read it.  Dropped 2026-10-04, #106.)
+        GET = function(sock)
+            answer_plain(sock, "200 OK", "", {ok = true})
+        end,
+        -- }}}
+
+        -- {{{ POST
+        -- The body is one frame.  A declared length that does not match
+        -- the frame's own is refused rather than trusted either way: one
+        -- of the two is wrong, and guessing which would read past the
+        -- request or stop inside it.
+        POST = function(sock, declared)
+            local first4 = sock:receive(4)
+            if not first4 or #first4 ~= 4 then return end
+            local frame_len = parse_uint32_be(first4)
+            if declared ~= 4 + frame_len then
+                log("refused a web POST: its body is %d bytes, the frame inside says %d",
+                    declared, 4 + frame_len)
+                answer_plain(sock, "400 Bad Request", "",
+                    {error = "the body must be exactly one rmail frame"})
+                return
+            end
+            return first4, envelope.web
+        end,
+        -- }}}
+    }
+
+    -- {{{ function unwrap_web_request
+    function unwrap_web_request(sock, first4)
+        -- a frame length: 0x00-0x04 when legal; anything else under 0x41
+        -- fails the length check where the frame is read, as before
+        if first4:byte(1) < 0x41 then return first4, envelope.bare end
+        local rest = sock:receive("*l")
+        if not rest then return end
+        local method = (first4 .. rest):match("^(%u+) %S+ HTTP/%d")
+        -- letters, but no request line: nothing to answer in either language
+        if not method then return end
+        local declared = skip_headers(sock)
+        if not declared then return end
+        local answer = by_method[method] or refuse_method
+        return answer(sock, declared, method)
+    end
+    -- }}}
 end
 
 -- Try to decrypt a raw packet (nonce..ciphertext+tag) against every known
@@ -2963,7 +3121,9 @@ end
 --   anyone else (the phone, another    held, unanswered, and handled by the
 --   contact)                           main loop the moment the cycle ends,
 --                                      as it would have been anyway
---   a plain "GET "                     the health answer, as always
+--   a plain web request                answered as always (unwrap_web_request);
+--                                      a frame inside a web POST is treated
+--                                      as above, by whoever sealed it
 -- Nothing is *processed* during a cycle: handlers write records the cycle
 -- holds in memory, and processing a request mid-cycle could lose its
 -- changes.  The rest of #120 -- serving requests while a cycle waits -- is
@@ -2972,7 +3132,7 @@ end
 -- Kept in ctimer (it is about who we are dialing and when), not in new
 -- top-level names: the file is at Lua's limit of 200.
 ctimer.listeners = {}   -- set by main: the listening TCP sockets
-ctimer.deferred  = {}   -- {sock, first4, packet}, for main to handle after the cycle
+ctimer.deferred  = {}   -- {sock, first4, packet, envelope}, for main to handle after the cycle
 
 -- {{{ ctimer.answer_while_sending
 function ctimer.answer_while_sending(listener, dialing)
@@ -2981,17 +3141,10 @@ function ctimer.answer_while_sending(listener, dialing)
     c:settimeout(5)
     local first4 = c:receive(4)
     if not first4 or #first4 ~= 4 then c:close(); return end
-    if first4 == "GET " then
-        while true do
-            local line = c:receive("*l")
-            if not line or line == "" then break end
-        end
-        local body = json.encode({ok = true})
-        c:send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
-            "Content-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
-        c:close()
-        return
-    end
+    local envelope
+    first4, envelope = unwrap_web_request(c, first4)
+    -- answered there (health check, refusal) or not a request at all
+    if not first4 then c:close(); return end
     local len = parse_uint32_be(first4)
     if len < 28 or len > 64 * 1024 * 1024 then c:close(); return end
     local packet = c:receive(len)
@@ -3000,14 +3153,15 @@ function ctimer.answer_while_sending(listener, dialing)
     if not plaintext then c:close(); return end
     if dialing[name] then
         local body = json.encode({busy = true})
-        send_encrypted(c, derive_key(load_contacts()[name].token),
+        envelope.reply(c, derive_key(load_contacts()[name].token),
             "HTTP/1.1 503 Busy\r\nContent-Type: application/json\r\n" ..
             "Content-Length: " .. #body .. "\r\n\r\n" .. body)
         c:close()
         log("%s called while we were sending to them; answered busy", name)
         return
     end
-    ctimer.deferred[#ctimer.deferred + 1] = {sock = c, first4 = first4, packet = packet}
+    ctimer.deferred[#ctimer.deferred + 1] =
+        {sock = c, first4 = first4, packet = packet, envelope = envelope}
 end
 -- }}}
 
@@ -7479,7 +7633,8 @@ end
 
 -- `preread`, when given, is the first frame of the connection, already
 -- read: a caller held while a sync cycle ran (ctimer.answer_while_sending)
--- and handed over by the main loop afterwards.
+-- and handed over by the main loop afterwards.  It is that caller's
+-- ctimer.deferred record: {sock, first4, packet, envelope}.
 local function handle_request(rt, client, preread)
     client:settimeout(10)
 
@@ -7488,30 +7643,21 @@ local function handle_request(rt, client, preread)
     local known_key = nil
 
     while true do
-        -- Read first 4 bytes — length prefix or "GET " for health check
+        -- Read first 4 bytes: a frame's length, or the start of a web
+        -- request -- the health check, or a frame a browser wrapped in a
+        -- POST (unwrap_web_request tells them apart and explains why)
         -- Use a longer timeout for keep-alive idle (waiting for next request)
         client:settimeout(known_contact and 30 or 10)
-        local first4 = preread and preread.first4 or client:receive(4)
-        if not first4 or #first4 ~= 4 then return end  -- connection closed or timeout
-
-        -- Plaintext health check: lets a person test a port forward from
-        -- outside without the token.  It answers anyone, so it says
-        -- nothing about the mailbox -- only that something is listening.
-        -- (It once carried this mailbox's name.  That was harmless when
-        -- rmail spoke TLS and this answer travelled inside it; when
-        -- encryption moved into each frame, commit 60d309e kept the answer
-        -- in the clear and the name came with it, published to anyone who
-        -- asked.  Nothing read it.  Dropped 2026-10-04, #106.)
-        if first4 == "GET " then
-            while true do
-                local line = client:receive("*l")
-                if not line or line == "" then break end
-            end
-            local hc_body = json.encode({ok = true})
-            client:send(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ..
-                "Content-Length: " .. #hc_body .. "\r\nConnection: close\r\n\r\n" .. hc_body)
-            return  -- health check doesn't support keep-alive
+        local first4, envelope
+        if preread then
+            -- a held caller: its opening was already read and unwrapped
+            first4, envelope = preread.first4, preread.envelope
+        else
+            first4 = client:receive(4)
+            if not first4 or #first4 ~= 4 then return end  -- connection closed or timeout
+            first4, envelope = unwrap_web_request(client, first4)
+            -- answered there (health check, refusal) or not a request at all
+            if not first4 then return end
         end
 
         -- Encrypted frame
@@ -7686,9 +7832,11 @@ local function handle_request(rt, client, preread)
         else send_response(resp, 404, {error = "not found"}) end
     else send_response(resp, 404, {error = "not found"}) end
 
-    send_encrypted(client, key, resp:get())
+    envelope.reply(client, key, resp:get())
 
-    -- Loop back for next request on this keep-alive connection
+    -- a web reply said "Connection: close"; a bare frame loops back for
+    -- the next request on this keep-alive connection
+    if not envelope.keep_alive then return end
     end -- while true (keep-alive loop)
 end
 
@@ -8384,8 +8532,11 @@ local function main()
             -- callers held while the cycle waited on its own requests
             local held = ctimer.deferred
             ctimer.deferred = {}
+            -- the whole record is handed on, not chosen fields of it: a
+            -- copy that named first4 and packet once dropped the envelope
+            -- (how to answer) when it was added, 2026-10-08
             for _, d in ipairs(held) do
-                start_client(d.sock, {first4 = d.first4, packet = d.packet})
+                start_client(d.sock, d)
             end
             rt.last_sync = now
 

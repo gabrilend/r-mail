@@ -48,6 +48,36 @@ caller.  JSON bodies use `Content-Type: application/json`.
 
 Limits: a frame is 28 bytes to 64 MiB; a request body over 50 MB is refused.
 
+### A frame sent from a web page
+
+A web page cannot put bare bytes on a connection: the browser always
+writes a request line and headers in front of what the page sends, and
+the page can neither remove nor reorder them.  So a page sends its frame,
+all of it including the 4-byte length, as the body of a plain web POST:
+
+```
+POST / HTTP/1.1\r\n            <- written by the browser
+Host: ...\r\n
+Content-Length: 4 + frame length\r\n
+\r\n
+[4 bytes length][nonce][ciphertext + tag]   <- the frame, unchanged
+```
+
+The daemon tells the two apart by the first byte of the connection.  A
+legal frame length (28 bytes to 64 MiB) always starts with a byte from
+0x00 to 0x04; a web request starts with a capital letter, 0x41 or above.
+For a POST it skips the headers, checks that the declared Content-Length
+is exactly 4 plus the frame's own length (refused with `400` if not), and
+then reads the frame like any other: the same trial decryption, the same
+endpoints, nothing extra allowed.  The sealed answer comes back as the
+body of a `200` web reply, and the connection closes.
+
+A page sending this way has to hold a contact's token to seal the frame.
+A page served over `https://` may only send to an `http://` address on
+the same machine (`localhost`), by the browsers' rule against mixing
+secure and insecure content.  Tested by
+`scripts/test-frame-in-web-request.sh`.
+
 Nothing protects against replay: a recorded frame stays valid and can be
 sent again later (a `/delete`, an `/update-address`, or a `/deliver` of a
 message the receiver has since deleted).
@@ -136,6 +166,10 @@ The phone is sent the whole contacts file, every contact's token included.
 connects — nothing about the mailbox, so it can test a port forward from
 outside without the token.  Used by `validate-router-settings.sh` to test connectivity (it only needs an
 answer).
+
+**Any other web method** (`PUT`, `DELETE`, `OPTIONS`, ...) — answered
+`405 Method Not Allowed` with `Allow: GET, POST`, and logged.  Capital
+letters that are not a request line at all get no answer.
 
 ### Message types
 

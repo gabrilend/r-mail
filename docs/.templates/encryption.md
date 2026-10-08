@@ -81,7 +81,11 @@ rmail's messages carry no name in cleartext. Instead, the receiving daemon tries
 to decrypt the message using each contact's key, one at a time.  (The
 plain-text health check, `GET /`, answers anyone who connects, but only with
 `{"ok":true}`: it says something is listening and nothing about whose
-mailbox it is.)
+mailbox it is.  A message sent from a web page arrives inside the
+browser's own plain web request, whose headers the page cannot remove —
+which browser, and the address of the page that sent it, travel in
+cleartext beside the sealed message.  The message itself is sealed the
+same way; see "A frame sent from a web page" in the protocol guide.)
 
 The "seal" (authentication tag) is what tells it whether decryption worked.
 Here's how that check works: when the sender encrypts, AES-GCM produces a

@@ -18,8 +18,12 @@
 # on alice:
 #
 #   alice calls      answered "busy" at once, sealed with alice's key
+#   alice calls      the same, from a web page: her sealed request inside
+#     again          a POST; the busy answer comes inside a web reply
 #   bob calls        held: answered properly, after the cycle -- not
 #                    refused, not "busy"
+#   bob calls again  the same from a web page: held, then answered inside
+#                    a web reply
 #   afterwards       alice still gets the message; the daemon did not
 #                    back off from her
 #
@@ -95,6 +99,14 @@ os.execute("( " .. arg[1] .. "/deps/lua/bin/lua -e 'package.path=\"" .. arg[1] .
     arg[1] .. "\",\"127.0.0.1\"," .. arg[2] .. ",\"" .. arg[4] ..
     "\") local t0=b.socket.gettime() local s,body=b:request(\"GET\",\"/\") print(s, b.socket.gettime()-t0, body)' > " ..
     bob_out .. " 2>&1 ) &")
+-- and bob again, from a web page: held the same way, and his answer must
+-- come back inside a web reply once the cycle ends
+local bob_web_out = WORK .. "/bob-web.out"
+os.execute("( " .. arg[1] .. "/deps/lua/bin/lua -e 'package.path=\"" .. arg[1] ..
+    "/scripts/lib/?.lua;\"..package.path local fc=require(\"fake-contact\") local b=fc.new(\"" ..
+    arg[1] .. "\",\"127.0.0.1\"," .. arg[2] .. ",\"" .. arg[4] ..
+    "\") local t0=b.socket.gettime() local w,s=b:web_post(\"GET\",\"/\") print(tostring(w), tostring(s), b.socket.gettime()-t0)' > " ..
+    bob_web_out .. " 2>&1 ) &")
 
 local t0 = socket.gettime()
 local status, body = alice:request("POST", "/deliver", '{"type":"chunk_failed"}')
@@ -103,6 +115,18 @@ if status == 503 and body:find('"busy"') and took < 3 then
     print(string.format("ok alice, whom it is dialing, was answered busy at once (%.1fs)", took))
 else
     print(string.format("-- alice was answered %s after %.1fs: %s", tostring(status), took, body))
+end
+
+-- the same call the way a web page has to send it, wrapped in a POST
+-- (scripts/test-frame-in-web-request.sh); the cycle is still waiting
+t0 = socket.gettime()
+local web, inner, wbody = alice:web_post("POST", "/deliver", '{"type":"chunk_failed"}')
+took = socket.gettime() - t0
+if web == 200 and inner == 503 and wbody and wbody:find('"busy"') and took < 3 then
+    print(string.format("ok alice, calling from a web page, was answered busy inside a web reply (%.1fs)", took))
+else
+    print(string.format("-- alice from a web page was answered %s / %s after %.1fs: %s",
+        tostring(web), tostring(inner), took, tostring(wbody)))
 end
 
 alice:wait_for(20, function()
@@ -115,6 +139,18 @@ if bs == "200" and tonumber(btook) and tonumber(btook) >= 2 then
     print(string.format("ok bob was held, then answered properly after the cycle (%.1fs)", tonumber(btook)))
 else
     print("-- bob was not held and answered: " .. line)
+end
+
+alice:wait_for(20, function()
+    local g = io.open(bob_web_out) if not g then return false end
+    local s = g:read("*a") g:close() return s:match("%S+%s+%S+%s+[%d%.]+") ~= nil
+end)
+local g = io.open(bob_web_out); local wline = g and g:read("*a") or ""; if g then g:close() end
+local ww, ws, wtook = wline:match("^(%S+)%s+(%S+)%s+([%d%.]+)")
+if ww == "200" and ws == "200" and tonumber(wtook) and tonumber(wtook) >= 2 then
+    print(string.format("ok bob from a web page was held, then answered inside a web reply (%.1fs)", tonumber(wtook)))
+else
+    print("-- bob from a web page was not held and answered: " .. wline)
 end
 LUA
 while IFS= read -r line; do

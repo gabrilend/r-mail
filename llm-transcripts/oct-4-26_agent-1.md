@@ -1,6 +1,6 @@
 # Conversation Summary: 44efc473-3b08-4771-8b15-67e610ded2ae
 
-Generated on: 2026-10-04 15:28:48
+Generated on: 2026-10-04 17:38:38
 Models: claude-opus-5-5
 
 ## Contents
@@ -14,6 +14,22 @@ Models: claude-opus-5-5
    mailbox after an update. That script is built and tested but not committed.
    Next: tell me what the update script should be, and whether to delete the
    network discovery feature.
+3. 2026-10-04 15:31, after Request 6 - We're finishing today's rmail cleanup:
+   discovery is removed, the service files and guide now come from templates,
+   and everything is committed. Next, decide whether `scripts/` should be the
+   restart script's permanent home; I recommend yes.
+4. 2026-10-04 17:02, after Request 7 - We're cleaning up rmail and planning
+   issue 714, publishing a message as a web page. Everything else is committed;
+   next I need your three answers: which attachments a page gets, the send steps
+   it uses, and encryption.
+5. 2026-10-04 17:13, after Request 8 - We're settling the design for publishing
+   a message as a web page (issue 714), and only encryption is left undecided.
+   Next, pick plain HTTP, HTTPS, the key in the link, or HTTPS plus the key in
+   the link.
+6. 2026-10-04 17:32, after Request 9 - We're designing the "publish a message as
+   a web page" feature, which is now encrypted, with one word code that works on
+   a post-it. Next I need your answers on the word count (I suggest 6) and
+   whether folders wait until later.
 
 --------------------------------------------------------------------------------
 
@@ -1291,6 +1307,528 @@ the main folder:
 Should `scripts/` be its home? I'd recommend it. If yes, I'll move it there in
 the builder, the installer, the ignore rule, the guide and the test, and keep
 your current list.
+
+--------------------------------------------------------------------------------
+
+### User Request 7
+
+> 1. The word list for the addresses: ship a ready-made list with rmail, or
+> build one at install time from the machine's dictionary
+> (/usr/share/dict/words)?
+
+let's ship a ready-made list that users can add to.
+
+> 2. Is publishing part of sending? Does it pass through the same send steps as
+> a normal message, or is it entirely separate, triggered only by to: url?
+
+um, it should probably pass through the same mechanisms. What do you mean? If
+the user opens the webpage, and can see the message and images and
+attachments... Then they aren't encrypting anything right? Could we use like,
+HTTPS or something? Is there another way to keep it encrypted? What did you mean
+by "the same send steps"?
+
+> 3. Private files below to: url: an attach: line applies to every to: line
+> above it in the message. So to: url publishes every file listed after it,
+> including one meant only for a
+>      contact further down. Should rmail guard against that, or is it up to whoever writes the message?
+
+Yeah treat the to: url as a contact, so, only send them the correct attachments
+and such.
+
+
+
+<pasted_content id="c98d">
+$   sudo iptables -D INPUT -p udp -m multiport --dports 8025,8026 -j ACCEPT
+Password:
+[ritz@kuvalu scripts]$ sudo ip6tables -D INPUT -p udp -m multiport --dports
+8025,8026 -j ACCEPT
+[ritz@kuvalu scripts]$ sudo sed -i '/-A INPUT -p udp -m multiport --dports
+8025,8026 -j ACCEPT/d' /etc/iptables/iptables.rules
+/etc/iptables/ip6tables.rules
+[ritz@kuvalu scripts]$ sudo sed -i 's/tcp+udp/tcp /'
+/etc/iptables/iptables.rules
+[ritz@kuvalu scripts]$ sudo iptables -S INPUT
+-P INPUT DROP
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -p udp -m udp --sport 67 --dport 68 -j ACCEPT
+-A INPUT -j LIBVIRT_INP
+-A INPUT -p tcp -m tcp --dport 5619 -m conntrack --ctstate NEW -j ACCEPT
+-A INPUT -p tcp -m multiport --dports 8025,8026 -m conntrack --ctstate NEW -j
+ACCEPT
+-A INPUT -p tcp -m multiport --dports 4362,4462 -m conntrack --ctstate NEW -j
+ACCEPT
+</pasted_content id="c98d">
+
+
+
+
+<pasted_content id="c98d">
+$ grep -n udp /etc/iptables/*.rules
+/etc/iptables/ip6tables.rules:10:#   546 udp     DHCPv6 client replies
+/etc/iptables/ip6tables.rules:21:-A INPUT -p udp -m udp --sport 547 --dport 546
+-j ACCEPT
+/etc/iptables/iptables.rules:31:-A INPUT -p udp -m udp --sport 67 --dport 68 -j
+ACCEPT
+/etc/iptables/iptables.rules:45:-A LIBVIRT_INP -i virbr0 -p udp -m udp --dport
+53 -j ACCEPT
+/etc/iptables/iptables.rules:47:-A LIBVIRT_INP -i virbr0 -p udp -m udp --dport
+67 -j ACCEPT
+/etc/iptables/iptables.rules:49:-A LIBVIRT_OUT -o virbr0 -p udp -m udp --dport
+53 -j ACCEPT
+/etc/iptables/iptables.rules:51:-A LIBVIRT_OUT -o virbr0 -p udp -m udp --dport
+68 -j ACCEPT
+/etc/iptables/iptables.rules:65:-A LIBVIRT_PRT -s 192.168.122.0/24 ! -d
+192.168.122.0/24 -p udp -j MASQUERADE --to-ports 1024-65535
+/etc/iptables/iptables.rules:77:-A LIBVIRT_PRT -o virbr0 -p udp -m udp --dport
+68 -j CHECKSUM --checksum-fill
+/etc/iptables/simple_firewall.rules:9:-A INPUT -p udp -j REJECT --reject-with
+icmp-port-unreachable
+</pasted_content id="c98d">
+
+
+  The phone's local-address field
+
+let's keep it.
+
+>   You moved restart-mailboxes.sh into scripts/
+> Should scripts/ be its home? I'd recommend it. If yes, I'll move it there in
+> the builder, the installer, the ignore rule, the guide and the test, and keep
+> your current list.
+
+yeah
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 7
+
+> The firewall output is right: the rule is gone from the running firewall and
+> from both saved files. The other match, `simple_firewall.rules`, is a separate
+> file that nothing loads.
+>
+> Before recording your 714 answers I want to check one thing: how attachments
+> are shared out among recipients today, since your third answer depends on it.
+
+> Your list is intact (`kuvalu-mail kuvalu-notes`). Moving the restart script's
+> home to `scripts/`; first, every place that names its old location:
+
+> Now the template's header and the test's `--force` case, which used to expect
+> an emptied list:
+
+> All pass. Now rebuilding your copy from the updated template; `--force` should
+> keep your two mailboxes:
+
+> Your list survived the rebuild, and git now ignores the `scripts/` copy.
+> Updating the service guide and the restart issue to the new location:
+
+> Running the templates test (it checks the service guide) and the issue
+> checker, then committing:
+
+*[commit] dc39ac573 in r-mail - The restart script lives in scripts/, and rebuilding it keeps its list of mailboxes*
+
+> Committed and clean. Last, recording your 714 answers in the issue, including
+> the parts that still need a follow-up from you:
+
+The restart script now lives in `scripts/` and is committed, the firewall change
+checks out, and the phone field stays. I've recorded your 714 answers in the
+issue; two of them need a follow-up from you before it's buildable.
+
+## Done
+
+- **Firewall:** UDP is gone from the running rules and from both saved files.
+  The remaining UDP lines are DHCP and the virtual-machine bridge, which need to
+  stay. `simple_firewall.rules` is an old file nothing loads.
+- **Restart script in `scripts/`:** the builder, installer, ignore rule, service
+  guide, test and issue all use the new location.
+  - Rebuilding with `--force` now keeps the list instead of emptying it.
+  - I rebuilt your copy from the updated template. It still lists `kuvalu-mail
+    kuvalu-notes`, git ignores it, and `--check` confirms both services are
+    installed.
+  - Tests pass; committed.
+- **Phone's local-address field:** kept, no change needed.
+
+## Issue 714: what's recorded, and two follow-ups
+
+Recorded: ship a word list that users can add to. Treat `to: url` like a
+contact. The issue stays open, uncommitted, until the rest is settled.
+
+**1. Which attachments `url` gets.** Treating `url` exactly like a contact
+doesn't stop the leak. A contact gets every `attach:` line below its `to:` line,
+including ones listed after a later `to:` line:
+
+```
+to: url
+attach: sunset.jpg
+to: alice
+attach: private.pdf
+```
+
+Here alice gets only `private.pdf`, but `url` gets both, so the private file is
+published. Which do you want?
+
+- **(a)** `url` follows the contact rule, and whoever writes the message puts
+  `to: url` last.
+- **(b)** `url` gets only the files between its own `to:` line and the next
+  `to:` line.
+
+**2. What I meant by "the same send steps."** Sending to a contact goes through
+several steps:
+
+- asking the contact's consent before any file transfers;
+- packing the file and sending it in pieces;
+- keeping a record of who has which version;
+- sending edits to people who already have the old one;
+- treating a removed `to:` or `attach:` line as withdrawing the message or file.
+
+For a web page, some of these fit and some don't:
+
+- **Fit:** choosing which files belong to `url`. Removing the `to: url` line
+  takes the page down. An edit shows up automatically, because the page is read
+  straight from the outbox file each time someone opens it.
+- **Don't fit:** consent (there's nobody to ask) and sending in pieces (a
+  browser downloads a file whole).
+
+So my proposal is that `url` uses the file-choosing and withdrawal rules, and
+skips consent and pieces. Is that what you had in mind?
+
+**3. Encryption.** You're right: over plain HTTP nothing is encrypted. Anyone on
+the path can read both the page and its address: the café wifi, your internet
+provider, any machine the traffic passes through. Plain HTTP was the decision
+made on July 11. The options:
+
+1. **HTTPS with a real certificate.**
+   - Everything between your machine and the reader is encrypted, and the
+     browser shows no warning.
+   - It needs a domain name that points at your machine (a free dynamic-DNS name
+     works; rmail contacts already accept hostnames), plus a certificate from
+     Let's Encrypt, renewed every 90 days.
+   - Let's Encrypt has also announced certificates for a bare IP address. I'm
+     not sure those are generally available yet; I'd have to check.
+2. **HTTPS with a certificate you make yourself.** The traffic is still
+   encrypted, but every visitor gets a browser warning, and has no way to tell
+   your machine from an impostor.
+3. **The key travels in the link itself,** in the part after `#`, which browsers
+   never send to the server. Your machine would store and serve only scrambled
+   text, so even someone who copied the server's files couldn't read them. But
+   the reader's browser has to unscramble it, which needs JavaScript, and the
+   design says no JavaScript ever.
+
+I'd go with option 1: it's the standard way, and it keeps the no-JavaScript
+rule. The cost is setting up a domain name and a renewal job. Do you want that,
+or something else?
+
+--------------------------------------------------------------------------------
+
+### User Request 8
+
+> 1. Which attachments url gets.
+> - (a) url follows the contact rule, and whoever writes the message puts to:
+> url last.
+
+we should try and keep behavior consistent as possible, and re-use as much
+machinery as we can.
+
+
+
+<pasted_content id="c98d">
+> - Fit: choosing which files belong to url. Removing the to: url line takes the
+> page down. An edit shows up automatically, because the page is read straight
+> from the outbox file each
+>     time someone opens it.
+> - Don't fit: consent (there's nobody to ask) and sending in pieces (a browser
+> downloads a file whole).
+</pasted_content id="c98d">
+
+
+Yeah this sounds like the right shape. Though... I heard that Mega.co.nz doesn't
+download a single file, it "streams" to your in-browser storage or whatever, and
+only "downloads" when the file is completely there. Is that right? Is that
+something we could do? Is that better or worse somehow?
+
+> 3. The key travels in the link itself, in the part after #, which browsers
+> never send to the server. Your machine would store and serve only scrambled
+> text, so even someone who
+>      copied the server's files couldn't read them. But the reader's browser has to unscramble it, which needs JavaScript, and the design says no JavaScript ever.
+
+Tell me about this? We'd have like a link like
+ritzmenardi.com/rmail/outbox#12345-butts and a user would click on it, and
+12345-butts would never get sent to ritzmenardi.com, it'd stay on their
+computer. What happens next? We go to http://www.ritzmenardi.com/rmail/outbox/
+and, do what? deliver the whole outbox? Maybe we'd do outbox/message-to-sarah or
+something instead, so the name of the message is cleartext... not ideal... so
+okay maybe instead we just do the outbox, and then we sent the user a page with
+some javascript. When it loads on their computer, they'd, what, automatically
+have the token applied to the javascript somehow? Can it do that? And what would
+we do after that if it's just a generic "decrypter" system in javascript, we'd
+also have to send the encrypted file right, and it'd decrypt it for us? Is that
+the right shape?
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 8
+
+> I'm recording your two decisions in issue 714, then answering the Mega
+> question and walking through the key-in-the-link idea.
+
+Issue 714 now records both decisions: `url` follows the contact rule for
+attachments, and it reuses the contact machinery except consent and sending in
+pieces. Encryption is the one question left. The issue stays open and
+uncommitted until you settle it.
+
+## MEGA and "streaming" downloads
+
+Yes, that's roughly what MEGA does, and it does it because of encryption. MEGA's
+servers hold only scrambled files; the key is in the link, after the `#`. So the
+browser has to do the unscrambling:
+
+1. The page's script fetches the encrypted file in pieces.
+2. It decrypts each piece.
+3. It keeps the decrypted pieces in browser storage.
+4. Once all pieces are there, it hands the assembled file to the browser to
+   save.
+
+That's the "only downloads when it's completely there" you noticed. It's the
+same idea as rmail's own attachment pieces, run inside the browser.
+
+**Better or worse?** It depends on whether the file is encrypted:
+
+- **Not encrypted (plain HTTP or HTTPS):** an ordinary download is better. The
+  browser writes the file straight to disk as it arrives, can resume an
+  interrupted download (it asks the server for just the missing part), and needs
+  no script.
+- **Encrypted with the key in the link:** MEGA's way is the only way, since only
+  the browser can decrypt. Its costs: it needs JavaScript, very large files
+  strain the browser's memory and storage, and the browser can't resume by
+  itself unless the script handles it.
+
+So it isn't something to add on its own. It comes with the key-in-the-link
+design.
+
+## How the key in the link would work
+
+Your shape is close. Three corrections: the server sends one message, not the
+whole outbox; the path doesn't need to name the message; and yes, the script can
+read the key.
+
+Say the link is:
+
+```
+http://ritzmenardi.com:8028/amber-falcon-violet-tundra#k3Jq9xWz...
+```
+
+1. **The part before `#`** (`amber-falcon-violet-tundra`) goes to the server.
+   It's the random-words address 714 already plans, so it says nothing about the
+   message: no "message-to-sarah". It only tells the server which published
+   message is wanted.
+2. **The part after `#`** never leaves the reader's computer. Browsers don't
+   send it, and it doesn't appear in your server's logs.
+3. **The server answers with two things:**
+   - a small page that's the same for every published message (the "generic
+     decrypter" you described);
+   - that one message's encrypted text, at an address like
+     `/amber-falcon-violet-tundra/data`.
+
+   Never the whole outbox: sending everything would expose every other message's
+   size and existence, and waste bandwidth.
+4. **The page's script reads the key.** Browsers make the part after `#`
+   available to the page's script (`window.location.hash`).
+5. **The script decrypts.** It fetches the encrypted text and unscrambles it
+   with the browser's built-in cryptography. Browsers include AES-GCM, the same
+   cipher rmail uses between mailboxes. It then shows the message.
+   - Images are decrypted the same way and shown in place.
+   - Attachments are decrypted MEGA-style, then offered as a save.
+6. **The key is created when you publish.** rmail makes a fresh random key for
+   that message, encrypts the message with it, and writes the full link, `#`
+   part included, into the `URL:` line of your outbox file. The key exists only
+   on your machine and inside the link.
+
+About the key itself: `12345-butts` would be far too short; someone could guess
+it. A real key is about 128 bits of randomness, around 22 characters like
+`k3Jq9xWz...`. It could also be made of words, like the address: about 12 words
+from a 2,000-word list.
+
+## What each choice protects against
+
+| Threat | Plain HTTP | HTTPS | Key in link | HTTPS + key in link |
+|---|---|---|---|---|
+| Someone watching the network (café wifi, internet provider) reads the message | yes, readable | protected | protected | protected |
+| Someone copies files off your machine and reads published messages | readable | readable | protected | protected |
+| Someone on the network changes the page's script to send the key elsewhere | possible | protected | **possible** | protected |
+| Someone gets hold of the full link | readable | readable | readable | readable |
+| Reader has JavaScript turned off | works | works | **can't read** | **can't read** |
+
+The third row is the catch with the key in the link alone. Over plain HTTP,
+someone positioned on the network can swap the decrypting script for one that
+sends the key to them. The key in the link stops anyone who only watches the
+traffic, but not someone who changes it. Combined with HTTPS, that hole closes,
+and you also get protection against your own disk being copied.
+
+My recommendation, most protection first:
+
+1. **HTTPS plus the key in the link.** Strongest. It needs a domain name and a
+   certificate, and the "no JavaScript, ever" rule gives way for this one
+   decrypting script.
+2. **HTTPS alone.** Keeps the no-JavaScript rule and ordinary downloads.
+   Published messages sit readable on your own machine, which they already do as
+   outbox files.
+3. **Key in the link alone.** No domain or certificate needed, but someone who
+   can tamper with traffic on the way can still steal the key.
+
+Which do you want? If it's one with the key in the link, should "no JavaScript,
+ever" become "no JavaScript except the decrypter"?
+
+--------------------------------------------------------------------------------
+
+### User Request 9
+
+> - Encrypted with the key in the link: MEGA's way is the only way, since only
+> the browser can decrypt. Its costs: it needs JavaScript, very large files
+> strain the browser's memory
+>     and storage, and the browser can't resume by itself unless the script handles it.
+
+Could we... Write the fractional files to disk once we've validated that they're
+confirmed, and only combine them when they've fully arrived? Y'know, like how
+rmail normally functions, except through a browser?
+
+I'm worried about the key being so long. If we have to have TWO keys, one for
+selecting the message, and one for the decryption key... That's gonna be hard to
+write down on a post-it. Which was the point of the url design - someone can use
+it like a QR code where you don't have to install rmail to download things from
+someone who is serving from there.
+
+>      Never the whole outbox: sending everything would expose every other message's size and existence, and waste bandwidth.
+
+well no, it'd only decrypt the messages one at a time so you'd only be able to
+see one. But you're right about wasting bandwidth and such, and for large
+mailboxes it could be a problem.
+
+> 1. HTTPS plus the key in the link. Strongest. It needs a domain name and a
+> certificate, and the "no JavaScript, ever" rule gives way for this one
+> decrypting script.
+
+can't do HTTPS because certificate...
+
+> 3. Key in the link alone. No domain or certificate needed, but someone who can
+> tamper with traffic on the way can still steal the key.
+
+I guess we gotta note that limitation. We'll address limitations when we're
+feature-complete. I think we gotta be able to find a way to solve this! Maybe...
+Maybe the user could be instructed to add #12345-butts to the end of the url? Or
+if there isn't a # attached to the link, the user could get a pop-up by the
+decrypter saying "yo what's the code" or something?
+
+> Which do you want? If it's one with the key in the link, should "no
+> JavaScript, ever" become "no JavaScript except the decrypter"?
+
+yeah, the url kinda needs javascript.
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 9
+
+> I'm recording these decisions in issue 714 first, and the sections the change
+> overturns. The earlier design assumed no JavaScript and plain downloads in
+> several places.
+
+Issue 714 now records all of this. Two questions remain before it can be built:
+how many words, and how folders work. The file stays uncommitted until it's
+complete.
+
+## Saving pieces to disk, rmail-style, in the browser
+
+Yes, and it maps closely onto how rmail already works. Browsers give each
+website a private storage area on the reader's disk, called the Origin Private
+File System. It's in current Firefox, Chrome and Safari. The page's script can
+write files there, but it can't touch the reader's own folders. So the decrypter
+would:
+
+1. **Fetch one piece.** Each piece is encrypted on its own.
+2. **Check it by decrypting it.** The cipher rmail uses, AES-GCM, adds a 16-byte
+   checksum (an authentication tag) to every encrypted piece. If even one bit
+   changed on the way, decryption refuses. So "decrypted" also means "confirmed
+   intact"; no separate checksum is needed.
+3. **Write the decrypted piece to private storage.** It survives a reload, a
+   closed tab or a dropped connection. On the next visit the script sees which
+   pieces it already has and asks only for the missing ones.
+4. **Join the pieces once all are there,** then hand the file to the browser's
+   normal "save" step.
+
+Limits, now noted in the issue:
+
+- the reader needs free space for the file twice, briefly, while the pieces are
+  joined;
+- browsers cap private storage at a share of free disk;
+- a private window may throw everything away when closed.
+
+## One secret instead of two
+
+You don't need two keys. Issue 714 already plans an address made of words that
+alternate typing hands, like `ivory-chair-signal-dormant-visual`. Those words
+can be the only secret. From them the reader's browser works out two things:
+
+- **The address to ask for:** a scrambled form of the words (a hash), which
+  can't be turned back into the words. The server stores each published message
+  under that hash and never learns the words.
+- **The decryption key:** the same words run through a deliberately slow
+  calculation.
+
+So a post-it holds one line:
+
+```
+ritzmenardi.com:8028
+ivory chair signal dormant visual tundra
+```
+
+**Your pop-up idea works.** Opening
+`http://ritzmenardi.com:8028/#ivory-chair-…` decrypts straight away. Opening
+the bare address shows the decrypter with a box asking for the code. A QR code
+can carry both parts in one link; a post-it or a spoken code works too.
+
+**Why the calculation is slow, and why the word count matters more now.**
+Before, the words only had to resist guessing against your server, which can
+refuse a flood of guesses. Now they're the key itself. Someone who copies the
+encrypted file can guess offline, as fast as their hardware allows. A slow
+unlock, about a second per guess on a phone, makes every guess cost them that
+much too. Each word from a list of a few thousand adds roughly 11 bits:
+
+- 5 words: about 2^55 possible codes;
+- 6 words: about 2^66.
+
+With a slow unlock, 6 words puts the code out of reach of guessing. That's the
+open question below.
+
+## "Never the whole outbox"
+
+You're right that sending every message's ciphertext wouldn't let anyone read
+more than the one their code opens. What it would still give away: how many
+messages are published and how big each one is. With hash addresses the question
+goes away anyway, since the browser asks for exactly one message, which it can
+only find if it knows the words.
+
+## Recorded in 714
+
+- **Decisions:** encrypted, with the code in the link or typed into a box; no
+  HTTPS; no JavaScript except the decrypter; one secret; pieces stored on disk
+  in the browser and joined at the end.
+- **Marked as superseded:** the old "Rendering" section (how the page arrives,
+  not what it shows) and "Zip-on-command download mechanics" (the plain-download
+  design).
+- **New "Known limitations" section:**
+  - over plain HTTP, someone who can change traffic on the way can swap the
+    decrypter for one that steals the code;
+  - the space needed twice while joining pieces;
+  - a reader with JavaScript off sees only a plain note.
+
+## Still open
+
+1. **Word count:** 6 words, with an unlock tuned to about a second on a phone?
+   Fewer words is easier to copy down; each word removed makes guessing about
+   2,000 times easier.
+2. **Folders:** the plan shares a folder as a browsable listing plus a
+   `download.zip`. Encrypted, the listing and the zip need another design.
+   Should I design that next, or leave folders until single messages and files
+   work?
 
 --------------------------------------------------------------------------------
 
