@@ -26,6 +26,15 @@
 #   health check     a plain GET / is still {"ok":true}
 #   other methods    PUT is answered 405, naming GET and POST
 #   not a request    capital letters with no request line get silence
+#   neither          an opening byte that is neither a frame length
+#                    (0x00-0x04) nor a capital letter -- a TLS hello,
+#                    spaces, 0x05, lower case, 0xFF -- and web requests
+#                    whose line or headers run past 16 KiB are disregarded
+#                    at once: silence, closed within 2 s, one log line each
+#
+# The neither case: owner, 2026-10-08, "make sure if we receive a different
+# set of initial bits that we disregard it".  Before, 0xFF and lower case
+# were waited on for a request line until the daemon's 10 s timeout.
 #
 # Usage:
 #   scripts/test-frame-in-web-request.sh          # use the enclosing checkout
@@ -126,7 +135,42 @@ check(reply:match("^HTTP/1.1 405"), "a method longer than four letters too", rep
 print("section capital letters that are no request")
 reply = mallory:raw("HELLO THERE\r\n\r\n")
 check(reply == "", "answered with silence", reply:sub(1, 60))
+
+print("section openings that are neither, disregarded at once")
+-- each is sent with the connection left open, so a daemon that waited for
+-- more would hold it until its own timeout (10 s) -- the 2 s bound is what
+-- shows it was disregarded rather than waited on
+local neither = {
+    {"\22\3\1\0",                "a TLS hello (0x16)"},
+    {"    ",                     "spaces (0x20, between the two ranges)"},
+    {"\5\0\0\0",                 "0x05, just past the largest frame length"},
+    {"get / HTTP/1.1\r\n\r\n",   "a lower-case method"},
+    {"\255\255\255\255",         "0xFF, with no line end ever"},
+    {"A1B2\r\n\r\n",             "a capital, but not method-shaped"},
+    {"GET " .. string.rep("x", 17000),
+                                 "a request line with no end inside 16 KiB"},
+    {"GET / HTTP/1.1\r\nX-Long: " .. string.rep("a", 17000) .. "\r\n\r\n",
+                                 "headers that do not end inside 16 KiB"},
+}
+for _, case in ipairs(neither) do
+    local t0 = mallory.socket.gettime()
+    local got = mallory:raw(case[1])
+    local took = mallory.socket.gettime() - t0
+    check(got == "" and took < 2, case[2] .. ": silence, closed at once",
+        string.format("%q after %.1fs", got:sub(1, 40), took))
+end
+web, inner = mallory:web_post("GET", "/")
+check(web == 200 and inner == 200, "the daemon still answers afterwards",
+    tostring(web) .. " / " .. tostring(inner))
 LUA
+
+disregards=$(grep -c "disregarded a connection opening" "$WORK/daemon.log")
+# the eight openings above plus "HELLO THERE"
+if [ "$disregards" -eq 9 ]; then
+    ok "each disregarded opening is one log line (9)"
+else
+    note_fail "expected 9 disregard log lines, found $disregards"
+fi
 
 if grep -q "refused a web PUT request" "$WORK/daemon.log"; then
     ok "the daemon's log says why PUT was refused"

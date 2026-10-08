@@ -168,8 +168,14 @@ outside without the token.  Used by `validate-router-settings.sh` to test connec
 answer).
 
 **Any other web method** (`PUT`, `DELETE`, `OPTIONS`, ...) — answered
-`405 Method Not Allowed` with `Allow: GET, POST`, and logged.  Capital
-letters that are not a request line at all get no answer.
+`405 Method Not Allowed` with `Allow: GET, POST`, and logged.
+
+**Everything else is disregarded** — closed at once with nothing said,
+and one line in the log.  That is: a first byte that is neither a frame
+length (0x00–0x04) nor a capital letter (a TLS hello, lower case, 0xFF,
+anything between); capitals that are not method-shaped (three capitals,
+then a capital or a space); and a web request whose request line and
+headers do not end within 16 KiB.  None of these is waited on.
 
 ### Message types
 

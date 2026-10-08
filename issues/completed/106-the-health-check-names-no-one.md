@@ -48,7 +48,18 @@ other.  A dispatch table on the method then answers:
   body of a `200` web reply so a browser sees a well-formed answer; the
   connection then closes.  It opens nothing a bare frame does not.
 - any other method — `405` with `Allow: GET, POST`, logged.
-- capital letters with no request line — closed, nothing said.
+- everything else — disregarded: closed at once, nothing said, one log
+  line.  The owner: "make sure if we receive a different set of initial
+  bits that we disregard it."  The first byte is looked up in a
+  256-entry table naming one of three kinds (frame 0x00–0x04, web A–Z,
+  neither), and each kind has its entry in a second table.  Web openings
+  must also be method-shaped (three capitals, then a capital or a
+  space), and their request line and headers must end within 16 KiB,
+  read a byte at a time, because luasocket's own line reading has no
+  limit.  Before this, 0x05–0x40 were read as an oversized length
+  (right by accident), and 0xFF or a line with no end were waited on
+  until the daemon's timeout; in the busy-while-sending door the whole
+  daemon waited with them.
 
 Both places that read an opening use it: the main request loop, and the
 code that answers callers while a sync cycle waits (#120).  A caller held
@@ -84,7 +95,10 @@ true.
 - Test: `scripts/test-frame-in-web-request.sh` — bare frames still work
   and keep the connection; a frame in a POST is answered in a web reply
   and a message sent that way lands in the inbox; wrong key, wrong length,
-  other methods and non-requests are refused.  `test-busy-while-sending.sh`
+  other methods and non-requests are refused; eight openings of the
+  "neither" kind (a TLS hello, spaces, 0x05, lower case, 0xFF with no
+  line end, non-method capitals, a 17 KB request line, 17 KB headers)
+  each get silence within 2 seconds and one log line.  `test-busy-while-sending.sh`
   gains a browser-style caller answered busy, and one held and answered
   after the cycle.  `scripts/lib/fake-contact.lua` gains the raw and
   web-POST ways of calling.

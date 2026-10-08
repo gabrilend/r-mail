@@ -2828,8 +2828,31 @@ end
 -- "POST" = 50 4F 53 54 = 1,347,375,956 bytes, over the 64 MiB limit, and was
 -- dropped unread.  Found while planning a feedback box on the HTML docs.
 --
--- What each opening gets (a dispatch table, `by_method`):
---   a length (first byte below 0x41)  the frame, read as always; the answer
+-- The first byte is looked up in a 256-entry table, `opening_of`, which
+-- names one of three kinds; a second table, `by_opening`, says what each
+-- kind gets:
+--   frame    0x00-0x04          a frame length; read as always
+--   web      0x41-0x5A (A-Z)    a web request, if all four bytes are
+--                               method-shaped (three capitals, then a
+--                               capital or a space); else disregarded
+--   neither  every other byte   disregarded at once: closed, nothing said,
+--                               one log line.  Before 2026-10-08 these
+--                               were read as a length (0x05-0x40, too
+--                               large, dropped by the length check -- the
+--                               right result by accident) or waited on for
+--                               a request line that never came (0x5B up,
+--                               up to 10 seconds; 5 in the busy door,
+--                               where the whole daemon waits with it).
+--                               Owner: "make sure if we receive a
+--                               different set of initial bits that we
+--                               disregard it."
+--
+-- A web request's request line and headers together may use at most
+-- WEB_HEAD_LIMIT bytes; one that runs past it is disregarded, so a caller
+-- that never sends a line end cannot make the daemon hold its bytes.
+--
+-- What each web request gets (a dispatch table, `by_method`):
+--   a length (the frame kind above)   the frame, read as always; the answer
 --                                     goes back as a bare frame and the
 --                                     connection may carry more requests
 --   GET                               the plaintext health answer (#106),
@@ -2842,7 +2865,7 @@ end
 --                                     web reply, so a browser sees a
 --                                     well-formed answer, then closed
 --   any other method                  405, naming GET and POST, then closed
---   letters that are no request line  closed with nothing said
+--   letters that are no request line  disregarded: closed, nothing said
 --
 -- A POST opens nothing a bare frame does not: the frame inside still has to
 -- decrypt with a contact's key before anything is done with it.
@@ -2880,14 +2903,41 @@ do
     end
     -- }}}
 
+    -- A browser's request line and headers run to about 400-800 bytes
+    -- (413 measured from Firefox, 2026-10-08); 16 KiB leaves room for long
+    -- cookies and still bounds what one caller can make the daemon hold.
+    local WEB_HEAD_LIMIT = 16384
+
+    -- {{{ local function read_line
+    -- Read one line, a byte at a time, spending from `budget` (a number of
+    -- bytes).  Returns the line without its \r\n and the budget left, or
+    -- false when the connection ended or the budget ran out first.  A byte
+    -- at a time because luasocket's line reading has no limit: it would
+    -- gather bytes until a line end that a hostile caller never sends.
+    local function read_line(sock, budget)
+        local parts = {}
+        while budget > 0 do
+            local ch = sock:receive(1)
+            if not ch then return false end
+            budget = budget - 1
+            if ch == "\n" then
+                return (table.concat(parts):gsub("\r$", "")), budget
+            end
+            parts[#parts + 1] = ch
+        end
+        return false
+    end
+    -- }}}
+
     -- {{{ local function skip_headers
-    -- Read header lines up to the blank line that ends them.  Returns the
-    -- declared Content-Length (0 when none was declared), or false when the
-    -- connection ended first.
-    local function skip_headers(sock)
+    -- Read header lines up to the blank line that ends them, spending from
+    -- `budget`.  Returns the declared Content-Length (0 when none was
+    -- declared), or false when the connection ended or the budget ran out.
+    local function skip_headers(sock, budget)
         local declared = 0
         while true do
-            local line = sock:receive("*l")
+            local line
+            line, budget = read_line(sock, budget)
             if not line then return false end
             if line == "" then return declared end
             local n = line:lower():match("^content%-length:%s*(%d+)%s*$")
@@ -2940,20 +2990,66 @@ do
         -- }}}
     }
 
+    -- {{{ local function disregard
+    -- Neither a frame nor a web request: say nothing, so a caller probing
+    -- the port learns no more than that the connection closed.  `why` is
+    -- words for the log.
+    local function disregard(first4, why)
+        log("disregarded a connection opening %02X %02X %02X %02X: %s",
+            first4:byte(1), first4:byte(2), first4:byte(3), first4:byte(4), why)
+    end
+    -- }}}
+
+    -- the kind each possible first byte names (see the table above)
+    local opening_of = {}
+    for b = 0, 255 do
+        if b <= 0x04 then                 opening_of[b] = "frame"
+        elseif b >= 0x41 and b <= 0x5A then opening_of[b] = "web"
+        else                              opening_of[b] = "neither" end
+    end
+
+    local by_opening = {
+        -- {{{ frame
+        -- 0x00-0x04: a frame's length.  The length check where the frame
+        -- is read still refuses 0x04xxxxxx above 64 MiB, and below 28.
+        frame = function(sock, first4)
+            return first4, envelope.bare
+        end,
+        -- }}}
+
+        -- {{{ web
+        -- A-Z: a web request, if the opening is method-shaped and the
+        -- request line and headers end inside WEB_HEAD_LIMIT.
+        web = function(sock, first4)
+            -- "GET ", "POST", "PUT ", "HEAD", "DELE"(TE): three capitals,
+            -- then a capital or the space after a three-letter method
+            if not first4:match("^%u%u%u[%u ]$") then
+                return disregard(first4, "a capital letter, but not a web method")
+            end
+            local rest, budget = read_line(sock, WEB_HEAD_LIMIT - 4)
+            local method = rest and (first4 .. rest):match("^(%u+) %S+ HTTP/%d")
+            if not method then
+                return disregard(first4, "no web request line within " .. WEB_HEAD_LIMIT .. " bytes")
+            end
+            local declared = skip_headers(sock, budget)
+            if not declared then
+                return disregard(first4, "the web headers did not end within " .. WEB_HEAD_LIMIT .. " bytes")
+            end
+            local answer = by_method[method] or refuse_method
+            return answer(sock, declared, method)
+        end,
+        -- }}}
+
+        -- {{{ neither
+        neither = function(sock, first4)
+            return disregard(first4, "neither a frame length (00-04) nor a web method (A-Z)")
+        end,
+        -- }}}
+    }
+
     -- {{{ function unwrap_web_request
     function unwrap_web_request(sock, first4)
-        -- a frame length: 0x00-0x04 when legal; anything else under 0x41
-        -- fails the length check where the frame is read, as before
-        if first4:byte(1) < 0x41 then return first4, envelope.bare end
-        local rest = sock:receive("*l")
-        if not rest then return end
-        local method = (first4 .. rest):match("^(%u+) %S+ HTTP/%d")
-        -- letters, but no request line: nothing to answer in either language
-        if not method then return end
-        local declared = skip_headers(sock)
-        if not declared then return end
-        local answer = by_method[method] or refuse_method
-        return answer(sock, declared, method)
+        return by_opening[opening_of[first4:byte(1)]](sock, first4)
     end
     -- }}}
 end
