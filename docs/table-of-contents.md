@@ -27,6 +27,14 @@ paths), so the links below point at the templates, which are the source.
   - [QA test checklist](../q-a-tests.md)
 - **Design**
   - [Shared text editor design](../clients/editor-design.md) (the thin clients)
+- **Skills** (`.claude/skills/`, carried with the project; copy a folder
+  into another project's `.claude/skills/` to use it there)
+  - [rmail integration](../.claude/skills/rmail-integration/SKILL.md) — how
+    other programs and projects send to an rmail mailbox: outbox files, a
+    local relay for web pages (the docs feedback box), a contact's own
+    sealed page, hooks
+    - [rmail-seal.js](../.claude/skills/rmail-integration/rmail-seal.js) —
+      the browser-side sealer, tested by `scripts/test-browser-sealer.sh`
 - **Notes** (`notes/`)
   - [Audit of the documents against the code, 2026-10-02](../notes/audit-docs-against-code-2026-10-02.md)
   - [Handoff 2026-09-22: names, timers, and the two mailboxes](../notes/handoff-2026-09-22-names-timers-and-mailbox-hooks.md)
