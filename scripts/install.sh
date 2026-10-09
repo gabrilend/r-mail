@@ -50,8 +50,12 @@
 #       independently; only the missing tool is compiled.
 #
 #   PHASE 9 — Security probe
-#     • Confirm router-side insecure-NAT findings from phase 7 and
-#       produce a consolidated end-of-run warning.
+#     • Ask the router whether UPnP or NAT-PMP answers (opening nothing)
+#       and warn the person installing for each that does.  This is the
+#       only place rmail checks the router: the daemon itself never
+#       probes it at start-up (#411, 2026-10-08 -- the owner: "It's up to
+#       the user to verify that functionality is off when they install
+#       rmail, which will do the probing test").
 #
 #   SERVICE SETUP
 #     • Detect the init system (systemd, runit, openrc, NixOS) and

@@ -299,7 +299,7 @@ If you cannot access your router's admin panel (shared housing, restrictive ISP,
 
 3. Restart rmail. It tries UPnP first, then NAT-PMP. If successful, the mapping is renewed every 30 minutes.
 
-**Security check:** On every startup — even with `auto_port_forward` off — rmail checks your router for UPnP and NAT-PMP. The check is not passive: when UPnP answers, rmail adds a test port mapping (a port from 60000 up) and removes it again. The check needs `upnpc` and `natpmpc` installed and does nothing without them. If either protocol is available (meaning your router has insecure protocols active), rmail sends a one-time warning message to your contacts (not your own devices) advising them not to send sensitive information until you fix it, and a later notice once it is resolved.
+**Checking your router:** the daemon leaves your router alone unless `auto_port_forward = true` asks it to open the port; it never probes the router at start-up. Whether your router has UPnP or NAT-PMP switched on is checked once, by `scripts/install.sh` at the end of installing: it asks the router whether either protocol answers (it opens nothing) and prints a warning to you if one does. Switching them off is then yours to do, in the router's own settings — see below. (Until 2026-10-08 the daemon checked at every start, opened a test port to do it, and messaged your contacts when the router was open; a contact warned that way is not told anything more.)
 
 **Disabling UPnP/NAT-PMP on your router** (recommended):
 

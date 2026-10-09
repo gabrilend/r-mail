@@ -1951,14 +1951,9 @@ function nat.get_local_ip()
     return ip
 end
 
-function nat.try_upnp_probe()
-    if not tools.upnpc then return false end
-    local handle = io.popen(shell_quote(tools.upnpc) .. " -s 2>/dev/null")
-    if not handle then return false end
-    local output = handle:read("*a")
-    handle:close()
-    return output and output:match("Found valid IGD") ~= nil
-end
+-- The "does the router answer UPnP / NAT-PMP at all?" probes went with
+-- the start-up security check (#411, 2026-10-08); the installer asks the
+-- same two questions once, at install.
 
 function nat.try_upnp_add(local_ip, port)
     local cmd = string.format(
@@ -1974,15 +1969,6 @@ end
 
 function nat.try_upnp_delete(port)
     os.execute(string.format("%s -d %d TCP 2>/dev/null", shell_quote(tools.upnpc), port))
-end
-
-function nat.try_natpmp_probe()
-    if not tools.natpmpc then return false end
-    local handle = io.popen(shell_quote(tools.natpmpc) .. " 2>/dev/null")
-    if not handle then return false end
-    local output = handle:read("*a")
-    handle:close()
-    return output and output:match("Public IP") ~= nil
 end
 
 function nat.try_natpmp_add(port, lifetime)
@@ -2039,100 +2025,15 @@ function nat.create_mapping(port)
     return nil
 end
 
-function nat.security_check(my_name)
-    local contacts_for_migrate = load_contacts()
-    local warned = unmigrate_hashed_keys(
-        load_state("nat_security_warned.json"), contacts_for_migrate)
-
-    local vulnerabilities = {}
-
-    -- probe UPnP
-    if nat.try_upnp_probe() then
-        local test_port = 60000 + (os.time() % 4000)
-        local local_ip = nat.get_local_ip()
-        if local_ip and nat.try_upnp_add(local_ip, test_port) then
-            nat.try_upnp_delete(test_port)
-            vulnerabilities[#vulnerabilities + 1] = "UPnP"
-        end
-    end
-
-    -- probe NAT-PMP
-    if nat.try_natpmp_probe() then
-        vulnerabilities[#vulnerabilities + 1] = "NAT-PMP"
-    end
-
-    -- if no longer vulnerable but we previously were, send "fixed" notice
-    if #vulnerabilities == 0 then
-        if file_exists(STATE .. "/nat_security_vulnerability_active") then
-            local contacts = load_contacts()
-            local recipients = {}
-            for name, c in pairs(contacts) do
-                if name ~= my_name and not c.own and warned[name] then
-                    recipients[#recipients + 1] = name
-                end
-            end
-            if #recipients > 0 then
-                local header = ""
-                for _, name in ipairs(recipients) do
-                    header = header .. "to: " .. name .. "\n"
-                end
-                local body = "RESOLVED: My router's insecure protocols (UPnP/NAT-PMP) " ..
-                    "have been disabled. The security risk I warned you about earlier " ..
-                    "has been addressed. You can resume sending sensitive information " ..
-                    "through this system.\n\n" ..
-                    "This is an automated message from rmail's security check."
-                write_file(OUTBOX .. "/SECURITY-RESOLVED-nat-fixed", header .. "\n" .. body)
-                log("security resolved notice sent to %d contact(s)", #recipients)
-            end
-            os.remove(STATE .. "/nat_security_vulnerability_active")
-            -- reset warned set so new vulnerability triggers fresh warnings
-            warned = {}
-            save_state("nat_security_warned.json", warned)
-        end
-        return
-    end
-
-    local proto_list = table.concat(vulnerabilities, " and ")
-    log("WARNING: router has %s enabled -- this is a security risk", proto_list)
-    log("WARNING: any device on your network can open ports without authentication")
-    log("WARNING: disable %s in your router settings", proto_list)
-
-    -- mark vulnerability as active
-    write_file(STATE .. "/nat_security_vulnerability_active", os.date("%Y-%m-%d %H:%M:%S") .. "\n")
-
-    -- send warning to contacts not yet warned
-    local contacts = load_contacts()
-    local recipients = {}
-    for name, c in pairs(contacts) do
-        if name ~= my_name and not c.own and not warned[name] then
-            recipients[#recipients + 1] = name
-        end
-    end
-
-    if #recipients > 0 then
-        local header = ""
-        for _, name in ipairs(recipients) do
-            header = header .. "to: " .. name .. "\n"
-        end
-        local body = "WARNING: My router has " .. proto_list .. " enabled. " ..
-            "These protocols allow any device on my network to open ports on " ..
-            "my router without authentication. This is a known security risk " ..
-            "-- malware commonly exploits this to bypass firewalls.\n\n" ..
-            "Until I disable these protocols on my router, treat my connection " ..
-            "as potentially compromised. Please do not send me sensitive or " ..
-            "private information through this system.\n\n" ..
-            "Please remind me to fix this.\n\n" ..
-            "This is an automated message from rmail's security check."
-        write_file(OUTBOX .. "/SECURITY-WARNING-insecure-nat", header .. "\n" .. body)
-        log("security warning sent to %d new contact(s)", #recipients)
-        -- Record presence only.  Lookup is a truthy check, so no need
-        -- to store a timestamp here.
-        for _, name in ipairs(recipients) do
-            warned[name] = true
-        end
-        save_state("nat_security_warned.json", warned)
-    end
-end
+-- The start-up security check lived here until 2026-10-08: at every start
+-- it opened a test port through UPnP, asked whether NAT-PMP answered, and
+-- when either did wrote SECURITY-WARNING-insecure-nat to every contact
+-- (and SECURITY-RESOLVED-nat-fixed once both were closed again).  Removed,
+-- not switched off (#411): the owner wants the router left alone unless
+-- the config asks to open the port, and the probe to happen once, at
+-- install, reported to the person installing (scripts/install.sh, its
+-- last step).  The marks it left in .state/ (nat_security_vulnerability_active,
+-- nat_security_warned.json) are no longer read or written.
 
 -- ============================================================
 -- HTTP server (raw TCP via luasocket)
@@ -8279,8 +8180,21 @@ local function init_runtime()
 
     -- Router work, now that the port is actually ours.  Slow on a router
     -- that does not answer, and nothing above depends on it.
+    --
+    -- Only what the config asks for.  Until 2026-10-08 a security check
+    -- ran here at every start, asked or not: it opened a test port on the
+    -- router through UPnP, asked NAT-PMP whether it answered, and messaged
+    -- every contact when either did.  Removed (#411).  The owner: "It's up
+    -- to the user to verify that functionality is off when they install
+    -- rmail, which will do the probing test.  But we don't want to do it
+    -- on startup."  The installer's last step is that probe.  Marks an
+    -- old run left in .state/ (nat_security_*) are left alone; contacts it
+    -- warned are told nothing more.
+    --
+    -- cleanup_old_mapping runs only on a mapping this mailbox recorded
+    -- (.state/nat_mapping.json, written when auto_port_forward opened the
+    -- port); with none recorded it runs no router program.
     pcall(nat.cleanup_old_mapping)
-    pcall(nat.security_check, rt.my_name)
 
     if cfg.auto_port_forward then
         log("attempting automatic port forwarding...")

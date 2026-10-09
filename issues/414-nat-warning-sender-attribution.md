@@ -2,10 +2,15 @@
 
 ## Current behavior
 
-When rmail detects insecure NAT-PMP/UPnP on a sender's router, it sends a
-warning to contacts. However, the warning message doesn't identify who
-sent it — recipients see the warning but don't know which contact has
-the security issue.
+Since 2026-10-08 (#411) rmail sends no such warning at all: the daemon no
+longer checks the router at start-up, and the installer's check reports
+only to the person installing.  Nothing is left for this issue to change
+unless a warning to contacts comes back.
+
+Before that: when rmail detected insecure NAT-PMP/UPnP on a sender's
+router, it sent a warning to contacts. However, the warning message didn't
+identify who sent it — recipients saw the warning but didn't know which
+contact had the security issue.
 
 ## Intended behavior
 

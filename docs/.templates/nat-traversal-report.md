@@ -348,20 +348,18 @@ The mapping is created for the port specified in your mailbox's `config` file (`
 
 (A UPnP mapping has no `lifetime` field.)
 
-### Security check: UPnP/NAT-PMP detection
+### Checking the router: at install, not at start-up
 
-This is the more important feature. On every startup, regardless of the `auto_port_forward` setting, rmail checks for UPnP and NAT-PMP on the local network, using the `upnpc` and `natpmpc` programs (without them installed, the check does nothing):
+Whether the router has UPnP or NAT-PMP switched on matters even if rmail never uses them — any other device or malware on the LAN can. It is checked once, by `scripts/install.sh`, as its last step, using the `upnpc` and `natpmpc` programs (without them, the step says it was skipped):
 
-1. UPnP: if the router answers discovery, rmail **adds a test mapping** (a port from 60000 to 63999, chosen from the clock) and deletes it again.  UPnP counts as enabled only if adding it worked.  So the check is not passive: it opens a port on your router for a moment, every start.
-2. NAT-PMP: a request to the default gateway; an answer counts as enabled.
+1. UPnP: does a router answer discovery (`upnpc -s`)?  Nothing is opened.
+2. NAT-PMP: does the default gateway answer a NAT-PMP request (`natpmpc`)?
 
-If either is enabled, the router has these protocols on. This is a security concern even if rmail isn't using them — any other device or malware on the LAN can. So rmail:
+For each that answers, the installer prints a boxed warning to the person installing, advising them to switch it off in the router's own settings.  It tells no contact.
 
-- Logs a warning: "router has UPnP enabled -- this is a security risk" (or NAT-PMP, or both).
-- Notifies contacts — not your own devices (`own = true`) — with a one-time advisory message.
-- Once the protocols are off again, sends the contacts it warned a `SECURITY-RESOLVED` message saying so.
+The daemon itself never probes the router.  It runs a router program only when `auto_port_forward = true` asks it to open the port, and at start-up to remove an opening it recorded itself in `.state/nat_mapping.json`.
 
-The security check runs on every startup and cannot be disabled. It remembers whom it warned, to avoid repeatedly notifying contacts.
+Until 2026-10-08 (#411) the daemon checked at every start, whatever the settings: it opened a test port through UPnP (60000–63999) to see whether that worked, asked NAT-PMP, and when either was open it logged a warning, wrote a `SECURITY-WARNING-insecure-nat` message to every contact except the owner's own devices, and later a `SECURITY-RESOLVED-nat-fixed` once both were closed.  The owner removed it: the router is left alone unless the config asks, and checking it is the user's job, at install.  Contacts warned before then are told nothing more, and the marks it left in `.state/` (`nat_security_vulnerability_active`, `nat_security_warned.json`) are no longer used.
 
 
 ## Part 8: Recommendations
@@ -378,9 +376,9 @@ Maybe you're on a shared network, or your ISP manages the router, or you just do
 
 But understand what you're enabling: if UPnP/NAT-PMP isn't already active on the router, `auto_port_forward` won't work (rmail doesn't enable them on the router, it only uses them if they're already on). If they ARE already active, any device on the LAN could already be exploiting them. rmail using them too doesn't make things worse.
 
-### The security check exists for awareness
+### The installer's router check exists for awareness
 
-The UPnP/NAT-PMP detection on startup isn't about rmail specifically. It's about making sure you know the state of your network. If you're running a peer-to-peer messaging daemon, you probably care about security. The check exists so you can't accidentally run on a network with these protocols enabled without knowing about it. Think of it as a network hygiene audit that happens to run at startup.
+The UPnP/NAT-PMP check at install isn't about rmail specifically. It's about making sure you know the state of your network before you rely on it. It runs once, when you are there to read it, and changes nothing; switching the protocols off is yours to do in the router. To check UPnP again later, run `scripts/validate-router-settings.sh <mailbox>`; it does not test NAT-PMP, so re-running the installer is the way to ask both.
 
 ### If you want the best security
 
