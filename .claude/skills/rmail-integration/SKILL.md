@@ -28,7 +28,7 @@ project copies the folder into its own `.claude/skills/`.
   HTTP-style request (`POST /deliver`, a JSON body).  The receiver tries
   each contact's key until one opens the frame; that contact is the
   sender.  No name travels in the clear.  Encryption is just math: a
-  browser does it with its built-in WebCrypto as well as rmail does.
+  page can do it in plain JavaScript as well as rmail does.
 - **Web wrapping** — a browser cannot send bare bytes; it always writes a
   request line and headers first.  So a page sends the frame as the body
   of a plain web POST.  rmail tells the two apart by the first byte (a
@@ -45,7 +45,7 @@ project copies the folder into its own `.claude/skills/`.
  │ page: text box, checkboxes│              │ contacts:                 │
  │ delivery script:          │  web POST    │   blog.token  = "…"       │
  │   website token           │ ───────────► │   blog.listen = true      │
- │   seal → frame (WebCrypto)│  body=frame  │ → plain message accepted  │
+ │   seal → frame (plain JS) │  body=frame  │ → plain message accepted  │
  └──────────────────────────┘              │ → anything else refused   │
                                            │ inbox/<subject>           │
                                            │ on_receive hook checks it │
@@ -109,49 +109,74 @@ script is separate from it (rule: generating kept apart from sending).
 
 ## The delivery script
 
-`rmail-seal.js` exports `sendMessage(url, token, subject, text)`:
-derive the key, build `POST /deliver` with JSON `{type: "message",
-subject, body, message_id}`, seal it, and POST the frame with
-`Content-Type: text/plain`.  `r-mail/scripts/test-browser-sealer.sh` runs
-that very file against a real daemon (message lands and is recorded as
-from the right contact; multi-byte letters arrive whole; a wrong token
-gets nothing).
+`rmail-seal.js` is loaded with a plain `<script src>` (not a module: a
+page opened as a file cannot load modules) and offers
+`RMAIL_SEAL.sendMessage(url, token, subject, text)`: build `POST
+/deliver` with JSON `{type: "message", subject, body, message_id}`, seal
+it, and POST the frame with `Content-Type: text/plain`.
+
+**It does the encryption arithmetic itself, on every page.**  Browsers
+have AES-GCM and SHA-256 built in (`crypto.subtle`), and
+`crypto.randomUUID`, but give them only to *secure* pages — https, this
+machine, a local file.  A page served over plain http from a server gets
+neither: `crypto.subtle` is simply undefined.  So the file carries
+SHA-256, AES-256 and GCM written out in plain JavaScript (copied from the
+W client project's `docs-seal.js`, which offered it), and takes only
+random numbers from the browser (`crypto.getRandomValues`, which every
+page gets).  One way of sealing on every page, not a built-in lock with a
+hand-written one behind it.
+
+`r-mail/scripts/test-browser-sealer.sh` checks that very file: the
+standards' published answers (SHA-256 of "abc"; AES-256-GCM test cases
+13 and 14); byte-for-byte agreement with Node's built-in cipher for
+lengths 0 to 4097; delivery to a real daemon from Node (recorded as from
+the right contact, multi-byte letters whole, a wrong token gets nothing);
+and delivery from **Firefox on a page served over plain http** from the
+machine's home-network address, where Firefox reports the page insecure
+and the built-in lock absent.
 
 Facts it depends on:
 
 - `Content-Length` inside the sealed request counts **bytes**, not
   characters (`TextEncoder`, not `string.length`).
-- WebCrypto's AES-GCM appends the 16-byte tag to the ciphertext: the
-  order rmail expects.
-- A fresh random `message_id` per message.  The id is how rmail knows a
-  re-sent frame is the same message: a replayed frame changes nothing.
+- AES-GCM's 16-byte tag goes after the ciphertext: the order rmail
+  expects.
+- A fresh random `message_id` per message (made from
+  `getRandomValues`).  The id is how rmail knows a re-sent frame is the
+  same message: a replayed frame changes nothing.
 - The answer: rmail sends the sealed answer back as the body of a web
   reply but no `Access-Control-Allow-Origin` header, so a browser page
   must use `mode: "no-cors"` and learns only that an answer came, not
-  whether delivery succeeded.  (A test outside a browser passes `"cors"`
-  and opens the answer with `openReply`.)
+  whether delivery succeeded.  A network failure, or a mailbox that
+  refused the frame and closed, does reject the promise.
 - The browser's own headers (`User-Agent`, `Origin` — the page's
   address) travel in plain text beside the sealed message.
 
-## Reaching the mailbox from a public website
+## Reaching the mailbox
 
-A page served over `https://` may only send to `https://` addresses,
-except `localhost`; a browser blocks the rest as mixed content.  rmail
-speaks plain TCP on its port, with no TLS.  So for a public site:
+rmail speaks plain TCP on its port, with no TLS, and the message is
+sealed either way.  Which address a page may send to depends on how the
+page itself is served:
 
-- Put an https web server in front of the mailbox's port on its host (a
-  reverse proxy: e.g. `https://wow.ritzmenardi.com/feedback` → the
-  mailbox's port on that machine).  The proxy passes the POST through,
-  and rmail reads the web wrapping as above; the path in the request line
-  is ignored.  The proxy must pass the body unchanged with its
-  `Content-Length` (rmail refuses a declared length that does not match
-  the frame).  **Not yet tested** — test with the site's real proxy
-  before relying on it.
-- A page opened on the same machine (`http://localhost…`, or a file) can
-  POST to `http://127.0.0.1:<port>/` directly.
+- **A site served over plain `http://`** (the owner's choice for the W
+  client's docs: "no https, not just local") — the page POSTs straight
+  to `http://<mailbox host>:<port>/`.  Nothing in between.  This is the
+  case the hand-written arithmetic exists for, and the one the Firefox
+  test exercises.
+- **A page on the same machine** (`http://localhost…`, or a file) — the
+  same, to `http://127.0.0.1:<port>/`.
+- **A site served over `https://`** — a browser blocks an https page from
+  sending to a plain `http://` address (mixed content), except
+  `localhost`.  Such a site needs an https web server in front of the
+  mailbox's port (a reverse proxy: e.g. `https://example.org/feedback` →
+  the mailbox's port).  The proxy passes the POST through, and rmail reads
+  the web wrapping as above; the path in the request line is ignored.
+  The proxy must pass the body unchanged with its `Content-Length`
+  (rmail refuses a declared length that does not match the frame).
+  **Not yet tested.**
 - Newer Chrome asks the visitor's permission before a public site reaches
-  `localhost` or the home network; that does not affect a public mailbox
-  address behind a proxy.
+  `localhost` or the home network; a mailbox at a public address is not
+  affected.
 
 ## Checking what arrives
 
@@ -207,7 +232,8 @@ The second diagram has its arrows backwards.
 1. #420 is built in the receiving rmail (until then: do not go live).
 2. A contact for this site alone, marked listen-only, no address.
 3. The delivery script uses `rmail-seal.js` with that contact's token.
-4. A public site: an https proxy in front of the mailbox, tested.
+4. The page can reach the mailbox: plain http straight to its port, or —
+   for a site served over https only — an https proxy in front, tested.
 5. A receive hook that checks every part and refuses with a log line.
 6. A test that sends one message through the whole path and finds it in
    the inbox, and one per refusal: a delete, an edit and an attachment
@@ -221,4 +247,5 @@ The second diagram has its arrows backwards.
 - Should rmail add `Access-Control-Allow-Origin` to its web replies, so
   a page can open the sealed answer and tell the visitor "delivered" (the
   answer is sealed, so the header reveals nothing)?
-- The https proxy path is described, not tested.
+- The https proxy path (for sites served over https only) is described,
+  not tested.
