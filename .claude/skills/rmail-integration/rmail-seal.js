@@ -1,4 +1,4 @@
-// rmail-seal.js — seal one rmail request inside a web page, with a token the viewer supplies
+// rmail-seal.js — seal one rmail message inside a web page and send it to a mailbox
 //
 // Written by hand (2026-10-08) as the reference for "a contact's own page"
 // in SKILL.md beside this file; checked against a real daemon by
@@ -12,10 +12,14 @@
 // send anything.  The rmail daemon unwraps the POST and reads the locked
 // message exactly as if another mailbox had sent it.
 //
-// THE TOKEN NEVER APPEARS IN THE PAGE'S SOURCE.  The owner's rule: contact
-// tokens are not published in web pages.  The viewer types their own
-// token in (or the page reads it from that viewer's own browser storage);
-// someone without a token can do nothing with this file.
+// WHOSE TOKEN.  The token passed in is the website's own: the receiving
+// mailbox has one contact per website, and that contact may send a plain
+// message and nothing else (rmail issue #420, the listen-only contact).
+// The token lives in the site's delivery script -- the code that calls
+// sendMessage -- not in the page's text.  Anything a browser runs can be
+// read by whoever loads the site, so treat it as known to anyone: that is
+// why the contact it belongs to can do nothing but deliver a message.  A
+// person's token is never put here.
 //
 // Wire format (rmail.lua, "A frame inside a web request"; docs/protocol.md):
 //   frame   = [4-byte big-endian length][12-byte nonce][ciphertext + 16-byte tag]

@@ -30,9 +30,10 @@ paths), so the links below point at the templates, which are the source.
 - **Skills** (`.claude/skills/`, carried with the project; copy a folder
   into another project's `.claude/skills/` to use it there)
   - [rmail integration](../.claude/skills/rmail-integration/SKILL.md) — how
-    other programs and projects send to an rmail mailbox: outbox files, a
-    local relay for web pages (the docs feedback box), a contact's own
-    sealed page, hooks
+    websites and programs send to an rmail mailbox: the website as a
+    plain-message-only contact whose pages seal their own messages (the
+    docs feedback box), reaching a mailbox from a public site, checking
+    what arrives, outbox files
     - [rmail-seal.js](../.claude/skills/rmail-integration/rmail-seal.js) —
       the browser-side sealer, tested by `scripts/test-browser-sealer.sh`
 - **Notes** (`notes/`)
