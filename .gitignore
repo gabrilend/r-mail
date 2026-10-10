@@ -35,6 +35,12 @@ config
 # Build temp files
 .build-tmp/
 
+# The RAM scratch tiers: tmp is a link to /tmp/r-mail (things that run),
+# and tmp/shared-memory a link into /dev/shm/r-mail (logs, test output).
+# Both are per machine and wiped at reboot.  No trailing slash: git sees a
+# link, not a folder.
+/tmp
+
 # Android SDK path (machine-specific)
 clients/android/local.properties
 # Android build outputs
