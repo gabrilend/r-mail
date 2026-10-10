@@ -52,6 +52,8 @@ case-insensitive.  (Aliases could be added later; one is enough for now.)
   files in the `to: url` block.  **Open question:** does the publish path
   need a guard against a private attachment below `to: url` being exposed
   publicly, or is that on the user (consistent with cascade elsewhere)?
+  (Answered 2026-10-04: no guard; `url` follows the contact rule. See
+  "Decisions (2026-10-04)".)
 - A `URL:` line already present on the file *also* marks it for hosting
   (see Lifetime) — so detection is "has a publish `to:` keyword **or** a
   `URL:` field."
@@ -119,6 +121,11 @@ Example: `ivory-chair-signal-dormant-visual`
   dictionary is available.
 
 ## Rendering (no JavaScript, ever)
+
+> **Superseded 2026-10-04** for how the page is delivered: the message
+> now arrives encrypted and the decrypter script renders it (see
+> "Decisions (2026-10-04)").  What it renders — the layout, media
+> handling and theme below — still stands.
 
 Plain HTML + inline CSS (CSS is fine; "no JS" = no scripts, nothing
 external loads):
@@ -223,6 +230,11 @@ pointing at that subfolder (a "re-root") — no per-folder slug machinery.*
   or keep the page minimal?
 
 ### Zip-on-command download mechanics (no JS — HTTP does it)
+
+> **Superseded 2026-10-04**: files now arrive encrypted, in pieces the
+> decrypter checks, stores and joins (see "Decisions (2026-10-04)").
+> Kept as the record of the plain design; the notes on where a cache
+> may live (`/dev/shm`, not `/tmp`) still apply to anything cached.
 
 The download experience (stream, resume, buffer-to-disk) is **native HTTP
 + browser**, not something we build in JavaScript.  A plain
@@ -366,12 +378,99 @@ public_url_words = 5
 - **URL marker:** a labeled `URL:`-prefixed line, located by its label
   anywhere in the file (e.g. `URL: http://<host>:8028/<slug>`).
 
-## Still open
+## Decisions (2026-10-04)
 
-- Wordlist: bundle a prebuilt alternating list, or filter the system
-  dictionary (`/usr/share/dict/words`) at install time?
-- Does the publish path need any interaction with the send pipeline, or
-  is it wholly separate, keyed off the reserved `to:`?
+- **Wordlist:** ship a ready-made list with rmail, which users can add
+  to (owner: "let's ship a ready-made list that users can add to").
+- **`url` is treated as a recipient**, going through the same mechanisms
+  as a contact (owner: "it should probably pass through the same
+  mechanisms", and "treat the to: url as a contact, so, only send them
+  the correct attachments and such").
+- **Attachments follow the contact rule**: `url` gets every `attach:`
+  below its `to:` line, exactly as a contact does, so an author who
+  wants a file kept off the page puts `to: url` after it.  Owner: "we
+  should try and keep behavior consistent as possible, and re-use as
+  much machinery as we can."  This answers the cascade question under
+  "Trigger": no extra guard.
+- **What `url` re-uses, and what it skips** (owner: "this sounds like
+  the right shape"): it re-uses the choice of which files belong to a
+  recipient, and withdrawal (removing `to: url` takes the page down);
+  an edit shows on the page by itself, since the page is read from the
+  outbox file at each visit.  It skips consent (there is nobody to ask)
+  and sending in pieces (a browser fetches a file itself).
+- **Encrypted, with the key in the link; no HTTPS** (owner: "can't do
+  HTTPS because certificate", and "the url kinda needs javascript").
+  This replaces the 2026-07-11 plain-HTTP decision and "no JavaScript,
+  ever": the rule is now **no JavaScript except the decrypter**.  It
+  overturns "Rendering", "Zip-on-command download mechanics" and the
+  slug's role in "URL slug" below, which describe the plain design.
+- **One secret, not two** (owner: two long keys are "gonna be hard to
+  write down on a post-it", and the point is to work like a QR code for
+  someone without rmail).  The hand-alternating words of "URL slug" *are*
+  the key.  The browser derives two things from them: the address it
+  asks the server for (a hash of the words) and the decryption key (a
+  deliberately slow derivation of the words, so each guess costs a
+  stolen copy's owner real time).  The server stores and serves each
+  published message under the hash only; it never sees the words.
+- **The words go after `#`, or are typed in** (owner: "if there isn't a
+  # attached to the link, the user could get a pop-up by the decrypter
+  saying 'yo what's the code'").  `http://host:port/#ivory-chair-…`
+  opens directly; `http://host:port/` alone shows the decrypter with a
+  box asking for the code.  So a post-it can carry the address and the
+  code separately, or a QR code can carry both.
+- **Files arrive in pieces kept on disk until whole** (owner: "Write the
+  fractional files to disk once we've validated that they're confirmed,
+  and only combine them when they've fully arrived ... like how rmail
+  normally functions, except through a browser").  Each piece is
+  encrypted on its own, so decrypting it also proves it arrived intact
+  (the cipher's check fails on any change).  The decrypter writes each
+  checked piece to the browser's private storage on disk (the Origin
+  Private File System, in current Firefox, Chrome and Safari), so a
+  reload or a dropped connection resumes from the first missing piece;
+  once every piece is there it joins them and hands the file to the
+  browser to save.
+
+## Known limitations (to address once feature-complete)
+
+- **Tampering on the way.**  Over plain HTTP, someone positioned on the
+  network path can replace the decrypter with a script that sends the
+  code elsewhere.  The key in the link stops anyone who only *watches*
+  the traffic, not anyone who *changes* it.  Owner: "I guess we gotta
+  note that limitation."
+- **Space twice over.**  Joining the pieces and saving the file needs
+  room for both briefly; browsers also cap their private storage at a
+  share of free disk, and a private window may not keep it.
+- **JavaScript turned off** means the page cannot be read at all; the
+  page should say so in plain HTML.
+
+## Still open
+- **How many words, and how slow the unlock.**  The code is now also the
+  key, so its length is what protects a message whose ciphertext was
+  copied.  Proposed: 6 words, and an unlock tuned to about a second on
+  a phone; the issue's "5+ words" was set when the words only had to
+  resist guessing against the server.  Asked 2026-10-04.
+- **Folders.**  "Attachments & directories" shares a folder as a
+  browsable listing with a `download.zip`; encrypted, the listing and
+  the zip have to be built and decrypted another way.  Not yet designed.
+- *(Answered 2026-10-04: encrypted, key in the link, no HTTPS — see
+  "Decisions (2026-10-04)".  The question as it was asked:)*
+  **Encryption.**  The owner asked whether the page can stay encrypted
+  ("Could we use like, HTTPS or something?").  The browser reads the
+  page in the clear over plain HTTP, the 2026-07-11 decision.  Options:
+  HTTPS with a certificate (a real one needs a name that resolves to
+  this machine, or an address certificate; a self-made one makes the
+  browser warn every visitor); or the page holds only ciphertext and the
+  key travels in the part of the link after `#`, which browsers never
+  send — but the decrypting then needs JavaScript in the page, which
+  this design forbids.  Asked 2026-10-04; the owner asked how the
+  link-key way would work, explained the same day (the path names the
+  message by its random words; the server sends one generic page and
+  that message's ciphertext; the page's script reads the key from the
+  link, decrypts with the browser's built-in AES-GCM, and shows the
+  message, files decrypted in the browser and then saved, as MEGA does).
+  Still to decide: plain HTTP, HTTPS, the link key, or HTTPS and the
+  link key together — and, for the link key, whether "no JavaScript,
+  ever" gives way for the one decrypting script.
 
 ## Suggested Implementation Steps
 
