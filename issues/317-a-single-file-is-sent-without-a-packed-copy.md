@@ -90,6 +90,14 @@ lay out.
   and the receiver's unpacking, not what the recipient ends up with.)
   Folders keep travelling as zips.  Still to settle: what an older
   receiver, which would try to unpack the pieces, is sent.
+  *Then, 2026-10-09:* "I don't like the idea of adding a 'kind' field."
+  Explained the same day: pieces are byte ranges of one zip, not little
+  zips, and the zip is *stored* (no compression), so unpacking it gives
+  back the original 8.8 GB zip byte for byte — the receiver already ends
+  up with the file as it was.  The only waste is the sender's copy, and
+  the virtual zip (Intended Behavior above) removes it with no change to
+  the offer and none to the receiver, so older receivers keep working.
+  Proposed: build the virtual zip, no new field.  Waiting on the owner.
 - Should the threshold default to "always virtual for single files", or
   stay conservative (only large files) until it has run for a while?
 - A file modified in place without its modification time changing would

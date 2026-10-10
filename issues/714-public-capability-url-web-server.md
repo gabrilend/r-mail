@@ -481,9 +481,30 @@ public_url_words = 5
   a chatroom".  So the page shows a conversation, not one message: the
   readers' notes (in through the listen-only contact) and the author's
   answers, kept on the server locked with the link's key, the page
-  asking for new ones while open.  Still to settle: whether a reader's
-  note shows on the page at once or after the author lets it through,
-  and who may remove one.
+  asking for new ones while open.  *Settled 2026-10-09:* a reader's note
+  shows "at once, or after a refresh period. A sync cycle haha" — the
+  page asks again each sync period; readers may not remove their own
+  notes; "only the original 'to: url' sender can delete or edit messages.
+  Also, only they can send attachments."  And the listen-only contact
+  "should be hidden from the user. It is part of the 'to: url'
+  pipeline": rmail makes and removes it itself, kept in its own state,
+  never written into the contacts file.
+- **Tampering is critical** (the owner, 2026-10-09: "This is a critical
+  concern, we need to make sure it works correctly"), replacing the
+  2026-10-04 "I guess we gotta note that limitation".  Over plain http a
+  browser cannot tell the real decrypter page from a substitute: anyone
+  able to *change* traffic on the way (a hostile Wi-Fi, a compromised
+  router or provider) can serve a page that sends them the words.  What
+  the lock already ensures: the server never holds the words, a watcher
+  cannot read the message, and any change to the locked message itself
+  is detected.  What can close the gap needs the decrypter to reach the
+  reader once by a route that cannot be changed; options put to the
+  owner the same day.
+- **The cipher's speed**: the owner expects a 100 MB video in about 2
+  seconds ("You must have built it wrong").  The measured 4.6 MiB/s is
+  the textbook form, written for checking rather than speed; the
+  decrypter needs the table-driven form, held to a test of at least
+  50 MiB/s.
 - **Speed of the hand-written cipher** (measured 2026-10-09, Node 24 on
   this machine, the skill's `rmail-seal.js`): 4.6 MiB/s.  A 9 GB file
   would take about half an hour of a desktop's time to decrypt in the

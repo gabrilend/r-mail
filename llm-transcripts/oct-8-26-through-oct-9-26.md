@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 20:28:46
+Generated on: 2026-10-09 20:36:11
 Models: claude-opus-5-5
 
 ## Contents
@@ -1556,6 +1556,147 @@ Should a reader be able to reply more than once? Answer it once as the reader,
 writing a second note a week later. Then answer it as you, deciding whether that
 second note should still get in after you've edited or replaced what you
 published.
+
+--------------------------------------------------------------------------------
+
+### User Request 11
+
+Issue 317: the file arrives as itself
+
+okay so... what changes would we be making? I thought that manifests were how we
+already deliver attachments?
+
+
+
+<pasted_content id="d404">
+>   Shape B, corrected: someone with only a browser
+>
+> That changes who holds the link: one person, not the public. So the word count
+> above matters, and it's enough.
+</pasted_content id="d404">
+
+
+not necessarily, maybe you want the public to see it. We won't tell our users
+how to use our software, only how to use it correctly. So we need to assume that
+they're going to use it for public and private purposes.
+
+> Should a reader be able to reply more than once? Answer it once as the reader,
+> writing a second note a week later. Then answer it as you, deciding whether
+> that second note should still get in after you've edited or replaced what you
+> published.
+
+yes it should ideally be essentially a chatroom.
+
+> Found while checking this. I measured Firefox on a plain-http page. Besides
+> lacking built-in encryption, it has no private file storage, which the October
+> design relied on to keep pieces of large downloads. IndexedDB, another browser
+> store, is available, and writing to it works. So
+> the decrypter must carry its own decryption arithmetic and keep pieces in
+> IndexedDB. Both are written into the issue.
+
+implications...?
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 11
+
+> Two of these need facts before I answer: what an attachment offer carries
+> today, and how fast hand-written decryption actually runs. First, the offer
+> and what the receiver does with a finished transfer:
+
+> About 4.6 MiB a second. I'll record your answers and this measurement in the
+> issue, then explain what they mean:
+
+*[commit] 8960bc1ed in r-mail - The public-link issue records public and private use, the chatroom shape, and the in-page cipher's speed*
+
+Recorded and committed (`8960bc1`).
+
+## Issue 317: you're right, the offer already is a manifest
+
+Today's offer says: here's an id, the file's name, its exact size, and every
+piece carries the whole file's checksum. What it doesn't say is **what the
+pieces rebuild into**. The receiver always assumes a zip and always unpacks it,
+so the sender always wraps first, even a single file. Wrapping means writing a
+whole second copy to disk, and that copy is the 8.8 GB problem.
+
+So the change is small and lives at both ends:
+1. **The offer gains one field:** `kind`, either "zip" (as now) or "file".
+2. **The sender, for a single file:** skips packing and reads each piece
+   straight from the original where it sits. It reads the file once up front to
+   get the checksum. Before each piece it checks the file's size, time and inode
+   haven't changed. If they have, the attachment takes the existing "lost"
+   route.
+3. **The receiver, for "file":** joins the pieces as now, checks the size is
+   exactly what the offer said and the checksum matches, then moves the result
+   into place under the offered name. It skips unpacking, so the zip-safety
+   checks (zip bombs, names climbing out of folders) don't apply: there's
+   nothing to unpack.
+
+The two questions from before still stand: what to send an older receiver that
+doesn't know `kind`, and whether small files should still get a quick copy so an
+edit mid-transfer doesn't stop them.
+
+## Public and private: agreed
+
+Nothing in the design has to change. The word count is a setting: a public
+link's words are public anyway, and a private link's words are what protects it.
+
+## Chatroom: what it implies
+
+Shape A alone only gets a reader's note **into your inbox**. A chatroom means
+everyone holding the link also *sees* the notes and your answers. So:
+
+- **The page shows a conversation, not one message.** rmail keeps each note, and
+  each of your answers, on its web side, locked with the link's key, and the
+  open page asks every so often for anything new.
+- **Writing in** is shape A: the page seals a note with the token derived from
+  the link, and it lands in your inbox through a listen-only contact. **Reading
+  out** is shape B: rmail serves the locked thread. The chatroom is the two
+  joined.
+- **Identity is self-declared.** Anyone holding the link can post under any
+  name. On a public link, that means anyone at all, including spam.
+- **Removing:** the listen-only rule means readers can't delete or edit
+  anything, even their own notes. Only you can, by deleting the note from your
+  inbox (which would take it off the page).
+
+Two questions follow:
+1. Does a reader's note appear on the page **at once**, like live chat, or only
+   **after you let it through**? On a public link, "at once" means anyone can
+   post anything there.
+2. Should a reader be able to remove their own note? Today's rule says no.
+
+## Implications of the plain-http finding
+
+1. **Decryption speed.** I measured the hand-written cipher at **4.6 MiB a
+   second**. A typical photo is instant. A 100 MB video takes about 20 seconds.
+   The shrine's 9 GB zip would take about **half an hour** of a desktop's
+   processor, and several times that on a phone. The slow parts are known: one
+   checksum step works a bit at a time, and the cipher works a byte at a time.
+   Table-based versions are usually ten times faster or more, so it's fixable,
+   but it's real work.
+2. **Pieces can be thrown away.** On plain http the page also can't ask the
+   browser to keep its stored pieces permanently (that request is part of the
+   same missing toolbox). If the visitor's disk runs low, the browser may
+   discard a half-finished download, and it would start over.
+3. **Saving a huge file is unproven.** The usual way to save a multi-gigabyte
+   download to disk as it arrives needs a background helper (a service worker),
+   and browsers only allow those on https too. Without it, the page assembles
+   the whole file inside the browser before offering it for saving. That's fine
+   for photos and documents. For 9 GB I don't know whether browsers manage it,
+   and it would need testing.
+4. **Traffic can be tampered with.** Already recorded: someone who can *change*
+   traffic on the way can swap the decrypter page itself.
+
+Putting that together: shape B works well for messages, photos, documents and
+modest files. For something as large as the shrine's zip, it's slow and may hit
+browser limits. The shrine is also why 317 exists, and 317 is rmail-to-rmail, so
+the two serve different readers.
+
+Could you answer question 1 twice? Once as a stranger who found a public link
+and wants to post something rude. Once as the friend you sent a private link,
+who's waiting to see your reply. If "at once" feels right for the friend but
+wrong for the stranger, the answer might be a per-link setting rather than one
+rule.
 
 --------------------------------------------------------------------------------
 
