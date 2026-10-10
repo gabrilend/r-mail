@@ -175,6 +175,15 @@ alice.token = "some-shared-secret"
 
 Both sides must have the same token for a given contact pair. Pick something long and random, but pick something different for each contact. I like to do words separated by dashes, like "apple-box-racecar-spelled-backwards-is-racecar"
 
+**Listen-only contacts** — a website whose pages send you notes, or any token you publish for strangers, is one contact marked `listen = true`, with a token and no address:
+
+```
+blog.token  = "a-long-random-string-for-this-site-only"
+blog.listen = true
+```
+
+Anyone may hold such a token, so a listen-only contact may send a plain message and nothing else: deletes, edits, attachments, address changes and every other request are refused (`403`, with a line in the log). A message's body is at most 64 KiB, and its fields only `type`, `subject`, `body`, `message_id` and `mtime`. Nothing is ever sent to it: no address announcements, no deletion notices, and an outbox `to:` naming it is marked `LISTEN-ONLY CONTACT`. See the [rmail-integration skill](.claude/skills/rmail-integration/SKILL.md) for building a website around one.
+
 You can add arbitrary fields (e.g. `alice.phone = "555-1234"`) — rmail stores them but ignores them. Hook scripts can read them directly. See [docs/.templates/scripting-tutorial.md](docs/.templates/scripting-tutorial.md).
 
 #### Multiple addresses and per-address ports

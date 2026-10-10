@@ -72,17 +72,19 @@ project copies the folder into its own `.claude/skills/`.
    this file) and POSTs it to the mailbox.
 5. **A receive hook checks what arrived**, because anyone can send it.
 
-### Status: step 3 is not built yet
+### Step 3 is rmail's `listen = true` (built 2026-10-09, issue #420)
 
-rmail issue **#420** ("a token-only contact is listened to, never sent
-to") is the receiving side of step 3: a contact line such as
-`blog.listen = true` (the word is still open), one gate where every
-decrypted request is dispatched, and a 403 with a log line for
-everything but a plain message.  **Until #420 is built, a website token
-can do whatever a person's token can** — delete or rewrite messages that
-came through it, send attachments, change its own address — and rmail
-will try to send to whatever address the last visitor announced.  Do not
-put a website live against a mailbox before #420 is completed.
+A contact marked `blog.listen = true` passes one gate, where every
+decrypted request is dispatched, before any handler runs.  It may send
+`POST /deliver` with JSON holding only `type` (= `"message"`),
+`subject`, `body` (text, at most 64 KiB), `message_id` and `mtime` (a
+number); everything else is answered `403` with the reason, logged, and
+changes nothing.  Nothing is sent to it: no address announcements, no
+deletion notices, and an outbox `to:` naming it is marked `LISTEN-ONLY
+CONTACT`.  `r-mail/scripts/test-listen-only-contact.sh` proves each of
+these, bare and web-wrapped.  **An rmail older than this lets a website
+token do whatever a person's token can** — a site's start script should
+refuse to run against one (the W client's checks the version).
 
 ## Setting up one website
 
@@ -199,9 +201,50 @@ is taken from the config's folder):
   unclear`) only from a fixed set of keys and values; the page name only
   from the site's real list of pages; the free text capped in length.
 - A hook gets the body as one program argument, which Linux caps at 128
-  KiB; a longer body never starts the hook.  Keep website messages small
-  (the box can cap its own text); the limit rmail should put on a
-  website contact is open in #420.
+  KiB; a longer body never starts the hook.  rmail caps a listen-only
+  contact's body at 64 KiB, so a website's notes always reach the hook;
+  the box should cap its own text below that, so a visitor is told
+  before sending rather than refused after.  (Every other contact's
+  bodies: rmail issue #215.)
+
+## One feedback mailbox per project, sorted like the site
+
+The owner's shape: each project has its own feedback mailbox, and what
+arrives is filed into folders that mirror the site — "usually these
+websites will be generated from docs, so the hierarchy should be self
+apparent".  `sort-feedback.lua` beside this file does it, as that
+mailbox's `on_receive` hook:
+
+```
+# <feedback mailbox>/config
+on_receive = /path/to/rmail-integration/sort-feedback.lua
+
+# <feedback mailbox>/feedback.conf
+pages = site-pages     # every page of the site, one path per line
+tree  = feedback       # where sorted notes go
+```
+
+- **Only website notes are sorted**: messages from a listen-only contact.
+  A person's message to that mailbox stays in the inbox.
+- **The page decides the folder**: a note whose header says `page:
+  docs/guide/install.html` goes to `feedback/docs/guide/install/<its
+  inbox name>`.  The header is the note's first `key: value` lines, ended
+  by a blank line or `---` — the shape the W client's pages already send
+  (`page:`, `tag:`, `public:`, `---`, the words).
+- **The page is checked against the site's own list** (`pages`, written
+  by the site's builder — generating kept apart from sorting).  A note
+  naming no page, a page the site does not have, or a path that climbs
+  (`..`) goes to `feedback/_refused/` with the reason written in.  No
+  page list means every note is refused, never sorted unchecked.
+- **Metadata on top**: `received:`, `from:` (the website contact),
+  `inbox name:`, `page:` (or `refused:`), `sorted by:`, then `---` and
+  the note exactly as it came.  Each placement is one line in
+  `feedback/sort.log`.
+- **Moving a note out of the inbox costs nothing**: rmail forgets a
+  listen-only contact's deleted message and owes it no notice.
+- `r-mail/scripts/test-feedback-sorter.sh` runs it under a real daemon.
+- Its interpreter is `luajit` (the first line); a machine without it
+  needs that line changed to its Lua.
 
 ## A program on the same machine: write an outbox file
 
@@ -229,8 +272,8 @@ The second diagram has its arrows backwards.
 
 ## Checklist for a new website
 
-1. #420 is built in the receiving rmail (until then: do not go live).
-2. A contact for this site alone, marked listen-only, no address.
+1. The receiving rmail has `listen = true` (2026-10-09, #420, or later).
+2. A contact for this site alone, marked `listen = true`, no address.
 3. The delivery script uses `rmail-seal.js` with that contact's token.
 4. The page can reach the mailbox: plain http straight to its port, or —
    for a site served over https only — an https proxy in front, tested.
@@ -241,9 +284,6 @@ The second diagram has its arrows backwards.
 
 ## Open questions
 
-- #420's: the word for the mark (`listen`, `submit_only`, …); whether a
-  contact with a token and no address is listen-only without it; the
-  size limit for a website contact's messages.
 - Should rmail add `Access-Control-Allow-Origin` to its web replies, so
   a page can open the sealed answer and tell the visitor "delivered" (the
   answer is sealed, so the header reveals nothing)?

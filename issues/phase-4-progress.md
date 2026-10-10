@@ -25,11 +25,12 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#416](completed/416-lan-discovery-router-ip-rewrite.md) — LAN Discovery Router IP Rewrite**  When a UDP broadcast is received, some routers rewrite the source IP address to their own IP (e.g., 192.168.0.1).
 - **[#417](completed/417-lan-discovery-files-address-under-the-contact.md) — LAN discovery files a found address under the contact it came from**  A discovery packet (request or answer) is identified by the contact whose token decrypts it, and the found address is filed under that contact's
 - **[#418](completed/418-drop-lan-auto-detection-for-multi-ip.md) — Drop LAN auto-detection and the unused /peer-address endpoint**  Complete 2026-10-04.
+- **[#420](completed/420-a-token-only-contact-is-never-sent-to.md) — A token-only contact is listened to, never sent to**  A contact with `listen = true` in the contacts file is listen-only (`contactfile.listens`, which compares the text "true").
 
 ## Open
 
 - **[#409](409-announce-full-address-set.md) — Announce the full address set, and confirm it before clearing the notice**  Phase 1 built 2026-09-22 (see Status): announcements carry the whole address set (`ips`: hostname, public IPv4, IPv6; `local_ips` only to a contact on our LAN); the receiver merges it under the contact's pinned `ip`, files private addresses on its own /24 a...
-- **[#414](414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  When rmail detects insecure NAT-PMP/UPnP on a sender's router, it sends a warning to contacts.
+- **[#414](414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  Since 2026-10-08 (#411) rmail sends no such warning at all: the daemon no longer checks the router at start-up, and the installer's check reports only to the person installing.
 - **[#419](419-wake-to-sync-availability-windows.md) — Wake-to-sync: scheduled availability windows for a machine that sleeps**  rmail assumes the daemon is listening.
 
 <!-- notes: kept when regenerated -->

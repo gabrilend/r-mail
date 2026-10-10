@@ -125,6 +125,17 @@ sets (a configured `hostname` first).
 dependency list, one dependency, and the installer, for a contact building
 rmail.
 
+### Listen-only contacts (`listen = true`)
+
+A contact marked `listen = true` — a website's, whose token is in every
+page — may send exactly one kind of request: `POST /deliver` whose JSON
+holds only `type` (= `"message"`), `subject`, `body` (text, at most 64
+KiB), `message_id` and `mtime` (a number).  Every other request from it,
+bare or inside a web POST, is answered `403` with the reason, logged, and
+changes nothing; that includes `/delete`, `/update-address`, the `/deps`
+family, an `update`, a message with `attachments` or `auto_body`, and the
+sealed `GET /`.  The daemon never sends anything to such a contact.
+
 ### Own-device only (contacts with `own = true`)
 
 These require the caller's contact entry to have `own = true` set.

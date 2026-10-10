@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 19:18:42
+Generated on: 2026-10-09 19:38:38
 Models: claude-opus-5-5
 
 ## Contents
@@ -1030,6 +1030,171 @@ The `bug-report` file is outside the project at
 
 My suggestion for what to do next is the token-only contact issue, since every
 website waits on it. If you answer its three questions, I can build it.
+
+--------------------------------------------------------------------------------
+
+### User Request 8
+
+> - Inbox shape: one mailbox per project, or one shared feedback mailbox?
+
+one feedback mailbox per project. It should automatically sort the received
+files into a filesystem directory structure that roughly corresponds to the way
+the site is laid out - usually these websites will be generated from docs, so
+the hierarchy should be self apparent. Let me know if you have problems with
+that.
+
+>      - Feedback file: what should a visitor's feedback look like as a file in your inbox?
+
+just... a file... maybe some metadata or something.
+
+>      - http vs https: what does a plain-http site give up compared with https?
+
+https requires a certificate, and is a non-starter.
+
+> 6. The project's tmp link shows as untracked in git. Should it go into
+> .gitignore?
+
+you should know how to handle tmp/ files. Use your best judgement.
+
+> 5. The intermittent consent-form test. It failed once in four runs. You
+> suggested a sync cycle not being reset. I haven't investigated.
+
+yeah we're having trouble getting it stable.
+
+>   2. Files the other session left uncommitted. I haven't touched them:
+
+these are yours now, figure out what they're about, and if they aren't done,
+then finish them. You can check the llm-transcripts for more details.
+
+> 1. The token-only contact issue. This is the receiving side of your website
+> design. It hasn't been built, and nobody is working on it.
+
+congrats that's your task now, there's another project (the W client) waiting on
+this.
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 8
+
+> That's six pieces of work. I'll track them so nothing gets dropped:
+
+> Starting with the quick one, the `tmp` link:
+
+*[commit] 5c959f17a in r-mail - The project's RAM scratch link is kept out of git*
+
+> Done (`5c959f1`). Now the website contact. The W client is waiting on it, so
+> first I'll check what that project already wrote into its own contacts and
+> docs, to match its expectations:
+
+> Still reading code for the website contact. Next is how the contacts file
+> turns `listen = true` into a value the daemon can test:
+
+> Values arrive as plain text, so the test will be `listen == "true"`. Now the
+> sync cycle: which contacts it dials, and where it decides a deleted inbox
+> message is owed a deletion notice:
+
+> The hook-body issue belongs in phase 2 (messages and hooks), not phase 4, so
+> "#421" was the wrong number. Asking the numbering tool:
+
+> Now the new phase-2 issue for how hooks receive a message body, using a
+> neighbouring issue as the template:
+
+> The issue is well-formed. Now the code, in seven parts. First, one shared test
+> for "is this contact listen-only", kept with the contacts-file code:
+
+> That left a stray top-level line (`local LISTEN_FIELDS = nil`) that does
+> nothing and uses up one of the file's limited top-level names. Removing it:
+
+> It compiles. Next, a deleted message from a website contact is just forgotten,
+> not owed a deletion notice:
+
+> Now the five places address announcements are queued or sent:
+
+> Next, the outbox. I need the start of the branch that handles a `to:` line
+> naming a recipient for the first time:
+
+> It compiles. Now the test, playing the website contact against a real daemon.
+> It covers what the contact may and may not send, and checks that nothing is
+> ever sent back to it:
+
+> All 23 cases pass. Checking them against the old daemon, the one without the
+> gate:
+
+> 16 of the cases fail on the old daemon, so the test catches what it should.
+> I'll start the full suite in the background to check for regressions, and
+> update the docs and the issue meanwhile:
+
+> The website contact is built and its test passes; I'm updating its docs and
+> issue while the full suite runs. Rewriting the issue as the blueprint of what
+> was built:
+
+> The implementation steps should name what was actually built. Updating steps 1
+> to 3:
+
+> The issue checks clean. While the suite runs (no results yet), I'll start on
+> the other session's left-behind issue files. First, what each one is:
+
+> The sorter compiles. Its test goes in rmail's suite, run against a real daemon
+> whose website contact sends notes. I'll run it once the full suite finishes,
+> so two daemon tests don't compete for time:
+
+> The suite file still shows nothing, which is odd given how long it has been.
+> Checking what's running:
+
+> The suite is progressing. That first test is a long one, with waits of up to
+> 70 seconds per case. While it runs, I'll start on the unstable consent-form
+> test by reading it, without running anything:
+
+> I've found the cause of the unstable test and am checking whether the same
+> delay slows big transfers too. Reading how many pieces go out per turn:
+
+> The suite has been on its first test for a long time. Checking whether it's
+> stuck:
+
+> It's moving, just slowly: it's the longest test in the suite. Meanwhile I'll
+> prepare the timer issue's record of the follow-up fix, reading its design
+> first:
+
+> The suite is moving (2 passed). While it runs, I'll look in the conversation
+> transcripts for how the three left-behind issues came about, as you suggested:
+
+> That's an older, unrelated #316. These two were filed from the ritzmenardi.com
+> shrine project, so its transcripts are the place to look:
+
+> I'm mapping the code for the shared-copy change (316) while the suite
+> finishes; nothing is edited yet. Checking the suite and the existing
+> fingerprint helper:
+
+> The fingerprint helper already covers folders: it lists every file inside with
+> its size and time. I'll record the build plan in issue 316 now, since issue
+> files don't affect the running tests:
+
+> I've now read all of issue 316, so I'll rewrite it whole with the settled
+> design:
+
+> The suite is slow but moving. Meanwhile I'll read the rest of issue 317 and
+> the shared zip library it depends on, to judge its size:
+
+> The suite has done 4 tests. The sorter test only reads the daemon code, which
+> hasn't changed since the suite started, and uses its own port, so I'll run it
+> alongside:
+
+> All 13 cases pass on the first run. Here's one sorted note exactly as it sits
+> on disk:
+
+The sorter works. Status so far:
+
+- **Done:** the `tmp` link is ignored (committed).
+- **Built and passing, not yet committed:**
+  - the website contact (`listen = true`), all 23 cases;
+  - the feedback sorter, all 13 cases.
+- **Found:** the cause of the unstable consent-form test. A delivered message's
+  attachment request waits out a random 0–60 second turn, against the test's
+  60-second limit.
+
+I'm waiting for the full suite to finish before committing. After that I'll make
+the follow-up fix for the unstable test, then build the shared packed copy
+(316). The suite will wake me when it's done.
 
 --------------------------------------------------------------------------------
 

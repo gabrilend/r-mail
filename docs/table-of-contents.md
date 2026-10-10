@@ -36,6 +36,9 @@ paths), so the links below point at the templates, which are the source.
     what arrives, outbox files
     - [rmail-seal.js](../.claude/skills/rmail-integration/rmail-seal.js) —
       the browser-side sealer, tested by `scripts/test-browser-sealer.sh`
+    - [sort-feedback.lua](../.claude/skills/rmail-integration/sort-feedback.lua) —
+      files a project feedback mailbox's website notes into folders shaped
+      like the site, tested by `scripts/test-feedback-sorter.sh`
 - **Notes** (`notes/`)
   - [Audit of the documents against the code, 2026-10-02](../notes/audit-docs-against-code-2026-10-02.md)
   - [Handoff 2026-09-22: names, timers, and the two mailboxes](../notes/handoff-2026-09-22-names-timers-and-mailbox-hooks.md)

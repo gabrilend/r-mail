@@ -1064,6 +1064,71 @@ local function load_contacts()
     return contactfile.parse(text)
 end
 
+-- {{{ contactfile.listens
+-- Whether a contact is listen-only (#420): `name.listen = true` in the
+-- contacts file.  Such a contact is a door rather than a person -- a
+-- website whose pages seal notes with its token, a public "knock here"
+-- token -- shared by everyone who holds the token, which may be anyone.
+-- So it may send a plain message and nothing else (the gate in
+-- handle_request), and nothing is ever sent to it: no address is learned
+-- or announced to, no deletion notice is owed, an outbox `to:` naming it
+-- is flagged.  Only the explicit mark makes a contact listen-only; a
+-- token-only contact without it may still announce its address.
+-- Values in the contacts file are text, so the test is against "true".
+function contactfile.listens(c)
+    return c.listen == "true"
+end
+-- }}}
+
+-- {{{ contactfile.listen_refusal
+-- What a listen-only contact may send: one plain message.  Returns false
+-- for that, or the reason a request is refused (text for the answer and
+-- the log).  An allow-list, not a deny-list: a field or request type added
+-- to rmail later stays closed to a door until someone decides otherwise.
+--
+--   POST /deliver                 the only request; /delete, /update-address,
+--                                 the /deps family, /api/* are all refused
+--   type = "message"              not update, attachment_*, chunk_failed, ...
+--   fields: type subject body     exactly what the W client's pages and the
+--           message_id mtime      skill's sealer send; attachments and
+--                                 auto_body are refused by not being here
+--   body at most 64 KiB           a hook gets the body as one program
+--                                 argument, capped by Linux at 128 KiB; a
+--                                 longer one would skip the checking hook
+--                                 (#215 is the general fix)
+function contactfile.listen_refusal(method, path, body)
+    if method ~= "POST" or path ~= "/deliver" then
+        return "only a plain message (POST /deliver) is accepted, not " ..
+            tostring(method) .. " " .. tostring(path)
+    end
+    local data = body and json.decode(body)
+    if type(data) ~= "table" then return "the body is not a JSON object" end
+    if data.type ~= "message" then
+        return "only type \"message\" is accepted, not " .. tostring(data.type)
+    end
+    for field in pairs(data) do
+        if not contactfile.LISTEN_FIELDS[field] then
+            return "the field \"" .. tostring(field) .. "\" is not accepted"
+        end
+    end
+    if type(data.body) ~= "string" then return "a message needs a text body" end
+    if #data.body > 64 * 1024 then
+        return "the body is " .. #data.body .. " bytes, over the 64 KiB limit"
+    end
+    for _, field in ipairs({"subject", "message_id"}) do
+        if data[field] ~= nil and type(data[field]) ~= "string" then
+            return "the field \"" .. field .. "\" must be text"
+        end
+    end
+    if data.mtime ~= nil and type(data.mtime) ~= "number" then
+        return "the field \"mtime\" must be a number"
+    end
+    return false
+end
+contactfile.LISTEN_FIELDS = {type = true, subject = true, body = true,
+                             message_id = true, mtime = true}
+-- }}}
+
 -- Contacts text -> the contacts table every other part of the daemon uses.
 -- Separate from reading the file so that text which is not (yet) the file
 -- can be read the same way: a phone's save is checked by parsing the file
@@ -3352,6 +3417,7 @@ local function http_post_batch_with_fallback(requests)
     local now      = socket.gettime()
     local results  = {}
     local send, map = {}, {}
+    local contacts = load_contacts()
 
     for i, req in ipairs(requests) do
         -- load_contacts stamps contact_name onto every endpoint, so the
@@ -3359,7 +3425,15 @@ local function http_post_batch_with_fallback(requests)
         local cname = req.contact_name
             or (req.endpoints and req.endpoints[1] and req.endpoints[1].contact_name)
 
-        if cname and not ctimer.is_due(cname, now) then
+        -- The last word on listen-only contacts (#420): every builder
+        -- already leaves them out, so a request reaching here means one
+        -- missed it.  Refused and logged as the bug it is, never sent.
+        -- (One with no address has no endpoints and no name here at all,
+        -- and could not be reached anyway.)
+        if cname and contacts[cname] and contactfile.listens(contacts[cname]) then
+            log("error: a request to listen-only contact %s reached the send gate; not sent", cname)
+            results[i] = {ok = false, refused = true}
+        elseif cname and not ctimer.is_due(cname, now) then
             ctimer.skipped[cname] = true
             results[i] = {ok = false, skipped = true}
         else
@@ -5537,6 +5611,16 @@ local function sync_outbox(my_name)
                             }
                             log("self-delivered: %s -> %s", name, inbox_name)
                             did_work = true
+                        elseif contacts[rname] and contactfile.listens(contacts[rname]) then
+                            -- #420: a listen-only contact is a door, not a
+                            -- person; nothing is ever sent to it.  Marked in
+                            -- the file the way an unknown contact is, so the
+                            -- writer sees why it waits.
+                            log("listen-only contact '%s' in %s: nothing is sent to it", rname, name)
+                            mark_recipient_problem(OUTBOX .. "/" .. name,
+                                rname, "LISTEN-ONLY CONTACT",
+                                "may send to you, receives nothing (listen = true)")
+                            outbox_files_with_unresolved_recipients[name] = true
                         elseif contacts[rname] then
                             -- Hold the body until every attachment exists.
                             -- Sent early, the recipient gets text that
@@ -6266,14 +6350,17 @@ local function sync_inbox(my_name)
                 self_delete_from_outbox(my_name, meta.message_id)
                 state[name] = nil
                 did_work = true
-            elseif contacts[sender] then
+            elseif contacts[sender] and not contactfile.listens(contacts[sender]) then
                 ops[#ops + 1] = {
                     filename = name, sender = sender,
                     message_id = meta.message_id,
                     contact = contacts[sender],
                 }
             else
-                -- sender not in contacts, can't notify, just drop
+                -- sender not in contacts, can't notify, just drop.  A
+                -- listen-only sender (#420) is dropped the same way: it is
+                -- a door shared by strangers, never sent to, and "this
+                -- message was deleted" is nobody's business there.
                 state[name] = nil
                 did_work = true
             end
@@ -6519,7 +6606,8 @@ local function detect_ip_change(my_name, port)
     local pending = unmigrate_hashed_keys(
         load_state("pending-address.json"), contacts)
     for name, contact in pairs(contacts) do
-        if name ~= my_name and contact.ip then
+        -- never to a listen-only contact (#420), even one given an ip
+        if name ~= my_name and contact.ip and not contactfile.listens(contact) then
             pending[name] = {ip = new_ip, port = port}
         end
     end
@@ -6571,7 +6659,8 @@ local function detect_ipv6_change(my_name, port)
     local pending = unmigrate_hashed_keys(
         load_state("pending-address.json"), contacts)
     for name, contact in pairs(contacts) do
-        if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip)) then
+        if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip))
+            and not contactfile.listens(contact) then  -- #420
             pending[name] = pending[name] or {}
             pending[name].ipv6 = new_ip
             pending[name].port = port
@@ -6599,7 +6688,8 @@ local function sync_address_notifications(my_name)
     if my_public and my_public ~= "" then
         for _, f in ipairs(list_notices(INBOX)) do
             local who = f:match("^%.address%-update%-(.+)$")
-            if who and contacts[who] and contacts[who].ip and not pending[who] then
+            if who and contacts[who] and contacts[who].ip and not pending[who]
+                and not contactfile.listens(contacts[who]) then  -- #420
                 pending[who] = {ip = my_public, port = tonumber(config.port)}
             end
         end
@@ -6609,13 +6699,14 @@ local function sync_address_notifications(my_name)
 
     local ops = {}
     for name, info in pairs(pending) do
-        if contacts[name] and contacts[name].ip then
+        if contacts[name] and contacts[name].ip and not contactfile.listens(contacts[name]) then
             ops[#ops + 1] = {
                 name = name, contact = contacts[name],
                 ip = info.ip, port = info.port,
             }
         else
-            -- contact removed, drop the pending notification
+            -- contact removed, or marked listen-only since it was queued
+            -- (#420): drop the pending notification
             pending[name] = nil
         end
     end
@@ -7690,7 +7781,12 @@ local function handle_request(rt, client, preread)
         -- Placed after decryption on purpose.  Decrypting with a contact's
         -- key proves the sender holds the shared token, so a spoofed or
         -- malformed packet cannot reset anybody's timer.
-        ctimer.saw_inbound(contact_name)
+        --
+        -- Not for a listen-only contact (#420): nothing is ever sent to
+        -- it, so there is no timer worth moving.
+        if not contactfile.listens(load_contacts()[contact_name]) then
+            ctimer.saw_inbound(contact_name)
+        end
 
 
         -- Cache sender for subsequent requests on this connection
@@ -7715,7 +7811,18 @@ local function handle_request(rt, client, preread)
         local is_own_device = contacts[contact_name].own == "true"
     local resp = make_response_buffer()
 
-    if method == "GET" and path == "/" then
+    -- The gate for listen-only contacts (#420), before any handler runs,
+    -- so a refused request changes nothing anywhere.  Both doors come
+    -- through here: a caller held while a sync cycle ran is handed to this
+    -- function afterwards.  The rule belongs to the contact, not to how
+    -- the request arrived: a website's token works in a bare frame from
+    -- any program as well as in a browser's POST.
+    local refusal = contactfile.listens(contacts[contact_name])
+        and contactfile.listen_refusal(method, path, body)
+    if refusal then
+        log("refused a request from listen-only contact %s: %s", contact_name, refusal)
+        send_response(resp, 403, {error = refusal})
+    elseif method == "GET" and path == "/" then
         send_response(resp, 200, {ok = true, name = rt.my_name})
     elseif method == "GET" and path == "/deps" then
         send_response(resp, 200, {deps = DEPS_REGISTRY})
@@ -8236,7 +8343,7 @@ local function init_runtime()
             load_state("pending-address.json"), contacts)
         local n = 0
         for name, c in pairs(contacts) do
-            if name ~= rt.my_name and c.ip then
+            if name ~= rt.my_name and c.ip and not contactfile.listens(c) then  -- #420
                 pending[name] = {ip = my_public, port = rt.port}
                 n = n + 1
             end
