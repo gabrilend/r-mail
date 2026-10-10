@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 20:20:36
+Generated on: 2026-10-09 20:28:46
 Models: claude-opus-5-5
 
 ## Contents
@@ -1439,6 +1439,123 @@ Could you describe shape B back to me twice?
 
 If both descriptions match the steps above, we're aligned. If either one sounds
 like shape A (a token that lets people send to you), that's where the drift is.
+
+--------------------------------------------------------------------------------
+
+### User Request 10
+
+> Which should a recipient of the shrine's zip end up with: the folder, or the
+> zip file?
+
+okay um how about if we point to a manifest file then? In this particular case
+we want them to have the .zip file, but we should make it so that they should
+get the file in whatever format it is in before it's chunked. In this specific
+case, we are taking a zip file, chunking it, and sending those, so it rebuilds
+into a single zip, not a bunch of chunks.
+
+unlock speed is irrelevant because a determined cracker would just make their
+own hacking tools that do not have such a delay.
+
+Shape A looks right.
+
+Shape B is something different. Shape B is for allowing an rmail user to send
+files or messages to someone who doesn't have rmail, and only has a browser, and
+doesn't have the ability to open ports on their system. We might be able to set
+it up so they can respond, using shape A. Opinions?
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 10
+
+> Before replying I'll record your answers and the design points they raise, so
+> the issues stay true:
+
+*[commit] 8d881987f in r-mail - The public-link and single-file issues record the owner's answers*
+
+> Recorded and committed (`8d881987`). One number would make the word-count
+> advice concrete: how many words rmail's link-word list holds. Checking:
+
+Your answers are in the issues and committed (`8d88198`).
+
+## Issue 317: the file arrives as itself
+
+As I understand you: the offer carries a small **manifest** saying "these pieces
+rebuild into one file named `shrine-site.zip`, exactly this many bytes, with
+this checksum". The receiver joins the pieces back into that one file and stops.
+It doesn't unpack it, because the manifest says it's a file, not a zip to open.
+The sender reads each piece straight out of the original wherever it sits, so
+there's no copy and no zip wrapper.
+
+Today a single file is already zipped, then unzipped on arrival, so a recipient
+of the shrine's zip already ends up holding the `.zip`. Your manifest keeps that
+result and removes two things:
+- the 8.8 GB second copy on the sender's disk;
+- the wrapping and unwrapping at both ends.
+
+Folders still travel as zips, since they're many files.
+
+Two things to settle before building:
+1. **Older receivers.** A receiver running older rmail doesn't know about the
+   manifest and would try to unpack the pieces as a zip, which fails. Should the
+   sender check first, or simply require both sides to be updated?
+2. **Small files.** Without a copy, a file you edit mid-transfer gets marked
+   "lost", and everyone who hasn't finished stops getting it. The copy's one job
+   was to protect against that. For a 9 GB zip that never changes, losing that
+   protection doesn't matter. For a photo you might re-crop after sending, it
+   might. Should small files still get a quick copy, or should every single file
+   go straight from where it lies?
+
+## Unlock speed: decided "none", with one correction to the reasoning
+
+The decision stands. But a slow unlock isn't a pause a cracker's own tool could
+skip. It's work built into the math: say, a million rounds of scrambling to turn
+the words into the key. Anyone, with any tool, has to do those rounds for every
+guess, because there's no shortcut to the key. That's why it would have helped.
+
+It isn't needed, though, because the word count does the same job. rmail's lists
+hold 1,342 words for the first position and 2,950 for the rest, so 6 words is
+about 68 bits. At ten billion guesses a second, a graphics card would need
+roughly a thousand years to try them all. Each extra word multiplies that by
+about 3,000. And a cracker first has to get the locked copy, which the server
+only hands out to someone who already knows the words. So: no slow unlock, 6
+words by default, as many as you like.
+
+## Shape B, corrected: someone with only a browser
+
+That changes who holds the link: one person, not the public. So the word count
+above matters, and it's enough.
+
+My opinion on replies through shape A: yes. It fits, because the pieces already
+exist:
+1. **A contact per published message:** when you publish with `to: url`, rmail
+   also creates a listen-only contact for that message.
+2. **Its key comes from the link:** its token is derived from the link's words,
+   so only the person holding the link can reply, and no secret sits in the
+   page's files.
+3. **Where the reply goes:** the page gets a reply box. The reply is sealed in
+   the browser (with the plain-arithmetic sealer, since these pages are plain
+   http) and posted back to the address that served the page.
+4. **Where it lands:** in your inbox, from that contact. Because it's
+   listen-only, a reply can only be a plain message.
+5. **Taking it down:** removing `to: url` takes down the page and the contact
+   together, so later replies are refused.
+
+Posting back to the address that served the page also means the browser will let
+the page read the answer, so the reader can be told "delivered".
+
+**Found while checking this.** I measured Firefox on a plain-http page. Besides
+lacking built-in encryption, it has **no private file storage**, which the
+October design relied on to keep pieces of large downloads. IndexedDB, another
+browser store, is available, and writing to it works. So the decrypter must
+carry its own decryption arithmetic and keep pieces in IndexedDB. Both are
+written into the issue.
+
+## Asked twice, about replies
+
+Should a reader be able to reply more than once? Answer it once as the reader,
+writing a second note a week later. Then answer it as you, deciding whether that
+second note should still get in after you've edited or replaced what you
+published.
 
 --------------------------------------------------------------------------------
 

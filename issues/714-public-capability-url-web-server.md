@@ -474,6 +474,22 @@ public_url_words = 5
   reply, and nothing secret is in the page's files), the reply posted to
   the same address that served the page; removing `to: url` removes the
   contact and refuses later replies.  Waiting on the owner.
+  *Answered 2026-10-09:* links may be private **or** public — "We won't
+  tell our users how to use our software, only how to use it correctly.
+  So we need to assume that they're going to use it for public and
+  private purposes" — and replies should be many, "ideally ... essentially
+  a chatroom".  So the page shows a conversation, not one message: the
+  readers' notes (in through the listen-only contact) and the author's
+  answers, kept on the server locked with the link's key, the page
+  asking for new ones while open.  Still to settle: whether a reader's
+  note shows on the page at once or after the author lets it through,
+  and who may remove one.
+- **Speed of the hand-written cipher** (measured 2026-10-09, Node 24 on
+  this machine, the skill's `rmail-seal.js`): 4.6 MiB/s.  A 9 GB file
+  would take about half an hour of a desktop's time to decrypt in the
+  page, longer on a phone.  The slow parts are known (GHASH done one bit
+  at a time; AES one byte at a time) and table-driven versions are
+  usually ten times faster or more; to be measured when built.
 - **Found 2026-10-09, plain http changes two parts of the design**:
   browsers give a page their built-in decryption and their private file
   storage (the Origin Private File System, named under "Decisions") only
