@@ -49,6 +49,16 @@ is kept on disk, in the mailbox's pending folder, until every recipient has
 answered, and removed then (#314).  To send a changed file, attach it under
 a new path, or remove the line and put it back (below).
 
+**One copy for every message that attaches the same file.**  A second
+message attaching the same path, while the file is unchanged since it was
+packed (same size and modification time of every file in it), shares the
+first message's copy instead of packing another, and the log says
+`sharing the packed copy of <path> with <message>`.  The copy stays until
+no message still needs it.  A file changed in between is packed afresh for
+the new message, while the earlier message keeps the bytes it offered
+(#316).  A 9 GB file sent in three messages takes 9 GB of pending space,
+not 27.
+
 **Removing an `attach:` line withdraws the file.**  When a sync finds the
 line gone, everyone who does not yet have the whole file stops getting it
 and is told; their daemon removes the consent form or the pieces and

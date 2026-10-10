@@ -4043,6 +4043,54 @@ function upload.fingerprint(path)
 end
 -- }}}
 
+-- ---- One packed copy for every message that attaches the same file (#316) --
+--
+-- A packed copy used to belong to one message: a second message attaching
+-- the same path packed it again, so a 9 GB file sent in three messages
+-- needed three copies on disk while anyone was still downloading.  Each
+-- message still has its own `packed[path]` entry (#314: everyone a message
+-- offers a file to gets the bytes first offered), but entries may now name
+-- the same zip: a message's first offer of a path uses another message's
+-- copy when the file is unchanged since that copy was packed (the same
+-- fingerprint, #311d), and a copy is deleted only when no entry names it.
+-- Kept here, below `upload`, because both read upload.fingerprint.
+
+-- {{{ answers.shared_copy
+-- Another message's packed entry for `path` that this message may share:
+-- same path, a recorded fingerprint equal to the file's fingerprint now,
+-- its zip still on disk.  Returns a copy of that entry, or false.  An entry
+-- written before #316 has no fingerprint and is never shared: what it was
+-- packed from cannot be compared.
+function answers.shared_copy(state, name, path)
+    local now_fp = upload.fingerprint(path)
+    if not now_fp then return false end
+    for other, meta in pairs(state) do
+        local pk = other ~= name and meta.packed and meta.packed[path]
+        if pk and pk.fingerprint == now_fp and file_exists(pk.zip) then
+            local copy = {}
+            for k, v in pairs(pk) do copy[k] = v end
+            return copy
+        end
+    end
+    return false
+end
+-- }}}
+
+-- {{{ answers.zip_in_use
+-- Whether any packed entry names `zip`, apart from message `except_name`'s
+-- entry for `except_path` -- or, when except_path is false, apart from
+-- every entry of that message (the message itself is going).
+function answers.zip_in_use(state, zip, except_name, except_path)
+    for other, meta in pairs(state) do
+        for path, pk in pairs(meta.packed or {}) do
+            local excepted = other == except_name and (not except_path or path == except_path)
+            if pk.zip == zip and not excepted then return true end
+        end
+    end
+    return false
+end
+-- }}}
+
 -- Pack a file or folder into a zip in the pending folder, with the shared
 -- zip library's packer (#309; rmail used to run zip).  Returns (zip path,
 -- SHA-256, packed size, unpacked size), or nil and a reason:
@@ -5742,14 +5790,33 @@ local function sync_outbox(my_name)
                                         -- or it keeps saying "not found" beside a
                                         -- file that is being sent.
                                         clear_missing_marker(OUTBOX .. "/" .. name, filepath)
-                                        local expected_size = measure_size(filepath) or 0
-                                        local zip_path, checksum, comp_size = compress_attachment(filepath)
-                                        if zip_path then
+                                        -- Another message may already hold a
+                                        -- copy of the file as it is now (#316):
+                                        -- share it rather than pack a second.
+                                        local shared = answers.shared_copy(state, name, filepath)
+                                        local fingerprint = not shared and upload.fingerprint(filepath)
+                                        local expected_size = not shared and (measure_size(filepath) or 0)
+                                        local zip_path, checksum, comp_size
+                                        if not shared then
+                                            zip_path, checksum, comp_size = compress_attachment(filepath)
+                                        end
+                                        if shared then
+                                            packed = shared
+                                            state[name].packed = state[name].packed or {}
+                                            state[name].packed[filepath] = packed
+                                            log("sharing the packed copy of %s with %s (unchanged since packed)",
+                                                filepath, name)
+                                        elseif zip_path then
                                             packed = {
                                                 zip = zip_path, checksum = checksum,
                                                 total_chunks = math.max(1, math.ceil(comp_size / cfg.chunk_size)),
                                                 expected_size = expected_size,
                                                 filename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath,
+                                                -- what it was packed from, read just
+                                                -- before packing; compress_attachment
+                                                -- refuses a file that changes while
+                                                -- packed, so it describes these bytes
+                                                fingerprint = fingerprint or nil,
                                             }
                                             state[name].packed = state[name].packed or {}
                                             state[name].packed[filepath] = packed
@@ -5868,9 +5935,16 @@ local function sync_outbox(my_name)
                         end
                     end
                     if not needed then
-                        os.remove(pk.zip)
+                        -- the file goes only when no other message's entry
+                        -- names it (#316); this message's entry goes either way
+                        if answers.zip_in_use(state, pk.zip, name, path) then
+                            log("packed copy of %s for %s released: every recipient has answered; another message still uses it",
+                                path, name)
+                        else
+                            os.remove(pk.zip)
+                            log("packed copy of %s for %s removed: every recipient has answered", path, name)
+                        end
                         state[name].packed[path] = nil
-                        log("packed copy of %s for %s removed: every recipient has answered", path, name)
                     end
                 end
                 if state[name].packed and not next(state[name].packed) then
@@ -6287,8 +6361,14 @@ local function sync_outbox(my_name)
     -- A message's record is going: its packed copies go with it (#314).
     local function drop_packed(name)
         for path, pk in pairs(state[name].packed or {}) do
-            os.remove(pk.zip)
-            log("packed copy of %s for %s removed: the message is gone", path, name)
+            -- kept while another message's entry names it (#316)
+            if answers.zip_in_use(state, pk.zip, name, false) then
+                log("packed copy of %s for %s released: the message is gone; another message still uses it",
+                    path, name)
+            else
+                os.remove(pk.zip)
+                log("packed copy of %s for %s removed: the message is gone", path, name)
+            end
         end
     end
 

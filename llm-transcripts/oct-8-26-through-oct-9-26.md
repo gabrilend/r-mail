@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 19:38:38
+Generated on: 2026-10-09 20:07:33
 Models: claude-opus-5-5
 
 ## Contents
@@ -24,6 +24,10 @@ Models: claude-opus-5-5
    into rmail. The router check is gone, and the sealer now works on plain-http
    pages, all tested and committed. Next, build rmail's side that refuses
    everything but plain messages from a website contact.
+6. 2026-10-09 19:41, after Request 8 - I'm working through your list for rmail:
+   the website contact and the feedback sorter are built and passing their
+   tests, and I'm waiting for the full test suite to finish. Next I commit them,
+   then fix the unstable consent-form test.
 
 --------------------------------------------------------------------------------
 
@@ -1195,6 +1199,59 @@ The sorter works. Status so far:
 I'm waiting for the full suite to finish before committing. After that I'll make
 the follow-up fix for the unstable test, then build the shared packed copy
 (316). The suite will wake me when it's done.
+
+--------------------------------------------------------------------------------
+
+*[background task] Background command "Run every test script in the background"
+completed (exit code 0)*
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 8 (continued)
+
+> The issue note about the follow-up fix (115) belongs to the next change, and
+> the phase-3 progress file belongs with issues 316 and 317. So this commit
+> names its files explicitly:
+
+*[commit] 9ec702e7b in r-mail - A website can be a contact that may only send plain messages, and a project's feedback mailbox files its notes like the site*
+
+> Before adding a field to the delivery's record, I'll make sure that record
+> isn't sent to the recipient wholesale. If it were, the new field would travel
+> over the wire:
+
+> The request is built field by field, so an extra field stays local. Making the
+> change:
+
+> The fix didn't work: the gaps are still random (23 to 52 seconds). My
+> explanation was incomplete. Reading the sender's log from one of these runs:
+
+> All five pass. The timer issue's note needs the busy retry added beside the
+> follow-up:
+
+*[commit] cf74f21f2 in r-mail - Follow-up work for a contact goes at once, and a "busy" answer is retried within seconds*
+
+> Only those two places delete a packed copy, and both now check for sharing
+> first. Writing 316's test with the stand-in recipient:
+
+> All 8 cases pass. Against the old daemon, which packs per message:
+
+> The old daemon packs two copies, and 5 cases fail, as they should. Now the
+> attachment tests, to make sure sharing broke nothing in the existing transfer
+> paths:
+
+> Those run in the background (several minutes). Meanwhile, the attachments
+> guide may describe a packed copy as belonging to one message:
+
+> Now issue 316's record of what was built:
+
+> While the attachment tests run, I'll look at the rest of issue 714, the public
+> link page, to see how much it would take and what it still needs from you:
+
+*[commit] d79c548e5 in r-mail - The public-link design records its October decisions: encrypted pages, the key in the link*
+
+Committed (`d79c548`). The attachment tests are still running; when they finish
+I'll commit the shared packed copy (316) and bring you the questions for 317 and
+714.
 
 --------------------------------------------------------------------------------
 

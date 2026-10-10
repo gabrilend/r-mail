@@ -27,12 +27,14 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#312](completed/312-a-declined-attachment-is-not-offered-again.md) — Each recipient's answer about an attached file is kept**  The sender keeps, for every outbox message, every recipient and every attached path, that recipient's answer.
 - **[#313](completed/313-cancelling-an-attachment-keeps-the-message.md) — Cancelling an attachment cancels the attachment, not the message**  Stopping one attachment transfer is its own encrypted message, `/deliver` with `{"type": "attachment_cancel", "attachment_id": …}` (the message id rides along for the log, unused).
 - **[#314](completed/314-every-recipient-gets-the-attachment.md) — Every recipient gets the same attachment, however late they are reached**  The `attach:` line stays as the author wrote it.
+- **[#316](completed/316-a-file-attached-to-several-messages-is-packed-once.md) — A file attached to several messages is packed once, not once per message**  A packed entry records the file's `fingerprint` (read just before packing).
 
 ## Open
 
 - **[#311](311-received-attachments-are-untrusted-input.md) — A received attachment is untrusted input, and is checked as one**  A contact who holds a shared key can send an attachment: a request (file name, declared size), the owner's consent, then numbered chunks of a zip file, each carrying its own SHA-256 and the whole zip's SHA-256.
 - **[#311c](311c-phone-uploads-are-verified.md) — A phone upload is verified piece by piece and as a whole, and must be one file**  The phone sends a file to its home mailbox like this (`RmailClient.uploadFileCompressed`, Kotlin):
 - **[#315](315-loopback-attachments-via-chunk-system.md) — Self-delivery silently drops attachments (loopback must still use the chunk system)**  Sending a message to your own name (`to: sorelu` on the sorelu mailbox) delivers the body only — any `attach:` files are silently dropped.
+- **[#317](317-a-single-file-is-sent-without-a-packed-copy.md) — A single file is sent from where it lies, without a packed copy**  Before a file is offered it is packed into a zip in the pending folder (`compress_attachment`; stored, not compressed, by the shared zip library, #309), its SHA-256 and piece count are fixed, and pieces are read from that zip.
 
 <!-- notes: kept when regenerated -->
 

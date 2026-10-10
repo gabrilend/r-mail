@@ -1,0 +1,83 @@
+# #317 — A single file is sent from where it lies, without a packed copy
+
+## Status
+
+Open.  Filed 2026-10-04 from the ritzmenardi.com shrine: its server
+(a Linode with 25 GB of disk) must send an 8.8 GB zip, and today that
+needs room for the zip and for r-mail's packed copy of it, ~17.6 GB, and
+while a newer zip replaces the old one, double that.
+
+## Current Behavior
+
+Before a file is offered it is packed into a zip in the pending folder
+(`compress_attachment`; stored, not compressed, by the shared zip library,
+#309), its SHA-256 and piece count are fixed, and pieces are read from
+that zip.  The copy exists so the bytes stay the same for as long as the
+transfer takes (days, for a large file on a slow line): every piece
+carries the whole zip's checksum, fixed when piece 0 goes out (#311b),
+so the source must not change underneath it.  A file that changes while
+it is being packed is packed again (#311d).
+
+For a file that is already a finished, unchanging thing (a zip of a
+website, a video), the copy is the whole cost of sending it a second
+time, in disk, and buys nothing the file didn't already have.
+
+## Intended Behavior
+
+A single regular file (not a folder) is sent without being copied.  A
+stored zip around one file is three parts: a local header (name, sizes,
+CRC-32), the file's bytes unchanged, and a central directory at the end.
+So the "zip" can be virtual: its header and directory are computed once,
+small, and kept in the pending folder; any piece is assembled on demand
+from header bytes, file bytes read at the right offset, and directory
+bytes.  The receiver sees exactly the bytes a packed zip would have had,
+so nothing changes on its side: its checks (#311b, #311e, #310) still
+hold.
+
+What the copy used to guarantee, the sender now checks instead:
+- The CRC-32 and the whole-zip SHA-256 are computed by reading the file
+  once at offer time (no copy is written).
+- The file's fingerprint (size, modification time, and inode, so a file
+  replaced by another of the same size is noticed) is recorded then and
+  checked before every piece is served.
+- If it no longer matches, the file changed: the attachment is *lost*,
+  exactly as #314 handles a lost copy (transfers stop, recipients get a
+  withdrawal, a note goes under the `attach:` line).
+
+Folders, and files under a size threshold, keep being packed as now:
+small files cost nothing to copy, and a folder's zip has many entries to
+lay out.
+
+## Suggested Implementation Steps
+
+1. In the shared zip library, a "stored single-file layout": given a path
+   and its CRC-32, return the header bytes, the directory bytes and the
+   total length; and a reader that returns bytes N..M of the virtual zip.
+   Check it against `zip_writer.pack` on the same file: identical bytes.
+2. A config key for the threshold (e.g. `attachment_copy_below`, default
+   a few MB); above it, single files go virtual.
+3. In the outbox record, a packed entry gains a kind: `copy` (as now) or
+   `virtual` (source path, fingerprint, header/directory file, checksum).
+4. Where pieces are read for sending, a virtual entry reads through the
+   layout, after checking the fingerprint; a mismatch goes the #314
+   *lost* route.
+5. Tests: a virtual transfer of a large sparse file arrives
+   byte-identical to a packed one; touching the file mid-transfer stops
+   it as lost; replacing it with a same-size file stops it too (inode);
+   the pending folder holds only the small header/directory file.
+
+## Open questions
+
+- Should the threshold default to "always virtual for single files", or
+  stay conservative (only large files) until it has run for a while?
+- A file modified in place without its modification time changing would
+  slip past the fingerprint.  Is a periodic re-hash of the bytes already
+  sent (cheap, sequential) worth it for very long transfers?
+
+## Related
+
+- #316 — one packed copy per file across messages (complements this:
+  folders and small files still pack).
+- #314 — the *lost* route a changed source takes.
+- #311b, #311d — the checksums and the changed-while-packed rule.
+- #309 — the shared zip library the layout lives in.
