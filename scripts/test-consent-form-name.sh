@@ -21,10 +21,20 @@
 #   two attachments   two-photos with a.jpg and b.jpg, which must get two
 #                     separate forms
 #
-# and it checks the forms that appear in the receiver's inbox.  Only the
-# sender dials; the receiver holds the sender's key but no address, because
-# two daemons dialling each other at once stall and file duplicates (a
-# known daemon problem this test is not about).
+# and it checks the forms that appear in the receiver's inbox.
+#
+# Each mailbox has the other's local address written down (127.0.0.1),
+# which is how two mailboxes on one machine are set up since they stopped
+# looking for each other on the home network (#418, #409).  Until
+# 2026-10-09 the receiver was given no address, so that only the sender
+# would dial -- but the sender's start-up announcement gave it the
+# sender's *public* address anyway, which this machine's router does not
+# loop back.  The receiver then spent 8 s timing out on it, answering the
+# sender "busy" meanwhile, and the sender's retry waited a random 0 to
+# 60 s: this test missed its 60 s limit about one run in six.  Now a busy
+# answer is retried within 5 s, and the attachment offers that follow a
+# delivered message go at once (#115, follow-up), which the third section
+# below measures.
 #
 # Not covered: a request for a message the receiver has no record of (it
 # was deleted before the request came).  The form is then named by the
@@ -89,7 +99,8 @@ make_mailbox "$WORK/receiver" receiver "$RECEIVER_PORT"
 
 printf 'receiver.ip    = "127.0.0.1"\nreceiver.port  = %s\nreceiver.token = "%s"\n' \
     "$RECEIVER_PORT" "$TOKEN" > "$WORK/sender/contacts"
-printf 'sender.token = "%s"\n' "$TOKEN" > "$WORK/receiver/contacts"
+printf 'sender.ip    = "127.0.0.1"\nsender.port  = %s\nsender.token = "%s"\n' \
+    "$SENDER_PORT" "$TOKEN" > "$WORK/receiver/contacts"
 
 printf 'a photo standing in\n' > "$WORK/sender/files/20260903_154820.jpg"
 printf 'first photo\n'         > "$WORK/sender/files/a.jpg"
@@ -147,6 +158,28 @@ if [ -f "$FORM_A" ] && [ -f "$FORM_B" ]; then
 else
     note_fail "the two forms are not both there"
     info "inbox holds: $(ls "$INBOX" | tr '\n' ' ')"
+fi
+
+echo ""
+echo "the offers follow their messages at once"
+# A message's attachment requests can only be built from the record of
+# its delivery, so they go in the next cycle.  That cycle used to wait for
+# the receiver's next turn, 30 s give or take 30, which made this test
+# miss its 60 s limit about one run in six; a delivery with attachments now
+# makes the next turn come at once (#115, follow-up).  Measured from the
+# sender's log: the last "sent:" of a message to the last request sent.
+log_time() { date -d "$(printf '%s' "$1" | cut -c1-19)" +%s; }
+last_sent=$(grep "sent: .* -> receiver" "$WORK/sender.log" | grep -v "attachment request" | tail -1)
+last_request=$(grep "sent attachment request to receiver" "$WORK/sender.log" | tail -1)
+if [ -n "$last_sent" ] && [ -n "$last_request" ]; then
+    gap=$(( $(log_time "$last_request") - $(log_time "$last_sent") ))
+    if [ "$gap" -le 10 ]; then
+        ok "the last request went out ${gap}s after the last message"
+    else
+        note_fail "the last request went out ${gap}s after the last message (over 10s)"
+    fi
+else
+    note_fail "the sender's log lacks a sent message or a sent request"
 fi
 
 echo ""

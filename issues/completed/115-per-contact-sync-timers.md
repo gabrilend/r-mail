@@ -138,6 +138,33 @@ short-circuit behaviour.
   keeping poll-based self-healing.
 - **Startup** — seed every contact with `next_due = now` so the first
   cycle after boot contacts everyone.
+- **Follow-up** (added 2026-10-09) — a success that itself creates more
+  work for the same contact marks it due again at once, instead of
+  leaving that work to wait out the floor and its jitter (30 ± 30 s).
+  The case: a message with attachments.  Its body is delivered first;
+  the attachment request can only be built from the record of that
+  delivery, so it waits for the contact's next turn, anywhere from 0 to
+  60 s later.  This made `scripts/test-consent-form-name.sh` fail about
+  one run in six (start-up address lookups, a first cycle, then a
+  random wait of up to a minute, against a 60 s limit); the owner had
+  guessed "sync cycle not being reset".  The builder of a delivered
+  message with attachments sets `ctimer.follow_up[name]`; when
+  `run_sync_cycle` applies that contact's success it sets `next_due` to
+  now, and the next loop pass sends the requests.  Bounded: a follow-up
+  is only ever set by a delivery, and the requests it leads to wait for
+  the recipient's answer, which arrives inbound.
+- **Busy** (added 2026-10-09) — a "busy" answer (#120: they were dialing
+  us at that moment) is retried 1 to 5 s later, drawn at random, instead
+  of on the floor and its jitter; the log line always said "will try
+  again shortly".  Random so two daemons dialing each other do not
+  collide again in step, and it wins over a delivery's follow-up in the
+  same cycle for the same reason.  Found in the same test: two mailboxes
+  that had just met dialed each other at once, each answered the other
+  "busy", and the sender's retry then waited up to a minute.  The test now
+  writes each mailbox's local address into the other's contacts, as two
+  mailboxes on one machine are set up since #418, and measures the gap
+  from the last message to the last attachment request (at most 10 s):
+  eight runs gave 0–1 s; the code before gave 12–51 s in three of four.
 
 ### Persistence
 

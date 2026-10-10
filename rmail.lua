@@ -905,6 +905,10 @@ local ctimer = {
     skipped   = {},   -- contacts whose ops we withheld this cycle
     attempted = {},   -- contacts we actually tried this cycle
     outcome   = {},   -- name -> did we reach them at all this cycle
+    -- name -> true: a success this cycle left more to send them (#115,
+    -- follow-up), so run_sync_cycle makes them due at once instead of
+    -- after the floor and its jitter (0 to 60 s)
+    follow_up = {},
 }
 
 -- A mailbox with no contacts still has an outbox to look at: messages to
@@ -3473,8 +3477,15 @@ local function http_post_batch_with_fallback(requests)
             -- address ops later in the same cycle, spreading work that should
             -- have gone out together across several cycles.
             local reached = (r.ok or r.status or r.busy) and true or false
-            -- and a busy contact is not "unreachable" in the cycle's summary
-            if r.busy then note_contact_result(cname, true) end
+            -- and a busy contact is not "unreachable" in the cycle's summary.
+            -- Its request is retried in a few seconds (#115 follow-up), not
+            -- on the floor's 30 +/- 30 s: the log promises "shortly", and a
+            -- minute's wait is what made two mailboxes that just met take
+            -- most of a minute to send attachment offers (2026-10-09).
+            if r.busy then
+                note_contact_result(cname, true)
+                ctimer.follow_up[cname] = "busy"
+            end
             if ctimer.outcome[cname] == nil or reached then
                 ctimer.outcome[cname] = reached
             end
@@ -5655,6 +5666,11 @@ local function sync_outbox(my_name)
                                     body_checksum = sha256_of_bytes(body or ""),
                                     mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
+                                    -- the attachment requests can only be
+                                    -- built from the record of this delivery,
+                                    -- so a success owes a follow-up (#115);
+                                    -- local to this daemon, never sent
+                                    has_attachments = #(entry.attachments or {}) > 0,
                                 }
                             end
                         else
@@ -6177,6 +6193,12 @@ local function sync_outbox(my_name)
                         }
                     end
                     log("sent: %s -> %s", op.filename, op.recipient)
+                    -- the offers of its attachments go next cycle; make it
+                    -- come at once rather than up to a minute later (#115)
+                    -- (never over a "busy" from earlier in this cycle)
+                    if op.has_attachments and not ctimer.follow_up[op.recipient] then
+                        ctimer.follow_up[op.recipient] = true
+                    end
                     did_work = true
                 end
                 -- failure: rolls into the unreachable summary (#114)
@@ -7996,8 +8018,24 @@ local function run_sync_cycle(rt)
         else
             ctimer.mark_failure(name, now)
         end
+        -- #115 follow-up, only after a success (a failed contact keeps its
+        -- backoff):
+        --   true    a success left more to send them (the attachment
+        --           offers that follow a delivered message): due now, and
+        --           the main loop's next pass sends it
+        --   "busy"  they answered "busy" (dialing us at that moment): due
+        --           in 1 to 5 s, drawn at random -- not now, or two
+        --           daemons dialing each other would collide again in
+        --           step; "busy" wins over true, for the same reason
+        local follow = ctimer.follow_up[name]
+        if reached and follow == "busy" then
+            ctimer.get(name).next_due = now + 1 + random_below(5)
+        elseif reached and follow then
+            ctimer.get(name).next_due = now
+        end
     end
     ctimer.outcome = {}
+    ctimer.follow_up = {}
 
     for name in pairs(load_contacts()) do
         if name ~= rt.my_name
