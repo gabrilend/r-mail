@@ -68,6 +68,28 @@ lay out.
 
 ## Open questions
 
+- *The owner, 2026-10-09:* "if the file we want to send is a zip file,
+  and it's already chunked... then we should just, skip the chunking
+  step. Easy."  A simpler shape than the virtual zip above: an attached
+  `.zip` is sent as it is, pieces read from it where it lies, no packing.
+  The catch, asked the same day: the receiver unpacks whatever zip
+  arrives, so the recipient would get the zip's *contents* (a folder),
+  not the `.zip` file itself, which is what the virtual zip keeps.
+  Which does the recipient get?
+  *Answered 2026-10-09:* "we should make it so that they should get the
+  file in whatever format it is in before it's chunked. In this specific
+  case, we are taking a zip file, chunking it, and sending those, so it
+  rebuilds into a single zip, not a bunch of chunks" — and "how about if
+  we point to a manifest file then?"  So: a single file travels as its
+  own bytes, in pieces, with a small manifest (the offer) saying what
+  the pieces rebuild into — its name, exact size and checksum, and that
+  it is one file, not a zip to unpack.  The receiver joins the pieces
+  into that file and does not unpack it.  No zip wrapper, virtual or
+  real.  (Today's result for a recipient is the same — a single file is
+  zipped, then unzipped on arrival — so the change is the sender's disk
+  and the receiver's unpacking, not what the recipient ends up with.)
+  Folders keep travelling as zips.  Still to settle: what an older
+  receiver, which would try to unpack the pieces, is sent.
 - Should the threshold default to "always virtual for single files", or
   stay conservative (only large files) until it has run for a while?
 - A file modified in place without its modification time changing would

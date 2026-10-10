@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 20:07:33
+Generated on: 2026-10-09 20:20:36
 Models: claude-opus-5-5
 
 ## Contents
@@ -28,6 +28,10 @@ Models: claude-opus-5-5
    the website contact and the feedback sorter are built and passing their
    tests, and I'm waiting for the full test suite to finish. Next I commit them,
    then fix the unstable consent-form test.
+7. 2026-10-09 20:10, after Request 8 - I'm finishing the r-mail work you handed
+   me. The website contact, feedback sorter and stable consent test are all
+   committed. Next, once the attachment tests pass, I'll commit the shared
+   packed copy and bring you questions for issues 317 and 714.
 
 --------------------------------------------------------------------------------
 
@@ -1252,6 +1256,189 @@ completed (exit code 0)*
 Committed (`d79c548`). The attachment tests are still running; when they finish
 I'll commit the shared packed copy (316) and bring you the questions for 317 and
 714.
+
+--------------------------------------------------------------------------------
+
+*[background task] Background command "Run the attachment-related tests"
+completed (exit code 0)*
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 8 (continued)
+
+> All 8 attachment tests pass. Completing 316: move it to `completed/`,
+> regenerate the progress files, and validate:
+
+> The phase-3 progress file lists issue 317, which is still untracked. I'll
+> commit 317's file in the same commit so the link resolves:
+
+*[commit] 99ea298f2 in r-mail - A file attached to several messages is packed once, and kept until no message needs it*
+
+Nothing is left uncommitted in r-mail. Here's where everything stands.
+
+## Done and committed
+
+| Commit | What it does |
+|---|---|
+| `5c959f1` | The project's `tmp` link is ignored by git. |
+| `9ec702e` | **Website contacts** (`listen = true`). A website's contact can send a plain message and nothing else: five allowed fields, a body of at most 64 KiB. Everything else gets a "forbidden" answer, a log line, and changes nothing, whether it arrives bare or wrapped in a browser POST. Nothing is ever sent to it. The test has 23 cases, and 16 of them fail on the old code. I've told the W client session. |
+| `9ec702e` | **Feedback sorting.** A project's feedback mailbox files each website note into folders mirroring the site, using the page the note names, checked against the site's list of pages. Bad notes go to `feedback/_refused/` with the reason. A person's messages stay in the inbox. |
+| `cf74f21` | **The unstable consent-form test.** Your guess was right in spirit: in two places the daemon waited out a full random turn (0–60 s) when it shouldn't. An attachment offer waited for the turn after its message was delivered, and a "busy" answer, which the log says will be retried "shortly", also waited up to a minute. Both now go at once or within 5 s. The test also gave the receiver an address this machine's router can't reach; it now writes down the local one. Eight runs on the new code: offers 0–1 s after their message, all passing. On the old code: 12–51 s in 3 runs of 4. |
+| `99ea298` | **Issue 316.** A file attached to several messages is packed once; the copy is removed when no message needs it. For the shrine, a 9 GB file sent in three messages now takes 9 GB of space instead of 27. Five of the test's 8 cases fail on the old code. |
+| `d79c548` | Issue 714's recorded October decisions, committed as the other session wrote them. |
+
+I also opened issue 215: a hook gets a message body as one program argument,
+which Linux caps at 128 KiB. That affects every contact, not just websites, and
+isn't built.
+
+The full suite passed before the last two code changes. Afterwards I re-ran the
+tests closest to each change, and all passed.
+
+The website-contact work needed three decisions you hadn't made, so I made them;
+they're recorded in that issue for you to overrule:
+- **The word is `listen`:** the W client already writes it.
+- **Only by the mark:** a contact with a token and no address isn't treated as a
+  website unless marked.
+- **64 KiB body limit:** small enough that a checking hook can always be
+  started.
+
+## Waiting on you
+
+**Issue 317: send one big file without any packed copy.** This is what lets the
+8.8 GB zip fit on the shrine's 25 GB server. It changes the shared zip library
+in your `my-libs`, so I haven't touched it. Two questions:
+1. **Which files go uncopied?** I suggest single files of 64 MiB and up, with
+   the size as a config setting. Small files cost almost nothing to copy, and
+   the copy path is the one that's well tested.
+2. **Should rmail re-read the bytes already sent during a long transfer?** I
+   suggest no. The receiver already checks the whole file's checksum when the
+   last piece arrives, so an in-place edit that slips past the fingerprint check
+   (size, time, inode) is caught there. What's lost is the transfer time, not
+   correctness.
+
+**Issue 714: the public link page.** Its first step is "answer the open
+questions":
+1. **Code length and unlock speed.** The words in the link are now also the
+   decryption key. How many words, and how slow should unlocking be? The
+   proposal on file is 6 words and about one second on a phone.
+2. **Shared folders.** How should they work when encrypted? A browsable listing
+   and a download-as-zip both need a new design.
+
+Can you answer 317's first question twice? Once as the largest file you'd be
+comfortable having rmail copy, and once as the smallest file where you'd rather
+it send straight from where it lies. If the two numbers differ, the gap between
+them is where the setting's default should go.
+
+--------------------------------------------------------------------------------
+
+### User Request 9
+
+> Issue 317: send one big file without any packed copy.
+
+if the file we want to send is a zip file, and it's already chunked... then we
+should just, skip the chunking step. Easy.
+
+> 1. Code length and unlock speed. The words in the link are now also the
+> decryption key. How many words, and how slow should unlocking be? The proposal
+> on file is 6 words and about one second on a phone.
+
+what do you mean by unlock speed? 6 words is fine, but we should be allowed to
+use as many as we want. Remember this token is in cleartext, so it's not really
+encrypting anything from a determined attacker. It'll be posted directly on the
+website, so...
+
+Can you describe the shape to me again? I want to make sure I haven't
+conceptually drifted.
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 9
+
+> Before answering, I'll record your two answers in the issues, so they don't
+> live only in this conversation:
+
+I've recorded both answers in the issues. Your question about drift is fair,
+because two different "words in cleartext" designs came up today, and they point
+in opposite directions. Here are both side by side.
+
+## Shape A: a website sending *to* you (the feedback box, built today)
+
+```
+visitor's browser ──sealed note──► your feedback mailbox
+```
+
+- **Who's involved:** the website is one contact in your mailbox, with a token.
+  The token sits in the site's delivery script, so anyone who loads the site can
+  read it. That's accepted.
+- **Why that's safe:** the token can do only one thing, deliver a plain note
+  into your inbox. Your mailbox refuses everything else from it and never sends
+  anything back.
+- **What the encryption is for:** here it barely protects anything, since the
+  token is public. It exists because rmail only accepts sealed messages.
+
+## Shape B: you publishing a message *to* anyone (issue 714, not built)
+
+```
+your outbox file ──"to: url"──► rmail serves it on a web port ──► anyone with the link reads it
+```
+
+1. **Publishing:** you write a message in your outbox with a line `to: url`, the
+   way you'd name a contact. rmail then publishes that message and the files
+   listed under that line.
+2. **The link:** rmail writes a line like `URL:
+   http://yourhost:port/#ivory-chair-signal-dormant-visual-oak` into the outbox
+   file. The words are the whole secret.
+3. **Opening it:** a browser fetches one plain page from rmail (the decrypter).
+   The page reads the words after `#`, which browsers never send to the server,
+   and makes two things from them:
+   - the message's address on the server, a scrambled form of the words;
+   - the key that unlocks the message.
+4. **What rmail holds:** the message and its files stored locked, filed under
+   the scrambled address. It never sees the words.
+5. **Files:** they arrive in locked pieces kept in the browser until all are
+   there, then join into one file. That's how rmail itself transfers.
+6. **Changing or removing it:** editing the outbox file changes the page.
+   Removing `to: url` takes it down.
+
+## "Unlock speed"
+
+It means deliberately making the words-to-key step slow, say one second of
+computing. The purpose is to stop someone who copied the locked message from
+trying millions of word guesses per second. That only matters if the link is
+**kept secret**: given to one person, or written on a post-it.
+
+Your point settles it: if the link is posted on a website, anyone can read the
+words, so no guessing is needed and slowness protects nothing. What the lock
+still buys is narrower: the machine serving the page never holds the readable
+message, and nobody can find a published message without its link.
+
+So my recommendation: a fast unlock, 6 words by default, as many as you like.
+Before I write that down, one check: **are these links always posted publicly,
+or will some be handed to just one person?** If some are private, a slow unlock
+is worth having for those.
+
+## Issue 317: your "skip the packing" idea
+
+That's simpler than what the issue describes, and it does avoid the copy. rmail
+would read pieces straight out of your existing zip. One catch changes what the
+recipient gets. The receiving side unpacks whatever zip arrives, so with your
+shortcut the recipient gets the zip's **contents**, a folder of the website's
+files, not the `.zip` file itself. The issue's version wraps the zip one more
+time without copying, so the recipient gets the `.zip` intact.
+
+**Which should a recipient of the shrine's zip end up with: the folder, or the
+zip file?**
+
+## A check on drift, asked twice
+
+Could you describe shape B back to me twice?
+1. From the reader's side: what they're handed, what they type or click, and
+   what they end up holding.
+2. From your side: what you write in your outbox, and what you'd do to change or
+   remove what you published.
+
+If both descriptions match the steps above, we're aligned. If either one sounds
+like shape A (a token that lets people send to you), that's where the drift is.
 
 --------------------------------------------------------------------------------
 

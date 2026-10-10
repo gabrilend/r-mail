@@ -449,6 +449,42 @@ public_url_words = 5
   copied.  Proposed: 6 words, and an unlock tuned to about a second on
   a phone; the issue's "5+ words" was set when the words only had to
   resist guessing against the server.  Asked 2026-10-04.
+  *Answered in part 2026-10-09:* "6 words is fine, but we should be
+  allowed to use as many as we want" — 6 by default, no upper limit
+  (`public_url_words`).  On the unlock's slowness the owner asked what it
+  means, adding: "Remember this token is in cleartext, so it's not really
+  encrypting anything from a determined attacker. It'll be posted
+  directly on the website, so..."  Explained the same day (a slow unlock
+  only protects a link that is *not* published).  Then: "unlock speed is
+  irrelevant because a determined cracker would just make their own
+  hacking tools that do not have such a delay" — not quite how a slow
+  unlock works (the delay is work every guess must do, not a pause a
+  tool can skip), said back the same day; but the outcome stands: **no
+  slow unlock**.  The protection comes from the number of words, which
+  the owner may raise freely.
+- **What this is for** (the owner, 2026-10-09, correcting a drift): "for
+  allowing an rmail user to send files or messages to someone who doesn't
+  have rmail, and only has a browser, and doesn't have the ability to
+  open ports on their system."  A link is handed to one person, not
+  posted publicly.  And: "We might be able to set it up so they can
+  respond, using shape A" — the website-contact way in (#420): a reply
+  box on the page, sealing in the browser.  Proposed the same day: each
+  published message gets its own listen-only contact, whose token is
+  derived from the link's words (so only someone holding the link can
+  reply, and nothing secret is in the page's files), the reply posted to
+  the same address that served the page; removing `to: url` removes the
+  contact and refuses later replies.  Waiting on the owner.
+- **Found 2026-10-09, plain http changes two parts of the design**:
+  browsers give a page their built-in decryption and their private file
+  storage (the Origin Private File System, named under "Decisions") only
+  on https or localhost.  So the decrypter carries its own AES-GCM
+  *decryption* in plain JavaScript (as the skill's `rmail-seal.js`
+  carries sealing, checked on a plain-http page in Firefox), and pieces
+  wait in IndexedDB, which every page gets, rather than in private file
+  storage.  Measured in headless Firefox 157 on a page served over plain
+  http from 192.168.1.100: `isSecureContext` false, `crypto.subtle` and
+  `navigator.storage` (so `getDirectory`) absent, `indexedDB` present and
+  a binary write to it succeeded, `getRandomValues` present.
 - **Folders.**  "Attachments & directories" shares a folder as a
   browsable listing with a `download.zip`; encrypted, the listing and
   the zip have to be built and decrypted another way.  Not yet designed.
