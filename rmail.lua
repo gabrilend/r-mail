@@ -2236,21 +2236,30 @@ local function handle_deliver_message(data, sender)
             if suffix == "" then suffix = "2" end
             filename = sanitize_filename(subject .. "-" .. suffix)
             target = INBOX .. "/" .. filename
-            -- Loop guard: if this filename is *also* taken somehow
-            -- (extremely unlikely — 6 hex chars of message_id), keep
-            -- appending numeric suffixes until we find a free slot.
-            local n = 2
-            while file_exists(target) do
-                filename = sanitize_filename(subject .. "-" .. suffix .. "-" .. n)
-                target = INBOX .. "/" .. filename
-                n = n + 1
-                if n > 99 then break end
-            end
         end
         -- The remaining case (existing AND same sender AND same
         -- message_id) is already handled by the early return above
         -- — that's the "more attachments being delivered for the same
         -- message" path.  We shouldn't reach here for that case.
+        -- The other remaining case, a file with no record in the inbox
+        -- state (one the owner made by hand), keeps the subject's name
+        -- here and is moved aside by the numbering below.
+    end
+    -- The filesystem wins (owner, 2026-10-13): whatever name was chosen
+    -- above, if a file already holds it, the newcomer takes the next free
+    -- "-2", "-3" ... and nothing on disk is ever written over.  There is
+    -- no upper limit: the numbering used to give up after 99 and overwrite
+    -- the last, which a contact could force, since the sender chooses its
+    -- own message ids and the suffix above is their first six characters.
+    -- The sender-tagged name and a hand-made file reach here too; before
+    -- this, neither was checked (scripts/test-inbox-never-overwrites.sh).
+    if file_exists(target) then
+        local base, n = filename, 2
+        repeat
+            filename = sanitize_filename(base .. "-" .. n)
+            target = INBOX .. "/" .. filename
+            n = n + 1
+        until not file_exists(target)
     end
 
     if hooks.on_receive_raw then

@@ -1,6 +1,6 @@
 # Conversation Summary: 67f324ef-3722-49dc-89b5-052a25410816
 
-Generated on: 2026-10-09 20:36:11
+Generated on: 2026-10-09 20:45:36
 Models: claude-opus-5-5
 
 ## Contents
@@ -1697,6 +1697,161 @@ and wants to post something rude. Once as the friend you sent a private link,
 who's waiting to see your reply. If "at once" feels right for the friend but
 wrong for the stranger, the answer might be a per-link setting rather than one
 rule.
+
+--------------------------------------------------------------------------------
+
+### User Request 12
+
+I don't like the idea of adding a "kind" field. Can you tell me what happens if
+you take an 8.8gb zip file and you say "hey split this into 5mb chunks"? It
+should create a bunch of little .zip parts, right? And... what happens when you
+unzip them, is the inside a .zip file, or is the original 8.8gb zip's
+compression "replaced" by the 5mb version's compression?
+
+> - Writing in is shape A: the page seals a note with the token derived from the
+> link, and it lands in your inbox through a listen-only contact.
+
+this listen-only contact should be hidden from the user. It is part of the "to:
+url" pipeline.
+
+> - Identity is self-declared. Anyone holding the link can post under any name.
+> On a public link, that means anyone at all, including spam.
+
+yep. But it also means only the original "to: url" sender can delete or edit
+messages. Also, only they can send attachments.
+
+> 1. Does a reader's note appear on the page at once, like live chat, or only
+> after you let it through? On a public link, "at once" means anyone can post
+> anything there.
+
+at once, or after a refresh period. A sync cycle haha
+
+>   2. Should a reader be able to remove their own note? Today's rule says no.
+
+no.
+
+> 1. Decryption speed. I measured the hand-written cipher at 4.6 MiB a second. A
+> typical photo is instant. A 100 MB video takes about 20 seconds. The shrine's
+> 9 GB zip would take about half an hour of a desktop's processor, and several
+> times that on a phone. The slow parts are known:
+>      one checksum step works a bit at a time, and the cipher works a byte at a time. Table-based versions are usually ten times faster or more, so it's fixable, but it's real work.
+
+okay, what? You must have built it wrong. It shouldn't be that slow, it should
+be able to decrypt a 100MB video in like, 2 seconds max.
+
+> 4. Traffic can be tampered with. Already recorded: someone who can change
+> traffic on the way can swap the decrypter page itself.
+
+So, the "decrypter" page, this is for shape B, right? I thought we resolved this
+already... This is a critical concern, we need to make sure it works correctly.
+
+--------------------------------------------------------------------------------
+
+### Assistant Response 12
+
+> Before answering the zip question, I'll confirm how rmail's packing actually
+> writes the file, rather than answer from the issue's description:
+
+> Confirmed: every entry is stored with no compression ("method 0"), and pieces
+> are plain byte ranges of that one zip. Recording your answers in both issues:
+
+*[commit] 708575f05 in r-mail - The public-link and single-file issues record the owner's latest answers*
+
+All recorded and committed (`708575f`).
+
+## Splitting an 8.8 GB zip into 5 MB pieces
+
+The pieces are **not** little zip files. You couldn't open one on its own.
+Here's what rmail actually does (I checked the code just now):
+
+1. **Wrap:** it puts the 8.8 GB zip inside one new zip, using **"stored"**,
+   which means no compression at all. The original zip's bytes are copied in
+   unchanged, with a small label in front and a small table of contents at the
+   end.
+2. **Cut:** it slices that one wrapped file into 5 MB byte ranges, like cutting
+   a loaf. Piece 1 is bytes 0 to 5 MB, piece 2 the next 5 MB, and so on. A slice
+   has no meaning by itself.
+3. **Rejoin:** the receiver puts the slices back in order into the one wrapped
+   file and checks its checksum.
+4. **Open:** it opens the wrapper. Inside is the original 8.8 GB zip, byte for
+   byte, with its own compression intact. Nothing was replaced or recompressed,
+   because the wrapper never compressed anything.
+
+So the receiver already ends up with exactly the file you sent. The only waste
+is step 1, the wrapped copy on the sender's disk. Issue 317's original design
+removes that copy **with no new field**: the label and table of contents are
+tiny, so the sender keeps just those and builds each slice on the fly from them
+plus the original file. The receiver can't tell the difference, so older
+receivers keep working too. That's what I now propose. Do you agree?
+
+## Your shape-B answers
+
+All recorded:
+- notes appear after a sync period;
+- readers can't remove their own notes;
+- only the `to: url` sender edits, deletes, or sends attachments;
+- the reply contact is hidden inside the `to: url` pipeline and never appears in
+  the contacts file.
+
+## The speed: not wrong results, the slow method
+
+The arithmetic is correct: it matches the standards' test answers and Node's own
+cipher byte for byte. But it's the textbook form (the W client's code, which I
+copied), built to be easy to check against the standards. One step processes 1
+bit at a time, and the cipher works byte by byte. Fast versions do the same math
+with lookup tables over whole 32-bit words. I expect that to reach your
+2-seconds-per-100 MB, but I haven't measured it yet. I've written a 50 MiB/s
+floor into the issue as a test the decrypter must pass.
+
+The tampering answer below may also make this moot.
+
+## Tampering: yes, shape B. It was noted, not resolved
+
+On October 4 it was written down as an accepted limitation. Since you now call
+it critical, here's why plain http alone can't fix it, and what can.
+
+**Why it can't be fixed over plain http.** The browser learns what "the real
+decrypter page" is from the same connection the attacker controls. Someone who
+can change traffic on the way, like a hostile Wi-Fi or a compromised router, can
+hand over a different page that looks identical and quietly sends them the
+words. No check *inside* the page helps, because they replace the check too.
+This is exactly the problem https certificates solve.
+
+**What's already safe:**
+- the server never holds the words;
+- someone who only watches traffic can't read anything;
+- any change to the locked message or files is detected when they're unlocked.
+
+The gap is only the page itself.
+
+**What can close it:** the decrypter has to reach the reader once by a route the
+attacker can't touch, and after that only locked data travels over http.
+
+1. **The reader keeps a saved copy of the decrypter (my recommendation).** It's
+   one self-contained HTML file: you hand it over once (an email attachment, a
+   USB stick, a download they verify) and they open it from their own disk. It
+   then fetches only locked data from rmail, and tampering with that is
+   detected. There's a bonus: a page opened from a file counts as "secure", so
+   the browser's built-in encryption is available, running in hardware at
+   hundreds of MB a second. That also settles the speed problem.
+2. **https** for the decrypter page: out, as you said, because it needs a
+   certificate.
+3. **Accept the risk** for links where it doesn't matter, with the page saying
+   so plainly.
+
+Option 1 changes the reader's experience: there's a one-time "keep this file"
+step before they can open links. One thing needs testing before I'd promise it:
+that a page opened from a file is allowed to fetch from rmail's address. A test
+earlier this week showed sending works from a file page, but this would be
+reading.
+
+Shape A has the same weakness: a website's delivery script could be swapped on
+the way. There the worst case is notes going astray, which is why it didn't come
+up.
+
+Which way for tampering: the saved copy, or something you have in mind that I
+haven't listed? Could you describe it twice? Once as the reader the first time
+they get a link from you. Once as the reader the tenth time.
 
 --------------------------------------------------------------------------------
 
