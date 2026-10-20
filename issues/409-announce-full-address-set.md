@@ -236,6 +236,32 @@ exits cleanly when its mailbox directory disappears (checked every 3s, two
 misses in a row), so a pulled drive stops the daemon instead of crashing
 the interpreter mid-page-fault.
 
+### No guessing from digits (2026-09-23)
+
+Public vs local is never inferred from an address's digits any more:
+private ranges are reused everywhere, carrier NAT hands out private-looking
+public addresses, and a second router puts a reachable "private" network
+where the /24 rule says there is none.  Instead:
+
+- **Own addresses** are split by *source*: `.state/public_ip` (what outside
+  services see) is public, `.state/lan_ip` (our interface) is local.
+- **Received announcements** are filed by the sender's labels: `ips` ->
+  `ip`, `local_ips` -> `local-ip`.  No /24 filter on storing.
+- **`local-ip`** in the contacts file is kept as written (a warning only for
+  non-IPv4, which the same-network check cannot use yet).
+- **"On our LAN"** (whether to send our local address) = we hold a
+  `local-ip` for that contact, i.e. we were told.
+- **`ours_to_replace`**: every non-hostname `ip` entry.  Hostnames are told
+  apart by syntax, which is certain.
+- **Android**: the Add-address dialog has a Public/Local switch; Setup has
+  the same switch; no validation against digits; saved configs are no
+  longer re-sorted on load.
+
+Still inferred, deliberately: *whether this device is on that network right
+now* (same-/24 before trying a local address, daemon and phone).  Open
+question whether to relax it for multi-router homes.  Also still present:
+the pre-#365 LAN-peer cache, which goes with #365.
+
 ### Known gap (resolved -- see above)
 
 `list_files` skips dotfiles, so `.address-update-*` notices do **not**

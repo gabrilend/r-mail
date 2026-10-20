@@ -47,6 +47,10 @@ fun SetupScreen(
 ) {
     val context = LocalContext.current
     var host by remember { mutableStateOf(editConfig?.host ?: "") }
+    // Which kind of address `host` is: the user says, the digits don't.
+    var hostIsLocal by remember {
+        mutableStateOf(editConfig != null && editConfig.hosts.isEmpty() && editConfig.localHosts.isNotEmpty())
+    }
     // Blank for a new mailbox: every daemon picks its own port, so any
     // number filled in here would be a guess, and usually a wrong one.
     var port by remember { mutableStateOf(editConfig?.port?.toString() ?: "") }
@@ -73,7 +77,7 @@ fun SetupScreen(
             gateway = getDefaultGateway(context)
             if (lookupPublicIp) {
                 publicIp = getPublicIpAddress()
-                if (host.isBlank() && publicIp != null) host = publicIp!!
+                if (host.isBlank() && publicIp != null) { host = publicIp!!; hostIsLocal = false }
             }
             loadingNetwork = false
         }
@@ -114,11 +118,20 @@ fun SetupScreen(
             OutlinedTextField(
                 value = host,
                 onValueChange = { host = it; errorMessage = null; scanMessage = null },
-                label = { Text("Home router IP") },
-                placeholder = { Text("e.g. 203.0.113.42") },
+                label = { Text("Server address") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Public", style = MaterialTheme.typography.bodyMedium,
+                    color = if (!hostIsLocal) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                Switch(checked = hostIsLocal, onCheckedChange = { hostIsLocal = it })
+                Text("Local", style = MaterialTheme.typography.bodyMedium,
+                    color = if (hostIsLocal) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
 
             // Token first — needed to scan for the port
             OutlinedTextField(
@@ -175,6 +188,7 @@ fun SetupScreen(
                             val lanFound = scanLanForRmailPort(lanPrefix, token.trim()) { scanProgress = 0.5f + it * 0.5f }
                             if (lanFound != null) {
                                 host = lanFound.first
+                                hostIsLocal = true  // found by scanning this network
                                 port = lanFound.second.toString()
                                 scanMessage = "Found at ${lanFound.first}:${lanFound.second} (local network)"
                                 scanning = false
@@ -268,21 +282,17 @@ fun SetupScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            fun buildConfig(portInt: Int) = (if (editConfig != null) {
-                        editConfig.copy(
-                            // Setup edits the primary address; any others
-                            // added in Settings are kept behind it.
-                            hosts = listOf(host.trim()) + editConfig.hosts.drop(1).filter { it != host.trim() },
-                            port = portInt,
-                            token = token.trim()
-                        )
-                    } else {
-                        MailboxConfig(
-                            hosts = listOf(host.trim()),
-                            port = portInt,
-                            token = token.trim()
-                        )
-                    }).withAddressesSorted()
+            // Setup edits the primary address of the kind chosen; any others
+            // added in Settings are kept behind it.
+            fun buildConfig(portInt: Int): MailboxConfig {
+                val h = host.trim()
+                val base = editConfig ?: MailboxConfig()
+                val hosts = if (hostIsLocal) base.hosts.filter { it != h }
+                            else listOf(h) + base.hosts.drop(if (editConfig != null && editConfig.hosts.isNotEmpty()) 1 else 0).filter { it != h }
+                val locals = if (hostIsLocal) listOf(h) + base.localHosts.filter { it != h }
+                             else base.localHosts.filter { it != h }
+                return base.copy(hosts = hosts, localHosts = locals, port = portInt, token = token.trim())
+            }
 
             fun save(config: MailboxConfig) {
                 if (editConfig != null) vm.updateMailbox(config) else vm.addMailbox(config)
