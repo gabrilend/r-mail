@@ -175,6 +175,8 @@ alice.token = "some-shared-secret"
 
 Both sides must have the same token for a given contact pair. Pick something long and random, but pick something different for each contact. I like to do words separated by dashes, like "apple-box-racecar-spelled-backwards-is-racecar"
 
+The contacts file is not encrypted, on purpose. Anyone who can read it can read every token. See [What encryption does not protect](#what-encryption-does-not-protect-your-own-computer).
+
 **Listen-only contacts** — a website whose pages send you notes, or any token you publish for strangers, is one contact marked `listen = true`, with a token and no address:
 
 ```
@@ -339,6 +341,16 @@ The protocol:
 
 `rmail_crypto.so` (compiled from source by `./scripts/install.sh`) provides the AES-GCM and SHA-256 primitives via OpenSSL.
 
+### What encryption does not protect: your own computer
+
+Encryption protects messages while they travel between mailboxes. It does not protect them on your disk, and it can't protect you from your own operating system.
+
+The contacts file is stored unencrypted, every token in plain text, and that is deliberate. rmail sends and receives with nobody at the keyboard, so if the file were encrypted, the key that unlocks it would have to sit on the same disk for the daemon to read. Anyone who could read the file could read that key too, and the encryption would only make it look protected.
+
+So rmail assumes the operating system it runs on is trustworthy. **If your operating system is compromised, there is nothing rmail can do.** Whoever controls it can read your contacts file and every token in it, read your inbox and outbox, read the daemon's memory while it runs, and send messages as you. Your contacts' messages to you are exposed too, because each token is shared by both sides of a contact. The same is true of your phone if it holds a copy of the contacts file (see `own` contacts above).
+
+What you can do is the usual care of the machine itself: keep it updated, don't run software you don't trust under the same user as rmail, use full-disk encryption so a stolen powered-off machine gives nothing away, and make the mailbox directory readable only by your user (`chmod 700 ~/mail`). If you think a machine has been compromised, replace the token for every contact: a stolen token stays useful until both sides change it.
+
 ## Dynamic IP
 
 If your ISP changes your public IP, the daemon detects it automatically. It asks DNS services (OpenDNS, Cloudflare and Google) for your public IP at startup and again every 24 to 48 hours (after an hour, if none answered). If a change is detected, it verifies with a second service before acting — so a single service returning a bad result won't trigger a false update.
@@ -416,6 +428,14 @@ that phase's work, with what came out and how long it took.
 - [docs/.templates/protocol.md](docs/.templates/protocol.md) — wire protocol reference, sync timing
 - [docs/.templates/ports-explained.md](docs/.templates/ports-explained.md) — plain-language explanation of ports and port forwarding
 - [docs/.templates/nat-traversal-report.md](docs/.templates/nat-traversal-report.md) — deep dive on UPnP, NAT-PMP, and port forwarding security
+
+## Change log
+
+Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-10-13 →** An arriving message never writes over a file already in your inbox. If its name is taken, it gets the next free `-2`, `-3` and so on, with no upper limit. Before this, three cases wrote over a file: one you made by hand (rmail had no record of it), a contact's second message under a subject another contact had already used, and the 100th message whose name clashed, which a contact could force on purpose.
+
+- **2026-10-12 →** The README now says plainly that rmail trusts the operating system it runs on. The new section "What encryption does not protect: your own computer", under Encryption, explains why the contacts file stays unencrypted (an encrypted file's key would have to sit on the same disk for the daemon to read it), lists what someone controlling your OS can do, and gives the steps that still help. This change log was started.
 
 ## License
 
