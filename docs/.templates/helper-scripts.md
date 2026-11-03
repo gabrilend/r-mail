@@ -95,9 +95,12 @@ The opposite of `raccept.sh`: removes the `accept` line, leaving only `deny`.
 helpers/rdeny.sh <consent-file>
 ```
 
-**Automating consent:** a consent form does not fire any hook (it is not a
-received message), so `on_receive` never sees it.  Instead, run a small
-script on a timer (cron, a systemd timer) that looks for forms in the inbox.
+**Automating consent:** the `on_consent` hook (#216) answers each form as
+it arrives, which is usually simpler; see the
+[scripting tutorial](scripting-tutorial.md#accept-small-attachments-from-one-contact).
+A form is not a received message, so `on_receive` never sees it.  The older
+way still works: a small script on a timer (cron, a systemd timer) that
+looks for forms in the inbox.
 The first line of a form names the sender ("alice wants to send you an
 attachment."):
 

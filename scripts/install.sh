@@ -938,6 +938,7 @@ port = $RMAIL_PORT
 on_receive_raw = ./hooks/on_receive_raw.sh
 on_receive     = ./hooks/on_receive.sh
 on_package     = ./hooks/on_package.sh
+on_consent     = ./hooks/on_consent.sh
 on_send        = ./hooks/on_send.sh
 on_delete      = ./hooks/on_delete.sh
 on_update      = ./hooks/on_update.sh
