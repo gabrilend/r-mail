@@ -982,7 +982,7 @@ sure?
 
 > It takes exactly the five edited lines and nothing else. Committing:
 
-*[commit] 48d4f0b2a in ai-stuff - Zip library: rmail's issue numbers brought up to date after its renumbering*
+*[commit] 32b24a883 in ai-stuff - Zip library: rmail's issue numbers brought up to date after its renumbering*
 
 > The zip fix is committed. Now the full rmail test run, in the background,
 > before committing the discovery work:
