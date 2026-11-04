@@ -219,6 +219,7 @@ local hooks = {
     on_receive_raw = _hook_path(config.on_receive_raw),
     on_receive     = _hook_path(config.on_receive),
     on_package     = _hook_path(config.on_package),
+    on_consent     = _hook_path(config.on_consent),
     on_send        = _hook_path(config.on_send),
     on_delete      = _hook_path(config.on_delete),
     on_update      = _hook_path(config.on_update),
@@ -2133,7 +2134,9 @@ local function send_raw_response(client, status, content_type, body, extra_heade
 end
 
 
-local function save_attachments(attachments, sender, inbox_meta)
+-- MESSAGE_PATH is the inbox file of the message the attachments came with;
+-- on_package gets it as $4 (#216).
+local function save_attachments(attachments, sender, inbox_meta, message_path)
     if not attachments or #attachments == 0 then return end
     if not inbox_meta.attachments then inbox_meta.attachments = {} end
     for _, att in ipairs(attachments) do
@@ -2153,7 +2156,7 @@ local function save_attachments(attachments, sender, inbox_meta)
         if hooks.on_package then
             os.execute(hooks.on_package .. " " ..
                 shell_quote(sender) .. " " .. shell_quote(att_filename) .. " " ..
-                shell_quote(target) .. " &")
+                shell_quote(target) .. " " .. shell_quote(message_path or "") .. " &")
         end
     end
 end
@@ -2169,7 +2172,7 @@ local function handle_deliver_message(data, sender)
     -- check if adding attachments to an existing message
     for filename, meta in pairs(inbox_state) do
         if meta.message_id == message_id and meta["from"] == sender then
-            save_attachments(attachments, sender, meta)
+            save_attachments(attachments, sender, meta, INBOX .. "/" .. filename)
             save_state("inbox.json", inbox_state)
             return 200, {ok = true}
         end
@@ -2255,7 +2258,7 @@ local function handle_deliver_message(data, sender)
         ["from"] = sender,
         message_id = message_id,
     }
-    save_attachments(attachments, sender, inbox_state[filename])
+    save_attachments(attachments, sender, inbox_state[filename], target)
     save_state("inbox.json", inbox_state)
     return 200, {ok = true, filename = filename}
 end
@@ -4111,6 +4114,43 @@ end
 
 -- ---- Receiver side ----
 
+-- {{{ upload.message_name
+-- The name in this inbox of SENDER's message MESSAGE_ID, or nil when the
+-- inbox record has no such message (deleted, or never arrived).  The
+-- record maps id and sender to the name the owner knows the message by;
+-- consent entries share the record but are not messages, so they are
+-- skipped.  Used for the consent form's "Attached to:" and for the message
+-- path handed to on_consent and on_package (#216).
+function upload.message_name(message_id, sender)
+    for inbox_name, meta in pairs(load_state("inbox.json")) do
+        if meta.message_id == message_id and meta["from"] == sender
+           and not meta.consent then
+            return inbox_name
+        end
+    end
+    return nil
+end
+-- }}}
+
+-- {{{ upload.answer_form
+-- Answers the consent form INBOX_FILE the way the owner would: by deleting
+-- the line not chosen, so the form is left holding ANSWER ("accept" or
+-- "deny") for check_consent_pending to read.  The phone's Accept/Deny and
+-- the on_consent hook both answer through here.  Returns false when the
+-- form cannot be read.
+function upload.answer_form(inbox_file, answer)
+    local text = read_file(INBOX .. "/" .. inbox_file)
+    if not text then return false end
+    local drop = answer == "accept" and "deny" or "accept"
+    local out = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        if line:match("^%s*(.-)%s*$") ~= drop then out[#out + 1] = line end
+    end
+    write_file(INBOX .. "/" .. inbox_file, table.concat(out, "\n"))
+    return true
+end
+-- }}}
+
 local function handle_attachment_request(data, sender)
     local att_id = data.attachment_id
     -- Fully sanitize: any path separators or wacky characters in the sender's
@@ -4153,17 +4193,9 @@ local function handle_attachment_request(data, sender)
     end
     -- Which message is this attached to?  The request carries the message's
     -- id; our inbox record maps id and sender to the name the message has
-    -- in this inbox, which is the name the owner knows it by.  Consent
-    -- entries are skipped: they share the record but are not messages.
+    -- in this inbox, which is the name the owner knows it by.
     local inbox_state = load_state("inbox.json")
-    local message_name
-    for inbox_name, meta in pairs(inbox_state) do
-        if meta.message_id == message_id and meta["from"] == sender
-           and not meta.consent then
-            message_name = inbox_name
-            break
-        end
-    end
+    local message_name = upload.message_name(message_id, sender)
 
     -- The form is named after the message and then the attachment
     -- (dinosaur-hoodie-pic-20260903_154820.jpg-consent-to-download-form),
@@ -4232,6 +4264,33 @@ local function handle_attachment_request(data, sender)
     }
     save_state("inbox.json", inbox_state)
     log("attachment request from %s: %s (%s)", sender, filename, fmt_bytes(expected_size))
+
+    -- on_consent (#216): the owner's script may answer the form at once.
+    -- It runs to completion, like on_receive_raw, with the sender, the
+    -- file's name as the form shows it, the form's path, the message's
+    -- inbox path ("" when the message is not in the record) and the
+    -- expected size in bytes.  Its first line of output, "accept" or
+    -- "deny", answers the form the way the owner would (by deleting the
+    -- other line); anything else -- nothing, or a hook that could not run
+    -- -- leaves the form for the owner, as without the hook.  The answer
+    -- then travels like any other: check_consent_pending reads the form.
+    if hooks.on_consent then
+        local out = run_hook(hooks.on_consent, sender, filename,
+            INBOX .. "/" .. consent_file,
+            message_name and (INBOX .. "/" .. message_name) or "",
+            string.format("%d", expected_size))
+        local answer = out and (out:match("^[^\n]*") or ""):match("^%s*(.-)%s*$")
+        if answer == "accept" or answer == "deny" then
+            if upload.answer_form(consent_file, answer) then
+                -- the answer goes out on the next pass, not at the sender's next turn
+                ctimer.get(sender).next_due = 0
+                log("on_consent answered %s for %s from %s", answer, filename, sender)
+            end
+        elseif answer and answer ~= "" then
+            log("on_consent printed %q for %s from %s: not accept or deny, so the form waits for you",
+                answer:sub(1, 40), filename, sender)
+        end
+    end
     return 200, {ok = true}
 end
 
@@ -4971,8 +5030,12 @@ local function handle_attachment_chunk(data, sender)
     end
     if lh then lh:close() end
     if hooks.on_package then
+        -- $4 (#216): the inbox file of the message the attachment came
+        -- with, or "" when that message is no longer in the inbox record
+        local message_name = upload.message_name(cpe.message_id, sender)
         os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
-                   shell_quote(filename) .. " " .. shell_quote(target) .. " &")
+                   shell_quote(filename) .. " " .. shell_quote(target) .. " " ..
+                   shell_quote(message_name and (INBOX .. "/" .. message_name) or "") .. " &")
     end
 
     if cprog[att_id] then
@@ -7940,18 +8003,11 @@ local function handle_request(rt, client, preread)
                 for _, e in pairs(load_state("consent-pending.json")) do
                     if e.inbox_file == data.filename and e.status == "pending" then entry = e end
                 end
-                local text = entry and read_file(INBOX .. "/" .. entry.inbox_file)
                 if answer ~= "accept" and answer ~= "deny" then
                     send_response(resp, 400, {error = "answer must be accept or deny"})
-                elseif not text then
+                elseif not (entry and upload.answer_form(entry.inbox_file, answer)) then
                     send_response(resp, 404, {error = "no pending consent form by that name"})
                 else
-                    local drop = answer == "accept" and "deny" or "accept"
-                    local out = {}
-                    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-                        if line:match("^%s*(.-)%s*$") ~= drop then out[#out + 1] = line end
-                    end
-                    write_file(INBOX .. "/" .. entry.inbox_file, table.concat(out, "\n"))
                     -- Make the sender due now, so the answer goes out on the
                     -- next pass instead of whenever their timer comes up.
                     ctimer.get(entry["from"]).next_due = 0

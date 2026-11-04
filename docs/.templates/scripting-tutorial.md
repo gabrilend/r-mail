@@ -7,6 +7,7 @@ your mailbox's `config` file:
 on_receive_raw = /path/to/script.sh
 on_receive     = /path/to/script.sh
 on_package     = /path/to/script.sh
+on_consent     = /path/to/script.sh
 on_send        = /path/to/script.sh
 on_delete      = /path/to/script.sh
 on_update      = /path/to/script.sh
@@ -20,6 +21,7 @@ on_update      = /path/to/script.sh
   - [Wrap incoming messages to 80 columns](#wrap-incoming-messages-to-80-columns)
   - [Prepend a disclaimer for a specific recipient](#prepend-a-disclaimer-for-a-specific-recipient)
   - [Read contact fields in a hook](#read-contact-fields-in-a-hook)
+  - [Accept small attachments from one contact](#accept-small-attachments-from-one-contact)
 - [Using other languages](#using-other-languages)
   - [Lua](#lua)
   - [C](#c)
@@ -43,6 +45,11 @@ replaces the message body. For all others, stdout is ignored.
 | `on_delete`     | other party| —          | —                     | ignored       |
 | `on_update`     | sender     | inbox path | new message body      | replaces body |
 | `on_package`    | sender     | filename   | path to saved file    | ignored       |
+| `on_consent`    | sender     | filename   | path to consent form  | answers the form |
+
+Two hooks take more than three arguments: `on_package` also gets `$4`, and
+`on_consent` gets `$4` and `$5` (see their paragraphs below).  A script
+that reads only `$1` to `$3` works as before.
 
 **on_receive_raw** fires before the message is written to disk. Whatever your
 script prints to stdout becomes the body that gets saved. If your script prints
@@ -97,7 +104,23 @@ off.
 
 **on_package** fires after a received attachment is fully assembled and saved.
 `$1` is the sender's name, `$2` is the filename (useful for filetype detection),
-`$3` is the full path to the saved file. Runs in the background.
+`$3` is the full path to the saved file, and `$4` is the full path to the inbox
+file of the message the attachment came with (empty when that message is no
+longer in the inbox: deleted before the file arrived).  Runs in the background.
+`$4` was added in #216; a script that ignores it works as before.
+
+**on_consent** fires when a contact asks to send you an attachment, just
+after its consent form is written to the inbox (see
+[attachments.md](attachments.md#the-consent-flow)).  `$1` is the sender, `$2`
+the file name as the form shows it, `$3` the full path to the form, `$4` the
+full path to the inbox file of the message the attachment belongs to (empty
+when that message is not in the inbox), and `$5` the expected size in bytes.
+If the first line of its output is `accept` or `deny`, rmail answers the form
+for you, exactly as if you had deleted the other line, and the answer goes to
+the sender on the next pass.  Anything else, including no output or a script
+that fails, leaves the form waiting for you, as it would without the hook.
+Synchronous: rmail waits for it before answering the sender, so keep it
+quick.  It fires once per attachment, when the request first arrives.
 
 ---
 
@@ -170,6 +193,30 @@ on_send = ~/mail/hooks/disclaimer.sh
 ```
 
 If the script prints nothing for a given recipient, the body is sent unchanged.
+
+### Accept small attachments from one contact
+
+Uses `on_consent` — answers the consent form before you see it.
+
+```sh
+#!/bin/sh
+# ~/mail/hooks/consent.sh
+sender="$1"
+file="$2"
+size="$5"
+
+# alice's files under 10 MB are taken without asking; everything else waits
+if [ "$sender" = "alice" ] && [ "$size" -lt 10000000 ]; then
+    echo accept
+fi
+```
+
+```
+on_consent = ~/mail/hooks/consent.sh
+```
+
+Print `deny` to refuse without asking.  Print nothing to leave the form for
+you to answer, which is the safe default for anyone the script doesn't know.
 
 ### Read contact fields in a hook
 

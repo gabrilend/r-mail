@@ -360,10 +360,15 @@ reach) to make tampering detectable.
 
 ### Auto-consent from trusted contacts
 
-Skip the consent prompt for attachments from specific contacts.  A
-consent form fires no hook (not `on_receive` either), so this is a small
-script on a timer — see the auto-consent example in
-[helper-scripts.md](helper-scripts.md#raccept-sh--accept-a-package-request).
+Skip the consent prompt for attachments from specific contacts with an
+`on_consent` hook (#216): it gets the sender, the file, the form, the
+message and the expected size, and printing `accept` or `deny` answers the
+form.  See the example in the
+[scripting tutorial](scripting-tutorial.md#accept-small-attachments-from-one-contact).
+(Before #216 a consent form fired no hook, and the way was a script on a
+timer: the auto-consent example in
+[helper-scripts.md](helper-scripts.md#raccept-sh--accept-a-package-request)
+still works.)
 
 ### Encrypted backup on receipt
 

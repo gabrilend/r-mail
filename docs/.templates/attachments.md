@@ -116,6 +116,11 @@ deny
 While both lines are present, the daemon treats the request as pending and
 checks again on the next sync cycle. You can leave it for as long as you like.
 
+An `on_consent` hook can answer the form for you as it arrives: printing
+`accept` or `deny` deletes the other line, just as you would, and printing
+nothing leaves it for you.  See the
+[scripting tutorial](scripting-tutorial.md#hook-interface).  (#216)
+
 The `Expected size` is the original uncompressed size, as reported by the
 sender.  It is enforced: a transfer may take at most that size × 1.1 plus
 4 KiB, both in the packed bytes that arrive and in the bytes the zip

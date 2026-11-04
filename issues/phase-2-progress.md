@@ -20,6 +20,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#210](completed/210-delete-edit-race-condition-matrix.md) — Audit delete/edit race conditions between sender and receiver**  If a receiver deletes an inbox message and the sender edits (updates) the same outbox message, the outcome depends on whose sync cycle runs first.
 - **[#212](completed/212-hooks.md) — Hooks: the owner's scripts, run at six moments**  A mailbox may name a script for each of six moments, in its config.
 - **[#213](completed/213-hook-config-cleanup.md) — Clean up hook script configuration in config file**  The hook configuration in the config file is hard to follow — commented-out examples, argument documentation mixed in, duplicate names.
+- **[#216](completed/216-the-consent-hook-and-the-message-on-package.md) — An on_consent hook answers attachment forms, and on_package names the message**  A consent form fires no hook.
 
 ## Open
 
