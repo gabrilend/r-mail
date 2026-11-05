@@ -162,9 +162,9 @@ many real bodies inside it and an observer can't narrow further.
 ```sh
 #!/bin/sh
 # on_send hook: pad body to the next bucket size.
-# Args: $1=recipient, $2=subject, $3=body. stdout replaces body.
+# Args: $1=recipient, $2=subject; the body on stdin. stdout replaces body.
 
-body="$3"
+body=$(cat)
 len=${#body}
 
 # Buckets in bytes.  Include 128 KB (rmail's body cap) as the

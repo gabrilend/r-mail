@@ -223,8 +223,8 @@ size obfuscation see #901 (in-frame padding, under development) and #902
 
 ```sh
 #!/bin/sh
-# on_send hook: $1=recipient $2=subject $3=body, stdout replaces body
-body="$3"
+# on_send hook: $1=recipient $2=subject, the body on stdin; stdout replaces body
+body=$(cat)
 target=4096
 current=${#body}
 if [ "$current" -lt "$target" ]; then

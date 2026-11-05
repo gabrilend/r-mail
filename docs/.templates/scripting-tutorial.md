@@ -37,13 +37,21 @@ Each hook is a path to an executable. rmail calls it with shell arguments.
 For `on_receive_raw`, `on_send`, and `on_update`, stdout is read back and
 replaces the message body. For all others, stdout is ignored.
 
+**The body comes on standard input.**  Those three hooks are handed the
+message body on stdin, whatever its size: read it with `body=$(cat)` in
+sh (which drops trailing newlines), `io.read("a")` in Lua, or by reading
+`stdin` in C.  `$3` still holds the body when it is at most 64 KiB, so a
+script that reads `$3` keeps working for those; for a longer body `$3` is
+empty.  (Linux will not start a program with one argument over 128 KiB,
+so a body passed only as an argument could never reach the hook: #215.)
+
 | Hook            | `$1`       | `$2`       | `$3`                  | stdout        |
 |-----------------|------------|------------|-----------------------|---------------|
-| `on_receive_raw`| sender     | subject    | message body          | replaces body |
+| `on_receive_raw`| sender     | subject    | body (also on stdin)  | replaces body |
 | `on_receive`    | sender     | subject    | path to inbox file    | ignored       |
-| `on_send`       | recipient  | subject    | message body          | replaces body |
+| `on_send`       | recipient  | subject    | body (also on stdin)  | replaces body |
 | `on_delete`     | other party| —          | —                     | ignored       |
-| `on_update`     | sender     | inbox path | new message body      | replaces body |
+| `on_update`     | sender     | inbox path | new body (also on stdin) | replaces body |
 | `on_package`    | sender     | filename   | path to saved file    | ignored       |
 | `on_consent`    | sender     | filename   | path to consent form  | answers the form |
 
@@ -53,8 +61,12 @@ that reads only `$1` to `$3` works as before.
 
 **on_receive_raw** fires before the message is written to disk. Whatever your
 script prints to stdout becomes the body that gets saved. If your script prints
-nothing, the original body is kept.  Its exit status is not checked: a script
-that fails part-way but has printed something replaces the body with that.
+nothing, the original body is kept.  A script that cannot be run (missing,
+not executable) or that exits with a non-zero status **refuses the
+message**: nothing is written, the log says which hook failed and why, and
+the sender's daemon keeps the message and sends it again on a later pass.
+So a checking hook that breaks holds mail back rather than letting it in
+unchecked.
 It does not run for edits (see `on_update`). This hook is synchronous
 — rmail waits for it before writing. Use it for filtering, transformation, or
 security analysis on data that hasn't touched the filesystem yet.
@@ -72,7 +84,8 @@ stdout replaces it for that recipient only. rmail calls the hook separately
 for each recipient with fresh arguments, so each transformation is isolated.
 Also synchronous. Printing nothing passes the body through unchanged.  It
 also runs for every edit sent (each update) and for mail to yourself, where
-`$1` is your own name.
+`$1` is your own name.  A failing `on_send` is logged, and the body is sent
+as written.
 
 **on_delete** fires when the *other* side deletes: a recipient deleting a
 message you sent (`$1` is the recipient), the author deleting one you
@@ -86,8 +99,9 @@ up.  rmail waits for it to finish.
 edits an outbox file and the new body arrives at your end. `$2` is the path to
 the existing inbox file (still holding the old content), `$3` is the new body.
 Whatever your script prints to stdout becomes the body that gets saved, just
-like `on_receive_raw` (printing nothing keeps the new body; the exit status
-is not checked). Synchronous. If no `on_update` hook is configured, the
+like `on_receive_raw` (printing nothing keeps the new body; a script that
+cannot run or exits non-zero refuses the edit, which the author's daemon
+sends again later). Synchronous. If no `on_update` hook is configured, the
 update is applied directly. Use it for diff logging or edit rejection (print
 the old body to reject an update).
 
@@ -157,9 +171,8 @@ Uses `on_receive_raw` — transforms the body before it hits disk.
 # ~/mail/hooks/wrap.sh
 from="$1"
 subject="$2"
-body="$3"
 
-printf '%s' "$body" | fold -s -w 80
+fold -s -w 80      # the body arrives on stdin
 ```
 
 ```
@@ -179,7 +192,7 @@ Uses `on_send` to add a footer only when sending to a particular person.
 # ~/mail/hooks/disclaimer.sh
 recipient="$1"
 subject="$2"
-body="$3"
+body=$(cat)        # the body, from stdin
 
 if [ "$recipient" = "legal-team" ]; then
     printf '%s\n\n---\nThis message may be monitored.' "$body"
@@ -233,7 +246,7 @@ neighbour one level up: `/home/you/mail/contacts`.
 #!/bin/sh
 recipient="$1"
 subject="$2"
-body="$3"
+body=$(cat)
 
 CONTACTS="$HOME/mail/contacts"   # adjust to your mailbox
 
@@ -272,7 +285,9 @@ or LuaJIT works.
 
 **Receiving data:** arguments map to `arg[1]`, `arg[2]`, `arg[3]` exactly as
 shown in the [interface table](#hook-interface). For hooks where `$3` is a
-file path (`on_receive`), read the file with `io.open(arg[3], "r")`.
+file path (`on_receive`), read the file with `io.open(arg[3], "r")`.  For
+the three body hooks, read the whole body with `io.read("a")` (Lua 5.4;
+`io.read("*a")` in 5.1 and LuaJIT).
 
 **Returning data:** write to stdout with `io.write()`. Prefer `io.write()`
 over `print()` for body-replacement hooks — `print()` appends a newline that
@@ -383,12 +398,15 @@ in the interface table. rmail shell-quotes all arguments, so each arrives as a
 single string even if it contains spaces, newlines, or quotes.
 
 For `on_receive` and `on_package` where `$3` (or `$1` for `on_package`) is a
-file path, open it with `fopen(argv[3], "r")`.
+file path, open it with `fopen(argv[3], "r")`.  The three body hooks get
+the whole body on `stdin`.
 
-**Returning data:** write to `stdout`. rmail does not look at the exit
-status: anything printed replaces the body (for the hooks whose stdout is
-used), and printing nothing keeps the original.  To reject safely, print
-nothing — or, for `on_update`, print the old body.
+**Returning data:** write to `stdout`. Anything printed replaces the body
+(for the hooks whose stdout is used), and printing nothing keeps the
+original.  Exit with status 0: for `on_receive_raw` and `on_update` a
+non-zero status refuses the message or edit (the sender tries again
+later); for `on_send` it is logged and the body goes as written.  To
+reject an edit for good, print the old body.
 
 ---
 
@@ -457,7 +475,7 @@ flag marks thin-client contacts that can call `/api/*` endpoints.)
 # Args: $1=sender, $2=inbox path, $3=new body (stdout replaces body).
 sender="$1"
 inbox_path="$2"
-body="$3"
+body=$(cat)        # the new body, from stdin
 
 remaining=$(printf '%s' "$body" | sed -n 's/^remaining_ms: //p' | head -1)
 last_tick=$(printf '%s' "$body" | sed -n 's/^last_tick: //p' | head -1)
@@ -546,10 +564,9 @@ creating new outbox messages addressed to other contacts.
   Then in config: `on_receive_raw = ~/mail/hooks/wrap`. Recompile
   after editing the source.
 - A message body over 128 KB is sent as an attachment automatically (a stub
-  body and a consent form; #308), which keeps `$3` in `on_receive_raw` and
-  `on_send` a manageable size that won't hit OS argument length limits.  An
-  edit (update) has no such cap, so `on_update`'s and `on_send`'s `$3` can be
-  larger for an edited message.
+  body and a consent form; #308).  An edit (update) has no such cap, and a
+  contact's daemon need not follow the rule, so read the body from stdin
+  rather than `$3`, which is empty past 64 KiB (#215).
 - The `helpers/` directory handles common tasks you'd otherwise reimplement
   in every hook: adding recipients, inserting attachments, accepting/denying
   package requests, reading contact fields. Most hook scripts end up calling
