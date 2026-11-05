@@ -2,7 +2,14 @@
 
 ## Status
 
-Open.  Filed 2026-10-04 from the ritzmenardi.com shrine: its server
+Built 2026-11-05 for single files under 4 GiB: the virtual zip of
+Intended Behavior, with no new field anywhere (decisions below).  **Not
+yet the shrine's case**: a file of 4 GiB or more is refused by the packer
+and by the layout alike, because a stored zip that large needs zip64 on
+both sides (the shared zip library's "volumes and pieces", rao-chat
+216f).  That is what is left of this issue.
+
+Filed 2026-10-04 from the ritzmenardi.com shrine: its server
 (a Linode with 25 GB of disk) must send an 8.8 GB zip, and today that
 needs room for the zip and for r-mail's packed copy of it, ~17.6 GB, and
 while a newer zip replaces the old one, double that.
@@ -103,6 +110,50 @@ lay out.
 - A file modified in place without its modification time changing would
   slip past the fingerprint.  Is a periodic re-hash of the bytes already
   sent (cheap, sequential) worth it for very long transfers?
+
+## Decisions (2026-11-05)
+
+Made by the builder; the owner can overturn each.
+
+1. **The virtual zip, with no `kind` field.**  The proposal of
+   2026-10-09 was waiting on the owner.  It is built because it meets
+   everything the owner said that day: the recipient gets "the file in
+   whatever format it is in before it's chunked" (the zip is stored, so
+   it unpacks to the file byte for byte), and there is no new field —
+   not on the wire, and not in the outbox record either.  A laid-out
+   file is told apart by its layout file's name,
+   `<pending>/rmail-<id>.virtual`, which stands exactly where the packed
+   zip stood: records name it, the release passes delete it (never the
+   file it describes), the pending sweep keeps it while held, and a
+   missing one is a lost copy.  The receiver is unchanged, so older
+   receivers keep working.  The owner's manifest idea (the pieces
+   rebuilding into the file with no zip at all) is not built: it needs
+   the receiver to change and an older receiver to be handled, which the
+   owner had not settled.
+2. **Threshold: `attachment_copy_below`, 16 MiB by default** (0 lays
+   out every single file).  Conservative while it is new; a file below
+   it costs little to copy.  Folders are always packed.
+3. **The fingerprint is device, inode, size and modification time to
+   the fraction of a second**, read with `find -printf`, checked before
+   the offer is made, before each cycle's sending, and before every
+   piece.  No periodic re-hash: a write that keeps all four the same has
+   to set the time back on purpose, and re-reading gigabytes to catch it
+   costs more than it buys.  A mismatch deletes the layout and the offer
+   goes the #314 lost route (outbox note, recipients told).
+4. **The layout lives in `rmail.lua` (`upload.lay_out`), not in
+   `libs/zip-writer.lua`**, because that file is a pinned copy of
+   my-libs' library (`libs/zip-library.version` holds its checksum).
+   The test checks the two give identical bytes; moving the layout into
+   my-libs, beside zip64, is the natural next step there.
+
+Tested by `scripts/test-single-file-unpacked.sh` (12 cases): no copy on
+disk, only a small layout; a small file still packed; the offered
+checksum and the received bytes identical to `zip-writer.lua`'s zip of
+the same file, with the directory straddling a piece boundary; a
+same-size, same-time replacement (inode only) lost; a file written to
+while a piece is in flight sends no further piece and is lost; the files
+themselves never removed.  Each was shown to catch a mutant of the code
+it covers.
 
 ## Related
 

@@ -324,6 +324,7 @@ transfer (oversize, a damaged zip).
 | `attachments`             | `~/mail/attachments`    | where received files are saved       |
 | `attachment_pending_dir`  | `<attachments>/.pending` | where arriving pieces and packed copies wait |
 | `attachment_chunk_size`   | `5242880` (5 MB)        | bytes per chunk                      |
+| `attachment_copy_below`   | `16777216` (16 MiB)     | a single file this size or larger is sent from where it lies, with no packed copy (#317) |
 
 These are set in your mailbox's `config` file.  The generated config file does
 not list them; add them by hand.  Write values plainly: quotes are kept as
