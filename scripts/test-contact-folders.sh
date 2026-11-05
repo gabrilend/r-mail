@@ -295,18 +295,27 @@ end
 check(tree(inbox) == before, "nothing was written in the inbox for any of them")
 check(tree(work .. "/outside") == "", "nothing was written through the link")
 
+-- where the last message sent was saved, read from the inbox itself: the
+-- answer no longer names the file (#206: the sender is not told the name)
+local function saved_at()
+    local h = io.popen("cd '" .. inbox .. "' && grep -rlxF -- 'body " .. n .. "' . 2>/dev/null")
+    local found = h:read("*a"); h:close()
+    return (found:gsub("^%./", ""):gsub("\n$", ""))
+end
+
 local status, answer = send(string.rep("d/", 15) .. "x")
-check(status == 200 and answer.filename == string.rep("d/", 15) .. "x", "16 levels are accepted", tostring(answer.filename))
+check(status == 200 and saved_at() == string.rep("d/", 15) .. "x", "16 levels are accepted", saved_at())
 status, answer = send("-rf/--help")
 check(status == 200 and fc.read_file(inbox .. "/-rf/--help") == "body " .. n .. "\n",
-    "names starting with a dash are folders and files, not options", tostring(answer.filename))
+    "names starting with a dash are folders and files, not options", saved_at())
 status, answer = send("my folder/my file")
-check(status == 200 and answer.filename == "my-folder/my-file", "spaces become dashes in each name", tostring(answer.filename))
+check(status == 200 and saved_at() == "my-folder/my-file", "spaces become dashes in each name", saved_at())
 status, answer = send("plainfile/note")
-check(status == 200 and answer.filename == "note" and fc.read_file(inbox .. "/plainfile") == "the owner made this\n",
-    "a file holding a folder's name: kept, and the message saved beside it", tostring(answer.filename))
+check(status == 200 and saved_at() == "note" and fc.read_file(inbox .. "/plainfile") == "the owner made this\n",
+    "a file holding a folder's name: kept, and the message saved beside it", saved_at())
 status, answer = send("a\\b")
-check(status == 200 and answer.filename == "b", "a subject with no \"/\" is named as before", tostring(answer.filename))
+check(status == 200 and saved_at() == "b", "a subject with no \"/\" is named as before", saved_at())
+check(answer.filename == nil, "the answer does not name the file it was saved as (#206)", tostring(answer.filename))
 
 print("section a fuzz pass over random subjects")
 math.randomseed(214)
@@ -327,7 +336,7 @@ for _ = 1, 600 do
         worst = worst or string.format("%q: %d, expected %d (%s)", subject, st, expected, tostring(ans.error))
     elseif st == 200 then
         -- the name it was saved under is inside the inbox
-        local fname, bad = ans.filename or "", false
+        local fname, bad = saved_at(), false
         if fname == "" or fname:sub(1, 1) == "/" then bad = true end
         for name in (fname .. "/"):gmatch("([^/]*)/") do
             if name == "" or name == "." or name == ".." then bad = true end

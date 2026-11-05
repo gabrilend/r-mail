@@ -29,6 +29,20 @@
 #                     six characters are 101 separate files, and the first
 #                     is unchanged
 #
+# Since 2026-11-05 (#206), also:
+#   upper and lower   a name that differs from a file already there only in
+#   case              case is taken too: the hand-made "Plans" stays, and
+#                     mallory's "plans" and bob's "HI" land under names no
+#                     other file shares in any case, so the inbox can be
+#                     copied to a Mac or a USB drive without two files
+#                     becoming one
+#   the sender is     the answer to a message says nothing of the name it
+#   not told          was saved under; the owner's log does say when the
+#                     subject's own name was taken
+#   attachments       three messages from mallory, each with an attachment
+#                     named "pic": three files, none written over (the
+#                     sender-tagged name used to be written over)
+#
 # Usage:
 #   scripts/test-inbox-never-overwrites.sh          # use the enclosing checkout
 #   scripts/test-inbox-never-overwrites.sh /path    # use some other checkout
@@ -45,8 +59,9 @@ TEST_NAME="inbox-never-overwrites"
 BOB_TOKEN="inbox-never-overwrites-bob-token-not-a-secret"
 printf '\nbob.token = "%s"\n' "$BOB_TOKEN" >> "$BOX/contacts"
 
-# The owner's own file, made by hand: rmail has no record of it.
+# The owner's own files, made by hand: rmail has no record of them.
 printf 'my own notes, written by hand\n' > "$BOX/inbox/note"
+printf 'my plans, written by hand\n' > "$BOX/inbox/Plans"
 
 start_receiver
 
@@ -114,6 +129,51 @@ for n = 1, 101 do
 end
 check(kept == 101, "all 101 messages are separate files", kept .. " of 101 kept")
 check(fc.read_file(box .. "/inbox/flood") == "flood message 1\n", "the first one is unchanged")
+
+print("section upper and lower case")
+send(mallory, "plans", "mallory-plans", "mallory's plans\n")
+send(bob, "HI", "bob-hi-upper", "bob's HI\n")
+seen = inbox_bodies()
+check(fc.read_file(box .. "/inbox/Plans") == "my plans, written by hand\n",
+    "the hand-made \"Plans\" is unchanged")
+local plain = io.open(box .. "/inbox/plans", "r")
+if plain then plain:close() end
+check(not plain, "mallory's \"plans\" is not saved as \"plans\"")
+check(seen["mallory's plans\n"] == 1 and seen["bob's HI\n"] == 1, "both messages are in the inbox")
+local folded, clash = {}, nil
+local p = io.popen('ls -A "' .. box .. '/inbox"')
+for f in p:lines() do
+    if folded[f:lower()] then clash = folded[f:lower()] .. " and " .. f end
+    folded[f:lower()] = f
+end
+p:close()
+check(not clash, "no two inbox files differ only in case", clash)
+
+print("section the sender is not told")
+local status2, answer = mallory:request("POST", "/deliver", json.encode({type = "message",
+    subject = "hi", message_id = "mallory-hi-again", body = "mallory's second hi\n"}))
+check(status2 == 200, "mallory's second \"hi\" is accepted", tostring(status2))
+check(not answer:find("filename", 1, true) and not answer:find("hi", 1, true),
+    "the answer names no file", answer)
+local log = fc.read_file(work .. "/daemon.log") or ""
+check(log:find("from mallory -> hi-", 1, true) and log:find("(hi was taken)", 1, true),
+    "the owner's log says the subject's own name was taken")
+
+print("section attachments")
+for n = 1, 3 do
+    mallory:request("POST", "/deliver", json.encode({type = "message",
+        subject = "with-pic-" .. n, message_id = "pic-message-" .. n, body = "pic " .. n .. "\n",
+        attachments = {{filename = "pic", data = mallory.mime.b64("picture " .. n)}}}))
+end
+local pics = {}
+p = io.popen('ls -A "' .. box .. '/attachments" 2>/dev/null')
+for f in p:lines() do
+    local data = fc.read_file(box .. "/attachments/" .. f)
+    if data then pics[data] = (pics[data] or 0) + 1 end
+end
+p:close()
+check(pics["picture 1"] == 1 and pics["picture 2"] == 1 and pics["picture 3"] == 1,
+    "all three pictures are kept, each in its own file")
 LUA
 lua_status=$?
 while IFS= read -r line; do
