@@ -2,10 +2,10 @@
 
 ## Current Behavior
 
-Nothing is built: the daemon serves only the sealed protocol and the
-plain one-line health answer (#106); there is no web server and no
-reserved `to:` word.  The design below is complete apart from "Still
-open".
+*Built in part, 2026-11-05 (see Status):* `to: url` publishes a message
+as a link, served sealed on `public_http_port` and opened in the browser
+by the page `data/public-link-page.html`.  Not built: the replies
+("essentially a chatroom") and publishing folders.
 
 
 > Renumbered from #615 on 2026-09-21: #615 was taken by
@@ -500,11 +500,15 @@ public_url_words = 5
   is detected.  What can close the gap needs the decrypter to reach the
   reader once by a route that cannot be changed; options put to the
   owner the same day.
+  *2026-11-05:* the page works saved to disk, the first of those routes;
+  the rest waits for the owner (Decisions (2026-11-05)).
 - **The cipher's speed**: the owner expects a 100 MB video in about 2
   seconds ("You must have built it wrong").  The measured 4.6 MiB/s is
   the textbook form, written for checking rather than speed; the
   decrypter needs the table-driven form, held to a test of at least
   50 MiB/s.
+  *2026-11-05:* table-driven, 38 MiB/s in Node on the build machine;
+  see Decisions (2026-11-05).
 - **Speed of the hand-written cipher** (measured 2026-10-09, Node 24 on
   this machine, the skill's `rmail-seal.js`): 4.6 MiB/s.  A 9 GB file
   would take about half an hour of a desktop's time to decrypt in the
@@ -525,6 +529,8 @@ public_url_words = 5
 - **Folders.**  "Attachments & directories" shares a folder as a
   browsable listing with a `download.zip`; encrypted, the listing and
   the zip have to be built and decrypted another way.  Not yet designed.
+  *2026-11-05:* listed on the page as not published yet; see Decisions
+  (2026-11-05).
 - *(Answered 2026-10-04: encrypted, key in the link, no HTTPS — see
   "Decisions (2026-10-04)".  The question as it was asked:)*
   **Encryption.**  The owner asked whether the page can stay encrypted
@@ -562,4 +568,97 @@ outbox-as-source-of-truth, themed rendering).
 
 ## Status
 
-Open.
+Open: the first slice is built (2026-11-05, branch
+`claude/714-public-link`).
+
+Built:
+- `to: url` (any case) is a recipient that is not a contact.  The first
+  cycle that sees it appends `\nURL: http://<host>:<public_http_port>/#<words>`
+  to the file; the host is the public address the daemon last found
+  (#410), or `localhost` until it finds one, and the author may edit it.
+  The state records `url` as `{public = true}`, so the file is kept, and
+  taking the line out (or deleting the file) drops it with nobody to tell.
+- The listener on `public_http_port` (`0.0.0.0`), off when the key is not
+  set: then a `to: url` file is marked `NO PUBLIC PORT` and gets no URL
+  line.  One GET per connection, HTTP/1.0, closed after; any other method
+  405, a malformed request 400, at most 8 KB of head read.
+- `GET /` (and `/index.html`): the page, with a Content-Security-Policy
+  that allows only its own inline script and style, blob: pictures and
+  media, and requests to its own server.
+- `GET /m/<address>`: the message sealed under the key, as
+  `{v, body, piece_size, files = [{name, size, mtime, pieces, missing}]}`;
+  `GET /m/<address>/<file>/<piece>`: one 1 MiB piece, sealed with a first
+  line `rmail piece <file> <piece> <size> <mtime>` that the page checks.
+  Nothing is stored: every answer is read from the outbox file and sealed
+  afresh with a new nonce.
+- The page: SHA-256 and AES-256-GCM decryption in plain JavaScript
+  (table-driven), the code from `#` or typed into a box (spaces and
+  capitals forgiven, a whole link accepted), pictures up to 16 MB shown
+  at once, other files on a button, pieces kept in IndexedDB until the
+  file is whole.  It can be saved and used from disk.
+- The `URL:` line never reaches contacts on the same file, nor the page.
+- Test: `scripts/test-public-link.sh` (loopback; the page's own program
+  run in Node against what the daemon served).
+
+Not built: the replies; folders; a check, for a reader, that the page is
+the real one (see Decisions (2026-11-05)).
+
+## Decisions (2026-11-05)
+
+Made while building, to be overturned by the owner's word:
+
+- **The words are the key, with no slow unlock** (owner, 2026-10-09):
+  address = hex SHA-256(`"rmail public link address\0" .. words`), key =
+  SHA-256(`"rmail public link key\0" .. words`), the words lower-cased
+  and joined by single dashes first.  6 words by default
+  (`public_url_words`, no upper limit).  The first word comes from
+  `data/slug-words-right.txt`, the rest from `data/slug-words-left.txt`,
+  chosen with the system's randomness.
+- **No `.state` copy and no `/tmp` cache.**  The 2026-07-11 design kept
+  generated pages in `/tmp`; sealed per visit from the outbox file there is
+  nothing to cache, go stale or prune, which is the "outbox is the source
+  of truth" rule taken one step further.
+- **The listener is off unless `public_http_port` is set.**  The example
+  value 8028 in "Config keys" is not made a default, since it opens a port
+  to the internet; the author is told by the `NO PUBLIC PORT` marker.
+- **The log never holds the code.**  "Startup + logging" asked for the
+  link in the log; since 2026-10-04 the words are the key, so the log says
+  `public link added for <file>` and `public link for <file> taken down`,
+  and the code is only in the outbox file.
+- **The `URL:` line stays when `to: url` is taken out**, so putting the
+  line back republishes under the same link.  Deleting the URL line gives
+  the file a new one.
+- **Headers:** `Cache-Control: no-store`, `nosniff`, `Referrer-Policy:
+  no-referrer`, and `Access-Control-Allow-Origin: *` on every answer, so a
+  copy of the page saved to disk can ask from `file://`; the sealed
+  answers open only with the words, so being readable from any origin
+  gives nothing away.
+- **Tampering ("critical", 2026-10-09):** this slice ships the one
+  defence that needs nothing from the owner: the page works saved to disk,
+  so a reader who keeps a copy needs to trust the network once.  The
+  message and every piece are checked by the cipher, so a change to them
+  is refused.  What is still open is a way for a reader to check the
+  *page* itself, which waits for the owner's choice among the options put
+  to them on 2026-10-09.
+- **Pieces are 1 MiB**, each sealed alone with a line naming file, piece,
+  size and mtime inside the seal, so a piece cannot be served in another
+  place or from another version of the file without the page noticing.
+  Kept in IndexedDB (the 2026-10-09 finding: no private file storage over
+  plain http), keyed by address, file, size, mtime and piece, and removed
+  once the file is whole.
+- **Cipher speed:** table-driven AES (four T-tables, two rounds per loop
+  turn) and GHASH with one table per byte position (64 KB).  Measured on
+  the build machine in Node 22: 38 MiB/s, 8 times the 4.6 MiB/s of the
+  textbook form.  That machine's native AES-GCM runs at 478 MiB/s, slow
+  for native code (AES-NI usually manages several GB/s), so a desktop
+  should be faster; the test requires 25 MiB/s so a slide back to the
+  textbook form fails it.  The 50 MiB/s target is not shown here; it goes
+  to the owner's checklist (q-a-tests.md) to measure on real browsers.
+  Past that, decrypting pieces in parallel in Web Workers is the next
+  step.
+- **Folders** are listed on the page with "a folder; folders are not
+  published yet", and a missing file with "not there", so the page never
+  shows less than the author attached without saying so.
+- **A contact named `url`** is never sent to; the daemon says so once in
+  its log.  The 2026-07-11 plan to refuse creating such a contact is left
+  to the contacts editors.

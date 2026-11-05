@@ -352,6 +352,21 @@ All three startup-only checks moved onto the timer, not just public IPv4.
       (wired, but neither has been observed changing mid-run)
 - [ ] Confirm over several days that the check time visibly precesses
 
+### A message published as a link: `to: url` (#714) — 2026-11-05
+
+- [x] The URL line is added once, at the bottom after a blank line, with 6 hand-alternating words (harness: scripts/test-public-link.sh)
+- [x] Contacts on the same file get the body without the URL line, and its arrival sends them no edit (harness)
+- [x] The page's own program opens the sealed message and every piece; a wrong code, a changed byte and a piece in the wrong place are refused (harness, in Node)
+- [x] Taking out `to: url` answers 404 at once; without `public_http_port` nothing listens and the file is marked (harness)
+- [ ] Firefox, Chrome and Safari on a desktop: the link opens the message over plain http from another machine on the LAN
+- [ ] The same on a phone (Android Chrome, iOS Safari), including a picture shown inline and a video that plays
+- [ ] A file of several hundred MB: a reload mid-way resumes from the first missing piece (IndexedDB), and the saved file matches the original
+- [ ] The address alone shows the code box; typing the words with spaces or capitals opens the message
+- [ ] A copy of the page saved to disk and opened from there, with the whole link pasted in, opens the message
+- [ ] Light and dark themes follow the system setting; with JavaScript off the page says it needs it
+- [ ] A private window: the message opens even if pieces cannot be kept
+- [ ] Time to open a 100 MB video on a phone and on a desktop (target about 2 s on a desktop; 38 MiB/s measured in Node on the build machine)
+
 ## 7. Android — connection and sync
 
 ### Sync behavior

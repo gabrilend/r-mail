@@ -185,6 +185,12 @@ local cfg = {
     -- before the daemon takes it that the machine slept, and checks its
     -- address and announces itself again on waking
     wake_gap          = tonumber(config.wake_gap) or 60,
+    -- #714: the port a published link's page is served on, plain http.
+    -- No port, no listener: nothing is public until the owner says where.
+    public_http_port  = tonumber(config.public_http_port),
+    -- #714: words in a new link's code, and so in its key.  6 unless the
+    -- owner asks for more; there is no upper limit (owner, 2026-10-09)
+    public_url_words  = math.max(1, tonumber(config.public_url_words) or 6),
     -- Where to mirror the log.  stderr always goes to whoever started the
     -- daemon -- journald under systemd, a terminal when run by hand -- and
     -- that copy is not optional.  This is the *second* copy, a plain file
@@ -4237,6 +4243,21 @@ local function _expand_attach_glob(pattern, outbox_file)
     return matches
 end
 
+-- {{{ strip_url_line(body) -> the body without its URL line (#714)
+-- The URL line is the daemon's note to the author, not part of the
+-- message: it is left out of what contacts on the same file receive and
+-- of the published page.  Appended as "\nURL: ...\n" after a body that
+-- ended in a newline, it comes off exactly, so adding it changes nothing
+-- a contact was sent.
+local function strip_url_line(body)
+    if not body or not body:find("URL:", 1, true) then return body end
+    local out = ("\n" .. body):gsub("\n\nURL:[ \t]*https?://[^\n#]*#[%w%-]+[ \t]*\n?$", "\n")
+    out = out:gsub("\nURL:[ \t]*https?://[^\n#]*#[%w%-]+[ \t]*\n", "\n")
+    out = out:gsub("\nURL:[ \t]*https?://[^\n#]*#[%w%-]+[ \t]*$", "")
+    return out:sub(2)
+end
+-- }}}
+
 -- implicit_first_recipient (#214): the contact whose folder the file is in.
 -- It comes first, as if the file began with its to: line, and takes every
 -- attach: line in the file; a to: line naming it again adds nothing.  The
@@ -4312,7 +4333,7 @@ local function parse_outbox_file(path, implicit_first_recipient)
     end
 
     if #entries == 0 then return nil, nil end
-    return entries, body
+    return entries, strip_url_line(body)
 end
 
 
@@ -4376,6 +4397,333 @@ local function mark_recipient_problem(outbox_path, recipient, label, reason)
     write_file(outbox_path,
         prefix .. marker .. " \xe2\x80\x94 " .. reason .. "\n" ..
         text:sub(eol + 1))
+end
+-- }}}
+
+-- ============================================================
+-- A message published as a link (#714)
+-- ============================================================
+--
+-- `to: url` in an outbox file publishes the message for someone who has
+-- no rmail, only a browser.  The first cycle that sees it appends
+--
+--     URL: http://<address>:<public_http_port>/#ivory-chair-signal-...
+--
+-- to the bottom of the file.  The words after `#` are the whole secret
+-- and never reach the server: a browser keeps the part after `#` to
+-- itself.  From the words the page works out two things, the same way
+-- this daemon does:
+--
+--   address = hex SHA-256("rmail public link address\0" .. words)
+--   key     = SHA-256("rmail public link key\0" .. words)
+--
+-- and asks for /m/<address>.  The daemon finds the outbox file whose
+-- URL line gives that address and answers with the message sealed under
+-- the key (AES-256-GCM, a fresh nonce each time): the page alone can
+-- open it.  Each attached file is offered in pieces, each sealed on its
+-- own, so the page can keep the pieces it has checked and pick up where
+-- it left off.
+--
+-- Nothing is stored: every answer is sealed from the outbox file as it
+-- is at that moment, so an edit shows at the next visit and taking the
+-- `to: url` line out takes the page down.  The page is
+-- data/public-link-page.html, served at `/`.
+--
+-- Plain http, by the owner's decision (no certificates).  Someone who
+-- can *watch* the connection sees only sealed bytes and the address,
+-- never the words.  Someone who can *change* it can hand the reader a
+-- different page; issues/714 records that, and the page can be saved
+-- and used from disk so that a reader need trust the network only once.
+
+local publink = {}
+publink.PIECE = 1048576         -- bytes of a file per sealed piece
+publink.HEAD_LIMIT = 8192       -- bytes of a request's head read at most
+
+-- {{{ publink.is_keyword(name)
+-- `url` in any case.  A contact with that name cannot be reached by a
+-- `to:` line: the word is reserved, and the daemon says so once.
+function publink.is_keyword(name)
+    return type(name) == "string" and name:lower() == "url"
+end
+-- }}}
+
+-- {{{ publink.normalize(words) -> lower-case words joined by single dashes
+-- So a code typed with spaces, capitals or a stray dash at either end
+-- opens the same message as the link.
+function publink.normalize(words)
+    return (words:lower():gsub("[^a-z]+", "-"):gsub("^%-+", ""):gsub("%-+$", ""))
+end
+-- }}}
+
+function publink.address(words)
+    return hex_sha256("rmail public link address\0" .. publink.normalize(words))
+end
+
+function publink.key(words)
+    return crypto.sha256("rmail public link key\0" .. publink.normalize(words))
+end
+
+-- {{{ publink.word_lists() -> right-hand starters, left-hand starters
+-- The hand-alternating lists in data/ (scripts/slug-words.lua builds and
+-- extends them).  Read once.
+function publink.word_lists()
+    if publink._lists then return publink._lists.R, publink._lists.L end
+    local lists = {}
+    for _, hand in ipairs({ "left", "right" }) do
+        local words = {}
+        local text = read_file(script_dir .. "data/slug-words-" .. hand .. ".txt") or ""
+        for w in text:gmatch("[a-z]+") do words[#words + 1] = w end
+        lists[hand == "left" and "L" or "R"] = words
+    end
+    publink._lists = lists
+    return lists.R, lists.L
+end
+-- }}}
+
+-- {{{ publink.pick(list) -> one word, chosen uniformly by the system's randomness
+local function pick(list)
+    local n = #list
+    local limit = 4294967296 - (4294967296 % n)
+    while true do
+        local b1, b2, b3, b4 = crypto.random_bytes(4):byte(1, 4)
+        local x = ((b1 * 256 + b2) * 256 + b3) * 256 + b4
+        if x < limit then return list[(x % n) + 1] end
+    end
+end
+-- }}}
+
+-- {{{ publink.new_words(count) -> "ivory-chair-signal-..."
+-- The first word starts on the right hand and the rest on the left, so
+-- every dash falls to the left hand (the issue's rule).
+function publink.new_words(count)
+    local right, left = publink.word_lists()
+    if #right == 0 or #left == 0 then return nil end
+    local words = { pick(right) }
+    for _ = 2, count do words[#words + 1] = pick(left) end
+    return table.concat(words, "-")
+end
+-- }}}
+
+-- the URL line: `URL:` then a link whose part after `#` is the words
+local URL_LINE = "\nURL:[ \t]*(https?://[^\n#]*#([%w%-]+))[ \t]*"
+
+-- {{{ publink.words_in(text) -> words, link
+-- The last URL line in the file wins, so a hand-edited copy below the
+-- generated one replaces it.
+function publink.words_in(text)
+    local words, link
+    for l, w in ("\n" .. text):gmatch(URL_LINE) do link, words = l, w end
+    return words and publink.normalize(words), link
+end
+-- }}}
+
+
+-- {{{ publink.host() -> the address a reader's browser should use
+-- The public address the daemon last found (#410), or this machine's
+-- name for itself when it has not found one yet; the author can edit
+-- the line, and the page only needs the words to stay the same.
+function publink.host()
+    local ip = (read_file(STATE .. "/public_ip") or ""):match("^%s*(%S+)")
+    return ip or "localhost"
+end
+-- }}}
+
+-- {{{ publink.note(name, entry, state, contacts) -> true when it is published
+-- Called for the `to: url` entry of an outbox file each cycle.  Records
+-- it as a recipient, so the cleanup pass keeps the file, and gives the
+-- file its URL line the first time.
+function publink.note(name, state, contacts)
+    local path = OUTBOX .. "/" .. name
+    if contacts.url or contacts.URL then
+        publink._warned = publink._warned or {}
+        if not publink._warned.contact then
+            publink._warned.contact = true
+            log("a contact named 'url' is never sent to: `to: url` publishes a link (#714)")
+        end
+    end
+    state[name].recipients.url = state[name].recipients.url or { public = true }
+    if not cfg.public_http_port then
+        mark_recipient_problem(path, "url", "NO PUBLIC PORT",
+            "set public_http_port in this mailbox's config to publish a link")
+        return false
+    end
+    local text = read_file(path)
+    if not text then return false end
+    if publink.words_in(text) then return true end
+    local words = publink.new_words(cfg.public_url_words)
+    if not words then
+        log("cannot publish %s: no word lists in %sdata/", name, script_dir)
+        return false
+    end
+    local link = string.format("http://%s:%d/#%s", publink.host(), cfg.public_http_port, words)
+    write_file(path, text .. (text:sub(-1) == "\n" and "" or "\n") .. "\nURL: " .. link .. "\n")
+    -- the words are the key, so the log names the file and not them
+    log("public link added for %s (its URL line has the code)", name)
+    return true
+end
+-- }}}
+
+-- {{{ publink.find(address) -> path, entry, body, words
+-- The outbox file published under this address, if any.  Every published
+-- file is looked at, so nothing is kept between requests and nothing
+-- goes stale.
+function publink.find(address)
+    for _, name in ipairs(list_files(OUTBOX)) do
+        local path = OUTBOX .. "/" .. name
+        local text = read_file(path)
+        if text and text:find("URL:", 1, true) then
+            local words = publink.words_in(text)
+            if words and publink.address(words) == address then
+                local entries, body = parse_outbox_file(path)
+                for _, e in ipairs(entries or {}) do
+                    if publink.is_keyword(e.name) then return path, e, body, words end
+                end
+                return nil
+            end
+        end
+    end
+    return nil
+end
+-- }}}
+
+function publink.is_folder(path)
+    local f = io.open(path .. "/.", "r")
+    if f then f:close(); return true end
+    return false
+end
+
+local function file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local size = f:seek("end")
+    f:close()
+    return size
+end
+
+-- {{{ publink.files(entry) -> the files the page offers
+-- The attach: lines under `to: url`, the contact rule.  A folder or a
+-- missing file is listed with the reason it is not offered, so the page
+-- does not silently show less than the author attached.
+function publink.files(entry)
+    local files = {}
+    for _, fp in ipairs(entry.attachments or {}) do
+        local name = fp:gsub("/+$", ""):match("([^/]+)$") or fp
+        local f = { name = name }
+        if publink.is_folder(fp) then
+            f.missing = "a folder; folders are not published yet"
+        else
+            local size = file_size(fp)
+            if not size then
+                f.missing = "not there"
+            else
+                f.size, f.mtime, f.path = size, file_mtime(fp) or 0, fp
+                f.pieces = math.max(1, math.ceil(size / publink.PIECE))
+            end
+        end
+        files[#files + 1] = f
+    end
+    return files
+end
+-- }}}
+
+local function seal(key, plaintext)
+    local nonce = crypto.random_bytes(12)
+    return nonce .. crypto.aes_gcm_encrypt(key, nonce, plaintext)
+end
+
+-- {{{ publink.answer(path) -> status, content type, body
+-- What the public port says to one GET.
+function publink.answer(path)
+    path = path:gsub("%?.*$", "")
+    if path == "/" or path == "/index.html" then
+        local page = read_file(script_dir .. "data/public-link-page.html")
+        if not page then return 500, "text/plain", "the page is missing from data/\n" end
+        return 200, "text/html; charset=utf-8", page
+    end
+    local address, rest = path:match("^/m/(%x+)(.*)$")
+    if not address or #address ~= 64 then return 404, "text/plain", "not found\n" end
+    local _, entry, body, words = publink.find(address:lower())
+    if not entry then return 404, "text/plain", "not found\n" end
+    local key = publink.key(words)
+    local files = publink.files(entry)
+    if rest == "" then
+        local listed = {}
+        for i, f in ipairs(files) do
+            listed[i] = { name = f.name, size = f.size, mtime = f.mtime,
+                          pieces = f.pieces, missing = f.missing }
+        end
+        -- the body comes from parse_outbox_file, without its URL line
+        local message = json.encode({ v = 1, body = body or "",
+                                      piece_size = publink.PIECE, files = listed })
+        return 200, "application/octet-stream", seal(key, message)
+    end
+    local i, p = rest:match("^/(%d+)/(%d+)$")
+    i, p = tonumber(i), tonumber(p)
+    local f = i and files[i]
+    if not f or not f.path or p >= f.pieces then return 404, "text/plain", "not found\n" end
+    local fh = io.open(f.path, "rb")
+    if not fh then return 404, "text/plain", "not found\n" end
+    fh:seek("set", p * publink.PIECE)
+    local bytes = fh:read(publink.PIECE) or ""
+    fh:close()
+    -- the piece says which piece of which version of which file it is,
+    -- inside the seal, so the page can refuse one handed to it in the
+    -- wrong place
+    local head = string.format("rmail piece %d %d %d %d\n", i, p, f.size, f.mtime)
+    return 200, "application/octet-stream", seal(key, head .. bytes)
+end
+-- }}}
+
+local REASONS = { [200] = "OK", [404] = "Not Found", [405] = "Method Not Allowed",
+                  [400] = "Bad Request", [500] = "Internal Server Error" }
+
+-- {{{ publink.handle(rt, client)
+-- One connection on the public port: one request, one answer, closed.
+-- Only GET; nothing a browser sends is written anywhere.
+function publink.handle(rt, client)
+    local head = ""
+    while #head <= publink.HEAD_LIMIT do
+        local line, err = client:receive("*l")
+        if not line then
+            if err ~= "closed" then log("public port: request not finished (%s)", tostring(err)) end
+            return
+        end
+        if line == "" or line == "\r" then break end
+        head = head .. line .. "\n"
+    end
+    local method, target = head:match("^(%u+) (%S+) HTTP/%d")
+    local status, ctype, body
+    if not method then
+        status, ctype, body = 400, "text/plain", "bad request\n"
+    elseif method ~= "GET" then
+        status, ctype, body = 405, "text/plain", "only GET\n"
+    else
+        local ok, s, c, b = pcall(publink.answer, target)
+        if ok then status, ctype, body = s, c, b
+        else
+            log("public port: %s", tostring(s))
+            status, ctype, body = 500, "text/plain", "error\n"
+        end
+    end
+    local headers = {
+        "HTTP/1.0 " .. status .. " " .. (REASONS[status] or ""),
+        "Content-Type: " .. ctype,
+        "Content-Length: " .. #body,
+        "Cache-Control: no-store",
+        "X-Content-Type-Options: nosniff",
+        "Referrer-Policy: no-referrer",
+        -- a copy of the page saved to disk asks from file://, so the
+        -- sealed answers may be read from any origin; they open only
+        -- with the words
+        "Access-Control-Allow-Origin: *",
+        "Connection: close",
+    }
+    if ctype:find("text/html", 1, true) then
+        headers[#headers + 1] = "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; " ..
+            "style-src 'unsafe-inline'; img-src blob:; media-src blob:; connect-src 'self'; " ..
+            "form-action 'none'; base-uri 'none'"
+    end
+    client:send(table.concat(headers, "\r\n") .. "\r\n\r\n" .. body)
 end
 -- }}}
 
@@ -6573,6 +6921,13 @@ local function sync_outbox(my_name)
                         self_delete_from_inbox(my_name, rmeta.message_id)
                         state[name].recipients[recipient] = nil
                         did_work = true
+                    elseif rmeta.public then
+                        -- #714: `to: url` taken out: the link stops
+                        -- answering at once, since every answer is read
+                        -- from this file
+                        state[name].recipients[recipient] = nil
+                        log("public link for %s taken down", name)
+                        did_work = true
                     elseif contacts[recipient] then
                         ops[#ops + 1] = {
                             type = "notify_removal", filename = name,
@@ -6589,7 +6944,13 @@ local function sync_outbox(my_name)
             if entries then
                 for _, entry in ipairs(entries) do
                     local rname = entry.name
-                    if not state[name].recipients[rname] then
+                    if publink.is_keyword(rname) then
+                        -- #714: not a contact; the message is published
+                        -- as a link, served from this file at each visit
+                        if not publink.note(name, state, contacts) then
+                            outbox_files_with_unresolved_recipients[name] = true
+                        end
+                    elseif not state[name].recipients[rname] then
                         -- new recipient: deliver message body only
                         if rname == my_name and contacts[rname] then
                             -- The name means two things at once: it is
@@ -7054,6 +7415,10 @@ local function sync_outbox(my_name)
             for recipient, rmeta in pairs(meta.recipients) do
                 if rmeta.self then
                     self_delete_from_inbox(my_name, rmeta.message_id)
+                    meta.recipients[recipient] = nil
+                    did_work = true
+                elseif rmeta.public then
+                    -- #714: the file is gone, so is its link; nobody to tell
                     meta.recipients[recipient] = nil
                     did_work = true
                 elseif contacts[recipient] then
@@ -9480,6 +9845,20 @@ local function init_runtime()
     rt.server = bound
     rt.server:settimeout(0)
 
+    -- #714: the public port, for published links, only when the config
+    -- names one.  A port that cannot be had is said once and the mailbox
+    -- runs on: its mail does not depend on it.
+    if cfg.public_http_port then
+        local pub, pub_err = socket.bind("0.0.0.0", cfg.public_http_port)
+        if pub then
+            pub:settimeout(0)
+            rt.public_server = pub
+            log("public links served on :%d (http)", cfg.public_http_port)
+        else
+            log("cannot serve public links on port %d: %s", cfg.public_http_port, tostring(pub_err))
+        end
+    end
+
     -- Listening now, so any earlier complaint about not listening is stale
     -- whatever port it was about.
     if clear_problem("inbound", "CANNOT-LISTEN") then
@@ -9702,10 +10081,11 @@ local function main()
     -- A connection gets its own coroutine running the request handler,
     -- started at once and run until its first wait.  `preread` is the
     -- first frame of a caller held during a sync cycle.
-    local function start_client(raw_client, preread)
+    local function start_client(raw_client, preread, handler)
         local async_client = make_async_socket(raw_client)
+        handler = handler or handle_request
         local co = coroutine.create(function()
-            handle_request(rt, async_client, preread)
+            handler(rt, async_client, preread)
         end)
         clients[raw_client] = {
             co = co, wait_type = nil, wait_sock = nil,
@@ -9731,6 +10111,7 @@ local function main()
         -- wakes us on outbox file changes without polling
         local recvt = {rt.server, rt.outbox_inotify_sock, rt.contacts_inotify_sock}
         if rt.server6 then recvt[#recvt + 1] = rt.server6 end
+        if rt.public_server then recvt[#recvt + 1] = rt.public_server end
         local sendt = {}
         for raw_sock, info in pairs(clients) do
             if info.wait_type == "read" then
@@ -9783,6 +10164,9 @@ local function main()
                 elseif sock == rt.server or sock == rt.server6 then
                     local raw_client = sock:accept()
                     if raw_client then start_client(raw_client) end
+                elseif sock == rt.public_server then
+                    local raw_client = sock:accept()
+                    if raw_client then start_client(raw_client, nil, publink.handle) end
                 else
                     -- Find which client owns this socket and resume it
                     for raw_sock, info in pairs(clients) do
