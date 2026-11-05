@@ -41,6 +41,11 @@ TEST_NAME="listen-only-contact"
 DOOR_TOKEN="listen-only-contact-door-token-printed-on-a-website"
 printf '\n// a website: its token is in every page\ndoor.token = "%s"\ndoor.listen = true\n' \
     "$DOOR_TOKEN" >> "$BOX/contacts"
+# Two of the refusals below log the same words, and the test counts one line
+# per refusal.  With repeats held (#118) the second would wait to be written
+# with its time a few minutes later, and the daemon is stopped before then.
+# Holding is off by default; this says so for this test whatever the default.
+printf 'log_coalesce = false\n' >> "$BOX/config"
 
 start_receiver
 

@@ -184,6 +184,15 @@ local cfg = {
     -- `log_file` in the config to put it somewhere else, or to `""` to
     -- keep the journal copy only.
     log_file          = _log_file(config.log_file, MAIL),
+    -- #118: a line logged again within this many seconds of its last
+    -- appearance is held back, and the held repeats are written later as
+    -- one line that lists when each one happened.  Off unless asked for:
+    -- the owner wants repeats left running (2026-09-23, "keep it running
+    -- away instead of collapsing identical lines").  A number of seconds
+    -- turns it on, `true` means 300; unset, `false` or 0 writes every line
+    -- as it comes.
+    log_coalesce      = config.log_coalesce == true and 300
+                        or tonumber(config.log_coalesce) or 0,
 }
 
 -- Hook scripts.  The config parser doesn't strip quotes, so a user who
@@ -687,10 +696,12 @@ end
 -- noisy an unreachable contact gets.
 local LOG_MAX_BYTES = 5 * 1024 * 1024
 local log_fh        = nil
-local log_broken    = false   -- complain once, not once per line
+-- broken: the file copy failed once, so complain once, not once per line.
+-- runs: the repeat holding of #118 (see log_state.hold below).
+local log_state     = {broken = false, runs = {}, size = 0}
 
 local function log_handle()
-    if log_broken or not cfg.log_file then return nil end
+    if log_state.broken or not cfg.log_file then return nil end
     if log_fh then return log_fh end
     -- The default log sits in the RAM folder, which a reboot empties.
     -- Nothing else may have recreated it yet when the first line is logged
@@ -701,7 +712,7 @@ local function log_handle()
     end
     local fh, err = io.open(cfg.log_file, "a")
     if not fh then
-        log_broken = true
+        log_state.broken = true
         io.stderr:write(os.date("%Y-%m-%d %H:%M:%S ") .. string.format(
             "cannot open log_file '%s': %s -- continuing with journal only\n",
             tostring(cfg.log_file), tostring(err)))
@@ -720,6 +731,112 @@ local function log_rotate()
     os.rename(cfg.log_file, cfg.log_file .. ".1")
 end
 
+function log_state.write(line)
+    -- stderr first and unconditionally.  If the file copy is going to fail
+    -- it must not take the journal copy down with it.
+    io.stderr:write(line)
+    io.stderr:flush()
+
+    local fh = log_handle()
+    if not fh then return end
+    fh:write(line)
+    fh:flush()
+    local size = fh:seek("end")
+    if size and size >= LOG_MAX_BYTES then log_rotate() end
+end
+
+-- ---- Repeated lines (#118) ----------------------------------------------
+--
+-- A line that comes again within cfg.log_coalesce seconds of its last
+-- appearance is not written then.  Its time is kept, and the kept times go
+-- out together as one line:
+--
+--   2026-11-05 10:05:00 (repeated x9: 10:00:30 +30 +30 +31 +29 +30 +30 +30 +30) timeout ...
+--
+-- The first time is the first held repeat (with its date when that is not
+-- the line's own date); each +N is the seconds since the one before.  So
+-- every repeat's time can still be read off, to the second the log has
+-- always given -- what the owner asked a repeat to keep (2026-09-23).
+--
+-- The held repeats of a line go out when the first of them is
+-- cfg.log_coalesce seconds old, when MOST of them are held, and before the
+-- daemon exits on its own (log_state.flush_all).  A line that keeps
+-- repeating keeps its run, and from the second such line on it also says
+-- how many repeats there have been since it was last written in full
+-- ("x9, 18 so far").  A line seen once is written exactly as before.
+--
+-- Matching is on the whole text, and on every line seen in the last
+-- cfg.log_coalesce seconds, not only the one before: a stuck contact's
+-- lines come in a group ("http send failed", "unreachable contacts ..."),
+-- and comparing with the last line alone would never find them equal.
+log_state.MOST = 50   -- held repeats written in one line, at most
+log_state.KEEP = 64   -- lines remembered at once, at most
+
+-- Write one run's held repeats and start it over.
+function log_state.flush(text, run, now)
+    local held = run.held
+    if #held == 0 then return end
+    local first = held[1]
+    local stamp = os.date("%Y-%m-%d", first) == os.date("%Y-%m-%d", now)
+        and os.date("%H:%M:%S", first) or os.date("%Y-%m-%d %H:%M:%S", first)
+    local parts = {stamp}
+    for i = 2, #held do parts[#parts + 1] = "+" .. (held[i] - held[i - 1]) end
+    local count = "x" .. #held
+    if run.total > #held then count = count .. ", " .. run.total .. " so far" end
+    run.held = {}
+    log_state.write(string.format("%s (repeated %s: %s) %s\n",
+        os.date("%Y-%m-%d %H:%M:%S", now), count, table.concat(parts, " "), text))
+end
+
+-- Write what is due and forget lines not seen for a while.  Called with
+-- every line logged and from the main loop, so a held repeat is never more
+-- than cfg.log_coalesce seconds (and one loop wake-up) late.
+function log_state.tick(now)
+    local window = cfg.log_coalesce
+    for text, run in pairs(log_state.runs) do
+        if run.held[1] and now - run.held[1] >= window then
+            log_state.flush(text, run, now)
+        end
+        if not run.held[1] and now - run.last > window then
+            log_state.runs[text] = nil
+            log_state.size = log_state.size - 1
+        end
+    end
+end
+
+-- true when the line is held rather than written now
+function log_state.hold(text, now)
+    if cfg.log_coalesce <= 0 then return false end
+    log_state.tick(now)
+    local run = log_state.runs[text]
+    if run then
+        run.last  = now
+        run.total = run.total + 1
+        run.held[#run.held + 1] = now
+        if #run.held >= log_state.MOST then log_state.flush(text, run, now) end
+        return true
+    end
+    if log_state.size >= log_state.KEEP then
+        -- too many different lines at once: the one seen longest ago goes
+        local oldest, at
+        for t, r in pairs(log_state.runs) do
+            if not at or r.last < at then oldest, at = t, r.last end
+        end
+        log_state.flush(oldest, log_state.runs[oldest], now)
+        log_state.runs[oldest] = nil
+        log_state.size = log_state.size - 1
+    end
+    log_state.runs[text] = {last = now, total = 0, held = {}}
+    log_state.size = log_state.size + 1
+    return false
+end
+
+-- Before the daemon stops: everything held goes out.
+function log_state.flush_all()
+    local now = os.time()
+    for text, run in pairs(log_state.runs) do log_state.flush(text, run, now) end
+end
+
 local function log(fmt, ...)
     local text = string.format(fmt, ...)
     -- #121: a sync runs in passes, and each pass's check reads the same
@@ -732,19 +849,9 @@ local function log(fmt, ...)
         if said[text] and cfg.sync_quiet then return end
         said[text] = true
     end
-    local line = os.date("%Y-%m-%d %H:%M:%S ") .. text .. "\n"
-
-    -- stderr first and unconditionally.  If the file copy is going to fail
-    -- it must not take the journal copy down with it.
-    io.stderr:write(line)
-    io.stderr:flush()
-
-    local fh = log_handle()
-    if not fh then return end
-    fh:write(line)
-    fh:flush()
-    local size = fh:seek("end")
-    if size and size >= LOG_MAX_BYTES then log_rotate() end
+    local now = os.time()
+    if log_state.hold(text, now) then return end
+    log_state.write(os.date("%Y-%m-%d %H:%M:%S ", now) .. text .. "\n")
 end
 
 -- The directory-listing helper sits below log() because it logs: placed
@@ -9464,14 +9571,20 @@ local function main()
 
         if now >= stop.next_check then
             stop.next_check = now + stop.every
+            -- held repeats that are due go out even when nothing else is
+            -- logged (#118)
+            log_state.tick(os.time())
             -- The mailbox vanished: a USB drive pulled out, or unmounted
             -- under us.  Two misses in a row, so an editor briefly
             -- renaming a file cannot trip it.  Nothing is flushed on the
-            -- way out because there is nowhere left to write it.
+            -- way out because there is nowhere left to write it -- except
+            -- the log's held repeats (#118), whose stderr and RAM copies
+            -- are not on the drive.
             local h = io.open(STATE .. "/.", "r")
             if h then h:close(); stop.misses = 0
             else stop.misses = stop.misses + 1 end
             if stop.misses >= 2 then
+                log_state.flush_all()
                 io.stderr:write("rmail: mailbox " .. MAIL .. " is gone (drive unplugged?) -- stopping\n")
                 os.exit(0)
             end
@@ -9480,6 +9593,7 @@ local function main()
             -- stuck connection cannot hold it open forever.
             if cfg.once_window and now - stop.started >= cfg.once_window
                and (next(clients) == nil or now - stop.started >= cfg.once_window + 600) then
+                log_state.flush_all()
                 log("--once: window of %ds closed, exiting", cfg.once_window)
                 os.exit(0)
             end
@@ -9518,4 +9632,10 @@ local function main()
     end
 end
 
-main()
+-- A daemon that stops on an error writes its held log repeats (#118) first,
+-- then the error, as Lua itself would have.
+xpcall(main, function(err)
+    log_state.flush_all()
+    io.stderr:write(debug.traceback(tostring(err), 2), "\n")
+    os.exit(1)
+end)
