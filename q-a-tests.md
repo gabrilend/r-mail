@@ -352,6 +352,14 @@ All three startup-only checks moved onto the timer, not just public IPv4.
       (wired, but neither has been observed changing mid-run)
 - [ ] Confirm over several days that the check time visibly precesses
 
+### The mailbox's website, on request (#715a) — 2026-11-05
+
+- [x] A `website` request keeps no file of that name, saves its note under the arrival time, and offers the whole folder (harness: scripts/test-website-request.sh)
+- [x] A second request while the offer waits, or after the same version arrived, makes no offer and one log line (harness)
+- [x] A changed folder is offered again under a new name and the old offer goes; a listen-only contact is offered nothing (harness)
+- [ ] Two real mailboxes: one asks the other for its website, accepts the consent form, and opens the site's pages from the attachments folder
+- [ ] A site of several GB: the offer's size matches the consent form's, and asking again while it transfers makes no second offer
+
 ### A message published as a link: `to: url` (#714) — 2026-11-05
 
 - [x] The URL line is added once, at the bottom after a blank line, with 6 hand-alternating words (harness: scripts/test-public-link.sh)

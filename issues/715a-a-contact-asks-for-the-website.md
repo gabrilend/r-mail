@@ -4,8 +4,9 @@ Sub-issue of #715.
 
 ## Current Behavior
 
-Nothing is built.  A message whose subject is `website` is filed in the
-inbox like any other.
+*Built in part, 2026-11-05 (see Status):* the config keys, the request,
+the offer and the guard.  Not built: the receiving side (one site per
+contact) and the information pages.
 
 Built 2026-10-13 and relied on here: an arriving message never writes over
 a file already in the inbox; a taken name moves the newcomer to the next
@@ -158,3 +159,62 @@ file, an information page that a link to it is pointed at instead:
    waits makes no second offer; a request after accepting the same
    version makes none; changing one file in the site makes a new offer;
    a note sent with the request is saved under a date name.
+
+## Status
+
+Open: the sending side is built (2026-11-05, branch
+`claude/715a-website-on-request`, stacked on #714's branch only to keep
+the two changes to `rmail.lua` from colliding; it needs nothing of #714).
+
+Built:
+- `website` and `website_access` read and checked at start-up: a website
+  that is not a folder, `website_access = public`, and any value but
+  `private`/`public` each stop the daemon with the reason.
+- A message called `website` (any case) from a contact, when a website is
+  configured: no file of that name is kept; any text is saved under the
+  receiving time to the millisecond; the daemon writes
+  `website-for-<contact>` (`to:`, `attach: <folder>`, the offer text) to
+  its outbox, and the usual machinery sends the consent form and the zip.
+- The guard, per contact, in `.state/website.json`: no offer while one
+  waits or travels; none when they already received this version; every
+  refused request one log line with its reason.
+- Test: `scripts/test-website-request.sh`.
+
+Not built: steps 4 and 5 below (the receiving side, the information
+pages).
+
+## Decisions (2026-11-05)
+
+Made while building, to be overturned by the owner's word:
+
+- **Open question 1, asking again after accepting: no.**  The owner asked
+  for a guard against repeated requests (2026-10-13), and a contact who
+  lost the site is one the owner can answer by hand, with an outbox file
+  attaching the folder.  A changed site is a new version and is offered.
+- **Open question 2, the information pages: beside the files, the owner's
+  pages untouched.**  The zip stays the owner's site byte for byte, and
+  rewriting links means parsing HTML, which breaks on hand-written pages.
+  The owner links to `<file>.info.html` where they want the warning.  Not
+  built in this slice.
+- **The fingerprint is over each file's path, size and modification time,
+  not its contents.**  Hashing a 15 GB site at every request would let a
+  contact make this machine read 15 GB for a few bytes, which is what the
+  guard is for.  An edit changes the time.
+- **The offer is `website-for-<contact>`**, and a new offer takes the next
+  free `-2`, `-3` …: the old offer file is deleted (so the contact is told
+  to delete the old message) and the new one has a name the next pass has
+  never seen, so it is sent rather than taken for the old file.
+- **A request with no text keeps nothing** and is recorded as a message
+  already deleted, so the next pass tells the sender and their `website`
+  file leaves their outbox; one with a note stays on their side until the
+  owner deletes the note, as any message does.
+- **The answer to a request is always 200**, offer or not, so a contact
+  cannot learn from it whether the guard stopped them.
+- **With no website configured, `website` is an ordinary message**, so
+  the owner still sees that someone asked.
+- **A listen-only contact is never offered it** (#420: never sent
+  anything); its note is kept.
+- **The note is saved as it came**: the receive hooks, which are for mail,
+  do not run on it.
+- No datapath document: `docs/` has none to follow yet; the feature is
+  described in `docs/.templates/attachments.md` and the README.

@@ -341,3 +341,28 @@ A message body (the text in your outbox file, below the headers) over 128 KB
 stub body and a consent form for the text, named after the message (#308).
 Only if packing that attachment fails is an error written to your inbox.  An
 edit to a message is sent as it is, with no size cap.
+
+### Your website, sent to contacts who ask (#715a)
+
+`website = <folder>` in your config names a folder to publish to your
+contacts (a relative path is taken from the folder holding the config, as
+for hooks).  A contact asks for it by sending you a message called
+`website`.  Your daemon keeps no file of that name: any text in the
+request is saved in your inbox under the time it arrived (for example
+`2026-10-13-14-03-27-512`), and the answer is an outbox message,
+`website-for-<contact>`, with the whole folder attached.  From there it is
+an ordinary attachment: the contact gets a consent form saying its size,
+and nothing is sent unless they say yes.
+
+A request is a few bytes and the answer can be gigabytes, so the daemon
+will not send it over and over: while an offer to a contact waits for
+their answer or is on its way, a new request makes no new offer, and a
+contact who already received this version of the folder is not offered it
+again.  A changed folder (a file added, removed, resized or edited) is a
+new version; the next request replaces the old offer with a new one.
+Every request that makes no offer is one line in the log, so you can see
+someone asking repeatedly.  A listen-only contact is never offered it.
+
+`website_access = private` (the default) is the only setting built so
+far; `public`, for strangers, waits for #715b, and the daemon will not
+start with it.

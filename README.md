@@ -175,7 +175,7 @@ port = 8025
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
 
-The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and six more:
+The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and eight more:
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
@@ -183,6 +183,8 @@ The generated config file contains a comment above most keys explaining what it 
 - `wake_gap` — seconds the daemon's wait may overrun by the clock before it takes it that the machine slept (default: `60`). On waking it checks its address, announces itself to every contact, and tries every contact at once, so mail held for it while it slept comes in on their next pass.
 - `public_http_port` — the port that serves `to: url` links to browsers (default: none, so nothing listens and a `to: url` file is marked `NO PUBLIC PORT`). It needs forwarding on your router like `port`, and must differ from it.
 - `public_url_words` — how many words a new link's code has (default: `6`, no upper limit). More words make a link harder to guess; links already made keep theirs.
+- `website` — a folder to send, zipped, to a contact who asks for it with a message called `website` (default: none). A relative path is taken from the config's folder. See [attachments](docs/.templates/attachments.md#your-website-sent-to-contacts-who-ask-715a).
+- `website_access` — who may ask: `private` (contacts only, the default). `public` is not built yet, and the daemon will not start with it.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
@@ -467,6 +469,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** `website = <folder>` in the config publishes a folder to your contacts (#715a). A contact who sends you a message called `website` is offered the whole folder as an attachment, with its size on the consent form; a contact who already has this version, or has an offer waiting, is not offered it again.
 
 - **2026-11-05 →** `to: url` publishes a message as a link someone with only a browser can open (#714). Set `public_http_port` to turn it on. The words after `#` in the link are the key; the page opens the message in the browser, and files arrive in checked pieces that survive a reload.
 

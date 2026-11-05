@@ -2578,6 +2578,10 @@ local function save_attachments(attachments, sender, inbox_meta, message_path)
     end
 end
 
+-- The mailbox's website (#715a): filled in below, beside the other
+-- helpers it needs; declared here for the receive handler.
+local website = {}
+
 local function handle_deliver_message(data, sender)
     local subject = data.subject or "untitled"
     local message_id = data.message_id or uuid()
@@ -2593,6 +2597,12 @@ local function handle_deliver_message(data, sender)
             save_state("inbox.json", inbox_state)
             return 200, {ok = true}
         end
+    end
+
+    -- #715a: a message called `website` asks for this mailbox's website.
+    -- With no website configured it is an ordinary message.
+    if website.folder and website.is_request(subject) then
+        return website.request(data, sender, inbox_state)
     end
 
     -- new message
@@ -4790,6 +4800,7 @@ function answers.record(state, transfer, answer)
     if not rmeta then return end
     rmeta.attachments = rmeta.attachments or {}
     rmeta.attachments[transfer.original_path] = answer
+    if answer == "complete" then website.note_complete(transfer) end
 end
 -- }}}
 
@@ -4971,6 +4982,176 @@ local function sha256_of_bytes(data)
     os.remove(tmp)
     return result
 end
+
+-- ============================================================
+-- The mailbox's website (#715a)
+-- ============================================================
+--
+-- `website = <folder>` in the config names a folder to publish.  A
+-- contact asks for it with a message called `website`; the request is
+-- used up on arrival (any text in it is kept, under the receiving time),
+-- and the answer is an ordinary outbox message to them with the whole
+-- folder attached, so they get a consent form saying its size and the
+-- usual machinery sends it.
+--
+-- A request costs a few bytes and the answer can be gigabytes, so a
+-- contact cannot make the daemon send it over and over (owner,
+-- 2026-10-13): one offer to them waits at a time, and a contact who
+-- already accepted this version of the site is not offered it again.
+-- Every request that makes no offer is one log line.
+--
+-- Kept in .state/website.json, per contact:
+--   { file = the outbox file of the last offer,
+--     fingerprint = the site's fingerprint when it was offered,
+--     accepted = the fingerprint they received whole, if any }
+
+-- {{{ website.configure() -> nil, or why the daemon cannot start
+function website.configure()
+    local access = config.website_access
+    if access ~= nil and access ~= "" and access ~= "private" and access ~= "public" then
+        return "'website_access' must be private or public, not '" .. tostring(access) .. "'"
+    end
+    if access == "public" then
+        return "'website_access = public' is not built yet (#715b); only private is"
+    end
+    local raw = config.website
+    if raw == nil or raw == "" then return nil end
+    local dir = raw:gsub("^~", os.getenv("HOME") or "/tmp")
+    if dir:sub(1, 1) ~= "/" then dir = CONFIG_DIR_PATH .. "/" .. dir:gsub("^%./", "") end
+    dir = dir:gsub("/+$", "")
+    local f = io.open(dir .. "/.", "r")
+    if not f then return "'website' names " .. dir .. ", which is not a folder" end
+    f:close()
+    website.folder = dir
+    return nil
+end
+-- }}}
+
+function website.is_request(subject)
+    return type(subject) == "string" and subject:lower() == "website"
+end
+
+-- {{{ website.fingerprint() -> hex, or nil
+-- Over every file's path, size and modification time, in sorted order.
+-- Not the contents: reading the whole site at every request would let a
+-- contact make this machine read gigabytes for a few bytes, the very
+-- thing the guard is for.  An edit changes the time, which is enough.
+function website.fingerprint()
+    local h = io.popen("cd " .. shell_quote(website.folder) ..
+        " && find . -type f -printf '%P\\t%s\\t%T@\\n' 2>/dev/null | LC_ALL=C sort")
+    if not h then return nil end
+    local listing = h:read("*a") or ""
+    h:close()
+    return hex_sha256(listing)
+end
+-- }}}
+
+-- {{{ website.stamp() -> a free inbox name from the receiving time
+-- e.g. 2026-10-13-14-03-27-512, to the millisecond; "-2", "-3" ... when
+-- that is taken, as for any arriving message.
+function website.stamp()
+    local now = socket.gettime()
+    local base = os.date("%Y-%m-%d-%H-%M-%S", math.floor(now)) ..
+        string.format("-%03d", math.floor((now % 1) * 1000))
+    local name, n = base, 2
+    while path_state(INBOX .. "/" .. name) ~= "absent" do
+        name = base .. "-" .. n
+        n = n + 1
+    end
+    return name
+end
+-- }}}
+
+-- {{{ website.request(data, sender, inbox_state) -> status, answer
+-- The receive handler's answer to a `website` message from `sender`.
+function website.request(data, sender, inbox_state)
+    local message_id = data.message_id or uuid()
+    local name = website.stamp()
+    local body = (data.body or ""):gsub("^[\n\r]+", "")
+    if body:find("%S") then
+        write_file(INBOX .. "/" .. name, body)
+        inbox_state[name] = { ["from"] = sender, message_id = message_id }
+        log("website asked for by %s, with a note: %s", sender, name)
+    else
+        -- nothing to keep: recorded as a message already deleted, so the
+        -- next pass tells the sender and their `website` file leaves
+        -- their outbox, as it would after a note was read and deleted
+        inbox_state[name] = { ["from"] = sender, message_id = message_id, pending_delete = true }
+        log("website asked for by %s", sender)
+    end
+    save_state("inbox.json", inbox_state)
+    local why = website.offer(sender)
+    if why then log("website not offered to %s: %s", sender, why) end
+    -- the answer does not say whether an offer was made, nor why not
+    return 200, {ok = true}
+end
+-- }}}
+
+-- {{{ website.offer(contact) -> nil when offered, or why not
+function website.offer(contact)
+    local c = load_contacts()[contact]
+    if not c then return "not a contact" end
+    if contactfile.listens(c) then return "a listen-only contact is never sent anything" end
+    local fp = website.fingerprint()
+    if not fp then return "the website folder could not be read" end
+    local record = load_state("website.json")
+    local mine = record[contact] or {}
+    local outbox = load_state("outbox.json")
+    if mine.file and file_exists(OUTBOX .. "/" .. mine.file) then
+        local meta = outbox[mine.file]
+        local r = meta and meta.recipients and meta.recipients[contact]
+        local answer = r and r.attachments and r.attachments[website.folder]
+        if answer == nil or answer == "withdrawn" then
+            return "an offer to them is still waiting (" .. mine.file .. ")"
+        end
+        if answer == "complete" then mine.accepted = mine.fingerprint end
+    end
+    if mine.accepted == fp then return "they already have this version" end
+    -- a new offer replaces the last one: its file goes, and with it the
+    -- message on their side; the new one takes a name not in use, so the
+    -- next pass sees one file deleted and one new, not one file kept
+    if mine.file then os.remove(OUTBOX .. "/" .. mine.file) end
+    local base = "website-for-" .. sanitize_filename(contact)
+    local file, n = base, 2
+    while path_state(OUTBOX .. "/" .. file) ~= "absent" or outbox[file] or file == mine.file do
+        file = base .. "-" .. n
+        n = n + 1
+    end
+    local size = fmt_bytes(measure_size(website.folder) or 0)
+    local me = config.name
+    write_file(OUTBOX .. "/" .. file, string.format(
+        "to: %s\nattach: %s\n\n" ..
+        "This is %s's website, %s in all, zipped.\n" ..
+        "Say yes on the consent form and all of it arrives, to read whenever\n" ..
+        "you like, even offline.\n\n" ..
+        "Said the other way round: saying no costs you nothing and you can ask\n" ..
+        "again later; saying yes costs %s of disk, but then it is yours and\n" ..
+        "works without %s's computer being on.\n",
+        contact, website.folder, me, size, size, me))
+    record[contact] = { file = file, fingerprint = fp, accepted = mine.accepted }
+    save_state("website.json", record)
+    log("website offered to %s (%s, %s)", contact, file, size)
+    return nil
+end
+-- }}}
+
+-- {{{ website.note_complete(transfer)
+-- Called when a transfer is recorded complete: if it was the website to
+-- that contact, they now hold the version offered.  Kept apart from the
+-- outbox record, which goes when they delete the offer message.
+function website.note_complete(transfer)
+    if not website.folder or (transfer.original_path or ""):gsub("/+$", "") ~= website.folder then
+        return
+    end
+    local record = load_state("website.json")
+    local mine = record[transfer.to]
+    if mine and mine.file == transfer.outbox_file then
+        mine.accepted = mine.fingerprint
+        save_state("website.json", record)
+        log("website received whole by %s", transfer.to)
+    end
+end
+-- }}}
 
 -- Attachment helpers live in one table because the main chunk is at Lua's
 -- 200-local ceiling: every further `local function` at this level would
@@ -9732,6 +9913,14 @@ local function init_runtime()
             " is outside 1-65535: " .. tostring(configured_port) .. "\n")
         os.exit(1)
     end
+    -- #715a: a website that cannot be served is an error, not a quiet
+    -- fallback to none
+    local website_problem = website.configure()
+    if website_problem then
+        io.stderr:write("error: " .. website_problem .. " (in " .. CONFIG_PATH .. ")\n")
+        os.exit(1)
+    end
+    if website.folder then log("website: %s, for contacts who ask", website.folder) end
     -- zip and unzip are no longer needed: attachments are packed and read
     -- by the shared zip library in libs/ (#309).
     align_contacts()

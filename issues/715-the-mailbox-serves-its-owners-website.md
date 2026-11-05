@@ -2,8 +2,9 @@
 
 ## Current Behavior
 
-Nothing is built.  There is no config key naming a website and no way to
-ask for one.  The mailbox's port answers a browser's `GET` (any path)
+*2026-11-05:* `website` and `website_access` exist, and a contact who
+asks is offered the whole folder (#715a, sending side).  The rest of
+this section described the state before that.  The mailbox's port answers a browser's `GET` (any path)
 with the plaintext health answer `{"ok":true}` (#106), and this design
 leaves that alone.
 
@@ -63,5 +64,7 @@ encrypted to only my peers."
 
 ## Status
 
-Open.  715a has two open questions; 715b is still being designed; 715c is
-deferred.
+Open.  715a's sending side is built (2026-11-05) and its two open
+questions are answered there; its receiving side and information pages
+are not.  715b is still being designed (how a stranger's answer can be
+trusted); 715c is deferred by the owner.
