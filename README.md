@@ -133,7 +133,10 @@ sensible to assume when it is left out.
 program, because there is no checkout at the far end. See
 `scripts/make-mailbox-drive.sh`, which places a program that
 `scripts/generate-portable-mailbox.sh` builds for drives: its own Lua without
-readline, and a crypto module carrying its own OpenSSL.)
+readline, and a crypto module carrying its own OpenSSL.  Give it a payload for
+each kind of machine the drive should run on — `--payload` once for x86_64 and
+once for aarch64 — and the drive's launchers run the one that fits the machine
+it is plugged into.)
 
 To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templates/service.md).
 
@@ -444,6 +447,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** One USB drive can carry rmail for more than one kind of machine (#619). `make-mailbox-drive.sh` takes `--payload` once per kind, x86_64 and aarch64 so far; what every kind shares goes on the drive once, and each kind's compiled part goes in its own folder. The launchers ask the machine what it is and run the matching program, or name the kinds the drive holds and stop. The drive's README says which kinds it runs on.
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
 
