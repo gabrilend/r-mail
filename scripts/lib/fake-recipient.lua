@@ -21,7 +21,7 @@
 --   inbox/<subject>         each message's body, overwritten by updates
 --   events                  one JSON object per line, in arrival order:
 --                           {kind = "message"|"update"|"request"|"cancel"|
---                            "delete"|"address"|"complete", ...fields}
+--                            "delete"|"address"|"piece"|"complete", ...fields}
 --   pieces/<id>/<n>         attachment pieces as they arrive
 --   received/<id>.zip       a whole attachment, once every piece is held
 --
@@ -38,6 +38,7 @@
 --
 -- It stops when <folder>/stop appears.  A file <folder>/hold holding a
 -- number makes it wait that many seconds before its next answer (once).
+-- A file <folder>/owe makes it answer every piece ok but keep it owed.
 
 local DIR, PORT, TOKEN, FOLDER = arg[1], tonumber(arg[2]), arg[3], arg[4]
 package.path  = DIR .. "/libs/?.lua;" .. package.path
@@ -106,9 +107,14 @@ local function chunk(d)
     local raw = mime.unb64(d.data or "") or ""
     shapes[id] = shapes[id] or {total = d.total_chunks}
     os.execute("mkdir -p '" .. FOLDER .. "/pieces/" .. id .. "'")
-    if hex(crypto.sha256(raw)) == d.chunk_checksum then
+    -- <folder>/owe: a recipient that says ok to every piece yet keeps it
+    -- owed, so the sender is asked for the same piece for ever (#121)
+    local owe = io.open(FOLDER .. "/owe")
+    if owe then owe:close()
+    elseif hex(crypto.sha256(raw)) == d.chunk_checksum then
         write(FOLDER .. "/pieces/" .. id .. "/" .. d.chunk_index, raw)
     end
+    event({kind = "piece", id = id, n = d.chunk_index})
     local missing, held = owed(id)
     if #missing == 0 and not shapes[id].done then
         shapes[id].done = true

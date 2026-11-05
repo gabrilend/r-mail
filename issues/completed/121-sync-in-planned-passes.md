@@ -2,8 +2,9 @@
 
 ## Status
 
-Open — designed with the owner 2026-09-23; the log move is built, the rest is not.  One open question
-below.  Absorbs #119.
+**Built 2026-11-05** (see "Built" and "Decisions" at the end).  Designed
+with the owner 2026-09-23; the log move was built then.  Absorbs #119,
+built here too.  Open question 1 is about #118 and stays open there.
 
 ## Current Behavior
 
@@ -268,3 +269,169 @@ for example, and then pick them up during the checking phase next time."
 Refined to: "check, bookkeep on our planned actions, execute, check for
 errors, bookkeep for next sync cycle about what happened", repeated "until
 there's no more tasks to do".
+
+## Built (2026-11-05)
+
+On top of #120 (the sync is a coroutine of the main loop, and requests are
+served while it waits).
+
+**Passes.**  `run_sync_cycle` runs passes (`ctimer.passes`) until one
+plans nothing.  A pass is `check_transfers_file_cancellations`, then the
+seven steps in their old order (`ctimer.STEPS`), then the transfers file,
+then part 5 (`ctimer.after_pass`).  Each step is split at its batch call:
+the code before it is the step's check (part 1), the gate in
+`http_post_batch_with_fallback` writes every request about to go out into
+the pass's plan (part 2, `ctimer.plan_actions`), the batch is the act
+(part 3), and the code after it sorts the answers (part 4).  An action is
+the step, the contact, the path and a digest of what it carries, with a
+readable label ("attachment pieces: attachment_chunk to owing
+(picture.jpg) piece 0").  The steps run check, act and results one after
+another inside a pass, not all seven checks first (decision 1).
+
+**How passes end.**  During a sync the gate asks `ctimer.may_send`
+instead of "is this contact due": a contact may be sent to if it was due
+when the sync started (or, in a sync an outbox change started, is only
+waiting out the floor), or was heard from or made due by a request during
+the sync, and the world has not refused it since.  Any answer but ok (no
+answer, busy, a refusal status) leaves the contact out for the rest of
+the sync; a failed action with no contact is not tried again in it
+either.  A pass that plans exactly what the pass before it planned stops
+the sync with one line naming the actions: `sync stopped: pass 2 planned
+exactly what pass 1 planned: ...`.  There is no cap.  A sync that sent
+anything ends with `sync done: N passes, M requests`.
+
+**Code errors.**  Each pass's parts 1–4 run under `xpcall` with a
+traceback taken where the error was thrown (`ctimer.trace`; `ctimer.hold`
+now uses `xpcall` too, so the traceback is not cut off at the lease
+wrapper, and the steps are named in it).  A throw ends the pass's steps;
+the step that threw and those after it are left for the next pass, which
+plans them again from the queues they are still in.  One log entry,
+`sync error in pass N, at the <step> step; ...: <message>` and the whole
+traceback; the same error in a later pass of the same sync is not logged
+again, and the sync stops with the repeated-plan line ("and met the same
+error").  Part 5 runs after every pass, error or not: timers move, and an
+action that never ran backs nobody off.
+
+**Part 5** (`ctimer.after_pass`) is the old end-of-cycle bookkeeping, run
+per pass: reached contacts to the floor (and their address-change notice
+retired), unreached ones backed off once, `busy` due in 1 to 5 s, due
+contacts with nothing queued back to the floor (not ones an earlier pass
+already moved), the mailbox's own timer, the unreachable summary.  The
+contacts heard from during the sync are settled once, when it ends.
+
+**World failures.**  Each attempt now records the address, the port,
+what it got (`connection refused`, `Network is unreachable`, `timed out
+connecting`, `no response`, `status 403: <the answer's error>`, `busy`)
+and the bytes sent before it failed; a request tried at several addresses
+keeps every attempt.  Part 5 writes them to
+`/tmp/rmail-progress/failures-<mailbox path with dashes>` (JSON: action,
+contact, attempts, first_seen, last_seen, count), removing a contact's
+entries once a pass reaches them with nothing failing.  A contact nothing
+answered gets one file in the outbox, `CANNOT-REACH-<contact>`
+(`report_problem`), naming every address tried, what each got, the bytes
+sent, and what is queued for them; rewritten each time they are tried,
+removed once they are reached.  The outbox step does not read it as a
+message (no "missing to:" line for it).
+
+**#119.**  The outbox and contacts change notices are drained just before
+each pass's check (`ctimer.drain_notices`): what they announce is on disk
+for the check that follows, so a file saved while a pass acts goes out in
+the next pass.  The notices that came during the last pass are dropped
+when the sync ends (decision 10); one that comes after the sync stays
+waiting and starts the next sync at once, and an outbox file the phone
+writes during the last pass still does (`ctimer.outbox_written`).  The
+contacts tidy (`align_contacts`, #408) moved with the drain.
+
+**Log.**  From a sync's second pass on, a line the sync's coroutine
+already wrote in that sync is left out (each check reads the same files
+again).  Lines from requests served meanwhile are not affected.
+
+**Tests.**  `scripts/test-sync-passes.sh` (new), six real daemons, one
+case each, with stand-in recipients:
+- a planted transfer record whose piece count is text, so the pieces
+  step throws: one `sync error` entry per sync with the whole traceback
+  (naming `send_next_chunks` and the step), the sync stops after pass 2
+  meets the same error, and only one sync in 20 s — the ordinary cadence;
+- a contact nothing listens for, beside one that answers: both tried in
+  the first sync, the other delivered; `CANNOT-REACH-nobody` names
+  `127.0.0.1 port 59573: connection refused` and the queued message; the
+  stored failure and the log are in `/tmp/rmail-progress/`, nothing in
+  `.state/rmail.log`; once the contact answers it gets the message and
+  the report and stored failure go;
+- a consent that arrives while a sync waits on a slow recipient's piece:
+  the other file's pieces go out in pass 2 of that sync (`sync done: 3
+  passes`);
+- a recipient that answers every piece ok but keeps it owed: the sync
+  stops with the repeated-plan line naming the piece;
+- an `on_send` hook that writes a second outbox file: delivered in pass 2
+  of the same sync, 0.0 to 0.1 s after the first;
+- the tutorial's periodic (an `on_update` hook that rewrites its own
+  outbox file each time): one hand edit fires it once in 10 s.  With the
+  end-of-sync drain taken out, the same case fires it 299 times in 10 s.
+
+`scripts/lib/fake-recipient.lua` gains an `owe` file (answer every piece
+ok, keep it owed) and a `piece` event.
+
+## Decisions (2026-11-05, the owner can overturn any of these)
+
+1. **Check, act and results run step by step inside a pass, split at
+   each step's batch call, not seven check functions run before seven act
+   functions.**  The steps share state files (the outbox step's offers
+   become the pieces step's transfers; both keep `outbox.json` and
+   `chunks-outgoing.json`), so a check made before an earlier step's
+   results were in would plan from stale records and its save would
+   overwrite theirs.  The plan is therefore recorded at the gate, batch by
+   batch, just before each acts, and the act is the one batch sender for
+   every kind of action rather than a table of act functions.  A thrown
+   error in a step's check is handled exactly as one in its act.
+2. **The plan is kept in memory**, not written to a file: it is one
+   entry per request, chunks included.  It reaches the log when a pass
+   repeats it.
+3. **Any answer but ok leaves a contact out for the rest of the sync**:
+   no answer, busy, and any refusal status, including a 404 that a step
+   counts as done.  Their other work waits for their timer (the floor,
+   30 s ± 30, after an answer).  Narrower rules would let a step that keeps
+   an op after a refusal re-plan it and stop the sync as a repeated plan.
+4. **Who a sync may send to**: contacts due when it starts; contacts heard
+   from, or made due by a request, during it; and, when an outbox change
+   started it, contacts only waiting out the floor (not backed-off ones).
+   The last is what makes a message saved after the final check go at
+   once (#119) rather than when its recipient's floor ends.
+5. **A code error is logged once per sync**; the later pass that meets
+   the same error is named in the stop line.  The entry keeps the `sync
+   error` prefix the existing tests look for.
+6. **A plan is the same when every action (step, contact, path, payload
+   digest) is the same, in order, and so is the error, if any.**  The
+   repeated-plan test forces a repeat from the recipient's side (it keeps
+   asking for one piece) rather than with a test-only record in the
+   daemon.  So a real recipient that keeps asking for the same piece (one
+   that keeps arriving damaged) now ends the sync with the `sync stopped`
+   line instead of being retried within the cycle; the next sync tries
+   again at the ordinary cadence, as before.
+7. **A success that leaves more to send no longer makes the contact due
+   at once** (#115 follow-up `true`): the next pass sends it.  The `busy`
+   follow-up stays.
+8. **The report goes only to a contact nothing answered** (refused,
+   unreachable, timed out, no response).  One that answered with a
+   refusal is in the stored failures but gets no `CANNOT-REACH` file: the
+   steps already mark such problems in the outbox file itself.  The
+   report says when they were last tried, not when they last answered.
+9. **The stored failures are read and rewritten by part 5, not by the
+   check.**  What failed is still queued in the state files the check
+   reads, so the check finds it there; the stored file is the record of
+   what each attempt got.
+10. **The drain runs before every check, and once more when the sync
+    ends.**  Before every check rather than only the final one, because
+    which check is final is known only afterwards, and a drain followed
+    by a check loses nothing.  Once more at the end because the periodic
+    pattern in the scripting tutorial has its `on_update` hook rewrite its
+    own outbox file in every check: honoured, that notice starts the next
+    sync at once, whose check fires the hook again, a loop with no wait.
+    The cost: a file an editor or hook saves during the last pass (a few
+    milliseconds unless a hook is slow) waits for a timer, as any file
+    saved during a sync used to.  The phone's saves are flagged
+    separately and still start the next sync at once.
+11. **The `on_send` hook is not run for a recipient the gate will hold
+    back**, since each pass's check builds the requests again.
+12. **One `sync done` line per sync that sent anything**; an idle sync is
+    silent.

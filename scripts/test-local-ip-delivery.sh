@@ -55,7 +55,9 @@ fi
 
 rm -rf "$WORK"
 RAM_LOGS="/tmp/rmail-progress/log-tmp-rmail-tests-local-ip-delivery-"
-rm -f "$RAM_LOGS"*
+# and the stored failures (#121), named the same way
+RAM_FAILURES="/tmp/rmail-progress/failures-tmp-rmail-tests-local-ip-delivery-"
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 # {{{ make_mailbox <dir> <own-name> <port>
 make_mailbox() {
@@ -130,7 +132,7 @@ fi
 kill "$ALPHA_PID" "$BRAVO_PID"
 wait "$ALPHA_PID" 2>/dev/null
 wait "$BRAVO_PID" 2>/dev/null
-rm -f "$RAM_LOGS"*
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

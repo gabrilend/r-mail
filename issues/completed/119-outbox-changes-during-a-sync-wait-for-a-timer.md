@@ -4,8 +4,19 @@
 
 Answered 2026-09-23: yes, honour them.  Absorbed into #121 (a sync runs
 in planned passes), whose design closes this gap by moving the drain to
-just before the final check.  Built and tested there; this file stays
-open until #121 lands.
+just before the final check.
+
+**Built 2026-11-05 in #121.**  The outbox and contacts notices are
+drained just before each pass's check, so a file saved while a pass acts
+is seen by the next pass, and one saved after the sync starts the next
+sync at once.  Notices from the last pass are dropped when the sync ends,
+so that a hook rewriting its own outbox file (the tutorial's periodic
+pattern) cannot start syncs back to back; see #121, decision 10.  A sync an outbox change started also sends to
+contacts only waiting out the floor, so such a message is not held for
+its recipient's timer either.  Test: the hook case of
+`scripts/test-sync-passes.sh` (a hook writes a second outbox file during
+a sync; it is delivered in the next pass of that sync, 0.0 s after the
+first).
 
 ## Current Behavior
 

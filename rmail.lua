@@ -721,7 +721,18 @@ local function log_rotate()
 end
 
 local function log(fmt, ...)
-    local line = os.date("%Y-%m-%d %H:%M:%S ") .. string.format(fmt, ...) .. "\n"
+    local text = string.format(fmt, ...)
+    -- #121: a sync runs in passes, and each pass's check reads the same
+    -- files again, so the second pass would repeat the first one's notes
+    -- ("skipping X", "unknown contact Y") line for line.  From the second
+    -- pass on, a line the sync's own coroutine already wrote in this sync
+    -- is left out.  Requests served meanwhile log as before.
+    local said = cfg.sync_said
+    if said and coroutine.running() == cfg.sync_co then
+        if said[text] and cfg.sync_quiet then return end
+        said[text] = true
+    end
+    local line = os.date("%Y-%m-%d %H:%M:%S ") .. text .. "\n"
 
     -- stderr first and unconditionally.  If the file copy is going to fail
     -- it must not take the journal copy down with it.
@@ -970,6 +981,9 @@ function ctimer.saw_inbound(name)
     -- push the due time it set straight back to the floor.
     if ctimer.cycle then
         ctimer.heard_during[name] = true
+        -- #121: and the passes still to come in this sync may send to
+        -- them (unless the world refused them earlier in it)
+        if ctimer.sync then ctimer.sync.eligible[name] = true end
         return
     end
     local t = ctimer.get(name)
@@ -1942,6 +1956,7 @@ function ctimer.due_now(name)
     if not name or name == "" then return end
     if ctimer.cycle then
         ctimer.wanted_during[name] = true
+        if ctimer.sync then ctimer.sync.eligible[name] = true end
         return
     end
     ctimer.get(name).next_due = 0
@@ -3204,6 +3219,14 @@ end
 
 -- Encrypt and send the HTTP request, then mark as "sent" (waiting for response).
 local function http_encrypt_and_send(e)
+    -- #121: a connection that failed reports as ready to write as well;
+    -- asking to connect again names why ("connection refused", "Network is
+    -- unreachable"), which the world-failure report shows.  A connected
+    -- socket answers 1, which changes nothing.
+    local _, cerr = e.conn:connect(e.req.host, e.req.port)
+    if cerr and cerr ~= "timeout" and not tostring(cerr):match("already") then
+        e.connect_error = tostring(cerr)
+    end
     local req_str =
         "POST " .. e.req.path .. " HTTP/1.1\r\n" ..
         "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
@@ -3216,6 +3239,7 @@ local function http_encrypt_and_send(e)
     local ct    = crypto.aes_gcm_encrypt(key, nonce, req_str)
     if not ct then
         e.phase = "done"
+        e.why = "could not seal the request"
         e.conn:close()
         return
     end
@@ -3232,10 +3256,14 @@ local function http_encrypt_and_send(e)
         else
             log("http send failed at %d/%d bytes: %s", sent, #data, tostring(err))
             e.phase = "done"
+            -- nothing went out: the connection itself failed, and the
+            -- connect asked again above says why where send says "closed"
+            e.why, e.sent = sent == 0 and e.connect_error or tostring(err), sent
             e.conn:close()
             return
         end
     end
+    e.sent = sent
     e.phase = "sent"
 end
 
@@ -3264,9 +3292,12 @@ local function http_read_encrypted_response(e)
                 e.req.host, e.req.port)
         elseif not e.ok then
             log("response from %s:%d status=%s", e.req.host, e.req.port, tostring(status))
+            local said = type(e.data) == "table" and (e.data.error or e.data.reason) or nil
+            e.why = "status " .. tostring(status) .. (said and (": " .. tostring(said)) or "")
         end
     else
         log("no response from %s:%d (connection may have failed)", e.req.host, e.req.port)
+        e.why = "no response"
     end
     e.phase = "done"
     e.conn:close()
@@ -3353,7 +3384,9 @@ end
 -- after the leases are let go.
 function ctimer.hold(names, step, ...)
     for _, name in ipairs(names) do ctimer.leases[name] = true end
-    local results = table.pack(pcall(step, ...))
+    -- the traceback is taken where the error was thrown (#121): passed on
+    -- through pcall it would start here and name no caller
+    local results = table.pack(xpcall(step, ctimer.trace, ...))
     for _, name in ipairs(names) do ctimer.leases[name] = nil end
     if ctimer.in_cycle() then coroutine.yield("released") end
     if not results[1] then error(results[2], 0) end
@@ -3379,7 +3412,8 @@ local function http_post_batch(requests)
         local host = req.host
         if not host or host == "" then
             log("skipping request to %s: no host", req.path or "?")
-            entries[i] = { conn = nil, req = req, phase = "done", ok = false, data = {} }
+            entries[i] = { conn = nil, req = req, phase = "done", ok = false, data = {},
+                           why = "no address" }
             goto continue_batch
         end
         local conn = tcp_for(host)
@@ -3460,9 +3494,14 @@ local function http_post_batch(requests)
     for i, e in ipairs(entries) do
         if e.phase ~= "done" then
             log("timeout connecting to %s:%d", e.req.host, e.req.port)
+            e.why = e.phase == "connecting" and "timed out connecting" or "timed out waiting for an answer"
             e.conn:close()
         end
-        results[i] = {ok = e.ok, status = e.status, data = e.data, busy = e.busy}
+        -- #121: what this one attempt got, for the world-failure report
+        local got = e.ok and "ok" or e.busy and "busy" or e.why or "failed"
+        results[i] = {ok = e.ok, status = e.status, data = e.data, busy = e.busy,
+                      attempts = {{addr = e.req.host or "", port = e.req.port,
+                                   got = got, sent = e.sent or 0}}}
     end
     return results
 end
@@ -3496,6 +3535,11 @@ local function http_post_batch_raw(requests)
                         payload = req.payload, psk_key = req.psk_key,
                     }
                     local r = http_post_batch({single})[1]
+                    -- every address tried, in order (#121)
+                    local tried = results[i].attempts or {}
+                    for _, a in ipairs(r and r.attempts or {}) do tried[#tried + 1] = a end
+                    if r then r.attempts = tried end
+                    results[i].attempts = tried
                     if r and r.ok then
                         log("fallback to %s:%s succeeded for %s",
                             ep.addr, tostring(ep.port), req.path or "?")
@@ -3573,8 +3617,8 @@ local function http_post_batch_with_fallback(requests)
         if cname and contacts[cname] and contactfile.listens(contacts[cname]) then
             log("error: a request to listen-only contact %s reached the send gate; not sent", cname)
             results[i] = {ok = false, refused = true}
-        elseif cname and not ctimer.is_due(cname, now) then
-            ctimer.skipped[cname] = true
+        elseif not ctimer.may_send(cname, req, now) then
+            if cname then ctimer.skipped[cname] = true end
             results[i] = {ok = false, skipped = true}
         else
             if cname then ctimer.attempted[cname] = true end
@@ -3585,6 +3629,9 @@ local function http_post_batch_with_fallback(requests)
 
     if #send == 0 then return results end
 
+    -- #121, part 2 of a pass: what is about to be attempted, for whom
+    local planned = ctimer.plan_actions(send)
+
     local sub = http_post_batch_raw(send)
 
     for j, i in ipairs(map) do
@@ -3593,6 +3640,9 @@ local function http_post_batch_with_fallback(requests)
         local cname = send[j].contact_name
             or (send[j].endpoints and send[j].endpoints[1]
                 and send[j].endpoints[1].contact_name)
+        -- #121: anything short of success leaves the contact (or, with no
+        -- contact, the action) out for the rest of the sync
+        ctimer.note_result(planned[j], cname, r)
         if cname then
             -- Any HTTP status at all means we reached them and they answered;
             -- a 404 ("already done on my end") is a reachable contact, not a
@@ -5715,7 +5765,11 @@ local function sync_outbox(my_name)
         end
 
         if not entries and not state[name] then
-            log("skipping %s: missing 'to:' header", name)
+            -- a report the daemon wrote about a contact it cannot reach
+            -- (#121) has no to: line by design
+            if not name:match("^CANNOT%-REACH%-") then
+                log("skipping %s: missing 'to:' header", name)
+            end
         else
             if not state[name] then state[name] = {recipients = {}} end
 
@@ -6318,7 +6372,10 @@ local function sync_outbox(my_name)
                     -- hook can still inspect/transform it safely.
                     -- Original oversized body never reaches the hook
                     -- (ARG_MAX would truncate it anyway).
-                    if hooks.on_send then
+                    -- #121: not for a recipient the gate will hold back
+                    -- (not due, or refused earlier in this sync): a later
+                    -- pass or sync runs it when the message goes
+                    if hooks.on_send and ctimer.may_send(op.recipient, nil, socket.gettime()) then
                         local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
                         if transformed and transformed ~= "" then send_body = transformed end
                     end
@@ -6330,7 +6387,7 @@ local function sync_outbox(my_name)
             elseif op.type == "update" then
                 path = "/deliver"
                 local send_body = op.body
-                if hooks.on_send then
+                if hooks.on_send and ctimer.may_send(op.recipient, nil, socket.gettime()) then
                     local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
                     if transformed and transformed ~= "" then send_body = transformed end
                 end
@@ -8202,51 +8259,366 @@ end
 -- Sync cycle (extracted from main)
 -- ============================================================
 
-local function run_sync_cycle(rt)
-    check_transfers_file_cancellations()
-    -- #120: each step that waits on the network holds the state files it
-    -- keeps across that wait (ctimer.hold), so requests served meanwhile
-    -- that touch them wait for the step, and every other request is
-    -- answered at once.  A step with no wait needs none: nothing else runs
-    -- while it works.
-    local w1 = ctimer.hold({"outbox.json", "chunks-outgoing.json"}, sync_outbox, rt.my_name)
-    local w2 = ctimer.hold({"inbox.json"}, sync_inbox, rt.my_name)
-    local w3 = ctimer.hold({"pending-address.json"}, sync_address_notifications, rt.my_name)
-    local w4 = check_consent_pending()
-    local w5 = ctimer.hold({"consent-responses.json"}, send_consent_responses, rt.my_name)
-    local w6 = ctimer.hold({"chunks-outgoing.json", "outbox.json"}, send_next_chunks, rt.my_name)
-    local w7 = ctimer.hold({"consent-pending.json"}, send_attachment_cancellations, rt.my_name)
-    write_transfers_file(load_state("chunks-outgoing.json"))
+-- ---- #121: a sync runs in planned passes ---------------------------------
+--
+-- A sync used to be the seven steps below run once, with one block of
+-- bookkeeping at the end, all inside one protected call in the main loop.
+-- One step that threw skipped every step after it *and* the bookkeeping, so
+-- no contact's timer moved, the main loop's sleep came out as zero, and the
+-- next cycle started at once and threw in the same place: 1,091,617
+-- identical error lines overnight in September 2026, and no outbound mail.
+--
+-- Now a sync is a series of passes.  Each pass:
+--
+--   1. check     each step reads its state and the outbox and decides
+--                what to send (the code before its batch call)
+--   2. record    the gate (http_post_batch_with_fallback) writes down
+--                every request about to go out, and for whom (pass.actions)
+--   3. act       the batch itself; the world's refusals come back as
+--                described failures (results[i].attempts)
+--   4. results   each step sorts its answers (the code after its batch call)
+--   5. outcome   timers move by what happened (ctimer.after_pass), stored
+--                failures and the per-contact reports are rewritten
+--
+-- and passes repeat until one plans nothing.  The steps run check-act-
+-- results one after another inside a pass rather than all seven checks
+-- first: the steps share state files (the outbox step's offers become the
+-- pieces step's transfers), so a check made before an earlier step's
+-- results were in would plan from stale records.
+--
+-- How the passes end:
+--   * a contact the world refused -- no answer, busy, any answer but ok --
+--     is left out for the rest of the sync (sync.left_out); an action with
+--     no contact that failed is not tried again in this sync either;
+--   * a pass that plans exactly what the pass before it planned is a bug:
+--     the sync stops with one log line naming the repeated actions.  No cap
+--     on the number of passes, which would hide a loop.
+--
+-- A thrown error ends the pass's steps (the step that threw and those after
+-- it are left for the next pass, which plans them again from the queues
+-- they are still in), is logged once with the traceback taken where it was
+-- thrown, and part 5 runs as usual: timers move, nobody is backed off for
+-- it, and a repeat comes at the ordinary cadence.
+ctimer.sync = nil   -- the sync under way (ctimer.start_sync)
+ctimer.pass = nil   -- the pass under way: {n, step, actions, failed, error}
 
-    -- #115: a contact who was due but had nothing queued this cycle still
-    -- needs their timer moved on.  Their ops never reach the gate -- an
-    -- op-less contact builds no request at all -- so nothing above has
-    -- touched their due time, and leaving it in the past would make them
-    -- permanently due and collapse the main loop's sleep to zero.
-    --
-    -- They return to the floor rather than backing off.  Having nothing to
-    -- say to somebody is not evidence they are unreachable, and the cost of
-    -- being wrong is nil: a contact with no ops sends no packets, so this
-    -- buys a loop wakeup every 30s and no network traffic whatsoever.
+-- {{{ ctimer.trace
+-- xpcall's handler: the message and the traceback from where it was thrown.
+-- Passed through unchanged when it already is one (ctimer.hold rethrows).
+function ctimer.trace(err)
+    if type(err) == "table" and err.trace then return err end
+    local msg = tostring(err)
+    -- A step is called through a table, so Lua's traceback has no name
+    -- for it, only "function <rmail.lua:N>": put the name in.
+    local trace = debug.traceback(msg, 2):gsub("in function <([^>]-):(%d+)>", function(file, line)
+        local name = ctimer.step_names and ctimer.step_names[tonumber(line)]
+        return name and ("in function '" .. name .. "' <" .. file .. ":" .. line .. ">") or nil
+    end)
+    return setmetatable({msg = msg, trace = trace},
+        {__tostring = function(t) return t.trace end})
+end
+-- }}}
+
+-- {{{ ctimer.action_key / ctimer.action_label
+-- What a planned request is: which step, for whom, where, and what it
+-- carries (a digest of the payload, so the same message twice is the same
+-- action and a different piece is not).
+function ctimer.action_key(req, cname)
+    if req._action_key then return req._action_key end
+    local step = ctimer.pass and ctimer.pass.step or "?"
+    local digest = hex_sha256(req.payload or ""):sub(1, 16)
+    req._action_key = step .. "|" .. (cname or "?") .. "|" .. (req.path or "?") .. "|" .. digest
+    return req._action_key
+end
+
+function ctimer.action_label(req, cname)
+    local p = req.payload or ""
+    local kind = p:match('"type":"([^"]*)"') or (req.path or "?"):gsub("^/", "")
+    local what = p:match('"subject":"([^"]*)"') or p:match('"filename":"([^"]*)"')
+    local piece = p:match('"chunk_index":(%d+)')
+    local step = ctimer.pass and ctimer.pass.step or "?"
+    return string.format("%s: %s to %s%s%s", step, kind, cname or "?",
+        what and (" (" .. what .. ")") or "",
+        piece and (" piece " .. piece) or "")
+end
+-- }}}
+
+-- {{{ ctimer.may_send
+-- The gate's question.  Outside a sync: is the contact due.  During one:
+-- was the contact due when the sync started (or, for a sync an outbox
+-- change started, at least not backed off), and has the world not refused
+-- them since.  A contact reached in an earlier pass stays in: what it
+-- made possible goes out in the next pass, not after its timer.
+function ctimer.may_send(cname, req, now)
+    local sync = ctimer.sync
+    if not (sync and ctimer.in_cycle()) then
+        return not cname or ctimer.is_due(cname, now)
+    end
+    if cname then
+        return sync.eligible[cname] == true and not sync.left_out[cname]
+    end
+    return not sync.failed_actions[ctimer.action_key(req, cname)]
+end
+-- }}}
+
+-- {{{ ctimer.plan_actions
+-- Part 2: the requests about to go out, added to the pass's plan.
+function ctimer.plan_actions(send)
+    local pass = ctimer.pass
+    if not (pass and ctimer.in_cycle()) then return {} end
+    local planned = {}
+    for j, req in ipairs(send) do
+        local cname = req.contact_name
+            or (req.endpoints and req.endpoints[1] and req.endpoints[1].contact_name)
+        local a = {key = ctimer.action_key(req, cname),
+                   label = ctimer.action_label(req, cname), contact = cname}
+        pass.actions[#pass.actions + 1] = a
+        planned[j] = a
+    end
+    return planned
+end
+-- }}}
+
+-- {{{ ctimer.note_result
+-- Part 3's answer for one action: anything but success leaves the contact
+-- out for the rest of the sync, and is kept for part 5's records.
+function ctimer.note_result(action, cname, r)
+    local sync, pass = ctimer.sync, ctimer.pass
+    if not (action and sync and pass) or r.ok then return end
+    if not cname then
+        sync.failed_actions[action.key] = true
+        return
+    end
+    sync.left_out[cname] = true
+    local f = pass.failed[cname]
+    if not f then f = {items = {}, answered = false}; pass.failed[cname] = f end
+    if r.status or r.busy then f.answered = true end
+    f.items[#f.items + 1] = {label = action.label, attempts = r.attempts or {}}
+end
+-- }}}
+
+-- {{{ ctimer.start_sync
+function ctimer.start_sync(rt, now)
+    local sync = {eligible = {}, left_out = {}, failed_actions = {},
+                  reached = {}, touched = {}, passes = 0}
+    for name in pairs(load_contacts()) do
+        if name ~= rt.my_name then
+            local t = ctimer.get(name)
+            -- #119: a sync an outbox change started also takes contacts
+            -- that are only waiting out the floor -- the message saved
+            -- goes now, not in up to a minute.  A backed-off contact keeps
+            -- its backoff.
+            if now >= t.next_due or (rt.sync_by_outbox and t.interval <= ctimer.FLOOR) then
+                sync.eligible[name] = true
+            end
+        end
+    end
+    ctimer.sync = sync
+    cfg.sync_said, cfg.sync_quiet, cfg.sync_co = {}, false, coroutine.running()
+    return sync
+end
+-- }}}
+
+-- {{{ ctimer.drain_notices
+-- #119: file-change notices are read and dropped just before each check,
+-- not after the sync.  Everything they announce -- the daemon's own writes
+-- from earlier passes, a file the phone or an editor saved meanwhile -- is
+-- on disk for the check that follows to see.  A notice that arrives after
+-- the last check stays waiting, and the main loop starts the next sync on
+-- it at once.  A change to the contacts file is tidied here, as it was
+-- after the sync before (#408).
+--
+-- The notices that arrive during the last pass are dropped too, when the
+-- sync ends: that pass's check runs hooks, and the periodic pattern in the
+-- scripting tutorial has its on_update hook rewrite its own outbox file
+-- every time.  Honoured, that notice would start the next sync at once,
+-- and that sync's check would fire the hook again: a loop with no wait.
+-- So a file saved by someone else in the last pass's few milliseconds
+-- waits for a timer, as every file saved during a sync used to; the
+-- phone's saves are flagged separately (ctimer.outbox_written) and still
+-- start the next sync at once.
+function ctimer.drain(fd)
+    local any = false
+    if not fd then return any end
+    while true do
+        local ev = inotify.read(fd)
+        if not ev or #ev == 0 then return any end
+        any = true
+    end
+end
+
+function ctimer.drain_notices(rt, at_end)
+    ctimer.drain(rt.outbox_inotify_fd)
+    -- the phone's own writes are flagged as well as noticed; at the end of
+    -- the sync a flag still set means one came during the last pass
+    if not at_end then ctimer.outbox_written = false end
+    if ctimer.drain(rt.contacts_inotify_fd) then
+        align_contacts()
+        ctimer.drain(rt.contacts_inotify_fd)
+    end
+end
+-- }}}
+
+-- The steps of a pass, in order, with the state files each keeps across
+-- its waits (#120's leases, held over the step's check, act and results).
+-- The consent check has no wait.
+ctimer.STEPS = {
+    {name = "outbox",                   fn = "sync_outbox", run = sync_outbox,
+     files = {"outbox.json", "chunks-outgoing.json"}},
+    {name = "inbox",                    fn = "sync_inbox", run = sync_inbox,
+     files = {"inbox.json"}},
+    {name = "address notices",          fn = "sync_address_notifications", run = sync_address_notifications,
+     files = {"pending-address.json"}},
+    {name = "consent check",            fn = "check_consent_pending", run = check_consent_pending},
+    {name = "consent answers",          fn = "send_consent_responses", run = send_consent_responses,
+     files = {"consent-responses.json"}},
+    {name = "attachment pieces",        fn = "send_next_chunks", run = send_next_chunks,
+     files = {"chunks-outgoing.json", "outbox.json"}},
+    {name = "attachment cancellations", fn = "send_attachment_cancellations", run = send_attachment_cancellations,
+     files = {"consent-pending.json"}},
+}
+
+-- {{{ ctimer.run_steps
+-- Parts 1 to 4 of one pass.
+function ctimer.run_steps(rt)
+    local pass = ctimer.pass
+    pass.step = "transfers file"
+    check_transfers_file_cancellations()
+    for _, step in ipairs(ctimer.STEPS) do
+        pass.step = step.name
+        if step.files then
+            ctimer.hold(step.files, step.run, rt.my_name)
+        else
+            step.run(rt.my_name)
+        end
+    end
+    pass.step = "transfers file"
+    write_transfers_file(load_state("chunks-outgoing.json"))
+    pass.step = nil
+end
+-- }}}
+
+-- {{{ ctimer.failures_path / ctimer.record_failures
+-- Stored world failures: one JSON file per mailbox in the RAM folder, named
+-- like the transfers file there, lost on reboot by design.  One entry per
+-- action and contact: action, contact, attempts ({addr, port, got, sent}),
+-- first_seen, last_seen, count.  An entry goes once its contact is reached
+-- with nothing failing.
+function ctimer.failures_path()
+    return TMPFS_PROGRESS_DIR .. "/failures-" .. MAIL:gsub("^/", ""):gsub("/", "-")
+end
+
+function ctimer.report_id(name)
+    return "CANNOT-REACH-" .. name
+end
+
+-- The report for one contact nobody answered for (#102's problems as mail).
+function ctimer.report_body(name, f, contact)
+    local lines = {
+        "rmail could not reach " .. name .. ".", "",
+        "Last tried: " .. os.date("%Y-%m-%d %H:%M:%S") .. ".", "",
+        "Every address tried, and what each attempt got:",
+    }
+    local seen = {}
+    for _, item in ipairs(f.items) do
+        for _, a in ipairs(item.attempts) do
+            local key = tostring(a.addr) .. " " .. tostring(a.port) .. " " .. tostring(a.got)
+            if not seen[key] then
+                seen[key] = true
+                lines[#lines + 1] = string.format("  %s port %s: %s (%d bytes sent before it failed)",
+                    a.addr ~= "" and a.addr or "(no address)", tostring(a.port or "?"),
+                    tostring(a.got), tonumber(a.sent) or 0)
+            end
+        end
+    end
+    if not next(seen) then lines[#lines + 1] = "  (no address on file for them)" end
+    if contact and contactfile.listens and contactfile.listens(contact) then
+        lines[#lines + 1] = "  (listen-only: they are never dialed)"
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Queued for them, waiting:"
+    for _, item in ipairs(f.items) do lines[#lines + 1] = "  " .. item.label end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Nothing is lost: it all stays queued and is tried again on their timer."
+    lines[#lines + 1] = "This file is rewritten each time they are tried, and removed once they"
+    lines[#lines + 1] = "are reached again."
+    return table.concat(lines, "\n") .. "\n"
+end
+
+function ctimer.record_failures(rt, pass, outcome, now)
+    local path = ctimer.failures_path()
+    local stored = {}
+    local text = read_file(path)
+    local list = text and text ~= "" and json.decode(text) or {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+        if type(e) == "table" and e.contact and e.action then
+            stored[e.contact .. "\n" .. e.action] = e
+        end
+    end
+    local changed = false
+    for name, f in pairs(pass.failed) do
+        for _, item in ipairs(f.items) do
+            local key = name .. "\n" .. item.label
+            local e = stored[key] or {action = item.label, contact = name,
+                                      first_seen = now, count = 0}
+            e.attempts, e.last_seen, e.count = item.attempts, now, e.count + 1
+            stored[key] = e
+            changed = true
+        end
+    end
+    for key, e in pairs(stored) do
+        if outcome[e.contact] and not pass.failed[e.contact] then
+            stored[key] = nil
+            changed = true
+        end
+    end
+    if changed then
+        local out = {}
+        for _, e in pairs(stored) do out[#out + 1] = e end
+        table.sort(out, function(a, b)
+            if a.contact ~= b.contact then return a.contact < b.contact end
+            return a.action < b.action
+        end)
+        os.execute("mkdir -p " .. shell_quote(TMPFS_PROGRESS_DIR))
+        write_file(path, json.encode(out, {indent = true}) .. "\n")
+    end
+
+    -- The reports live in the outbox.  Their change notices are dropped
+    -- by the drain before the next check, or the one at the sync's end.
+    local contacts
+    for name, f in pairs(pass.failed) do
+        if outcome[name] == false and not f.answered then
+            contacts = contacts or load_contacts()
+            report_problem("outbound", ctimer.report_id(name),
+                ctimer.report_body(name, f, contacts[name]))
+        end
+    end
+    for name, reached in pairs(outcome) do
+        if reached and clear_problem("outbound", ctimer.report_id(name)) then
+            log("%s reached again; their report is withdrawn", name)
+        end
+    end
+end
+-- }}}
+
+-- {{{ ctimer.after_pass
+-- Part 5: what happened to each contact in this pass moves their timer.
+function ctimer.after_pass(rt, sync, pass)
     local now = socket.gettime()
 
-    -- Apply this cycle's per-contact outcomes, exactly once each.  A contact
-    -- counts as reached if *any* op reached them, matching the unreachable
-    -- summary's rule that one success anywhere keeps them off the list.
+    -- A contact counts as reached if *any* op reached them, matching the
+    -- unreachable summary's rule that one success anywhere keeps them off
+    -- the list.
     for name, reached in pairs(ctimer.outcome) do
+        sync.touched[name] = true
         if reached then
+            sync.reached[name] = true
             ctimer.mark_success(name, now)
             -- #409: an address-change notice is a claim that this contact
             -- has moved.  What retires the claim is *using* the new address
             -- successfully -- we just did, so the notice has served its
-            -- purpose and becomes noise.
-            --
-            -- Note this is deliberately the outbound direction.  Receiving
-            -- something from them would prove only that they can reach us,
-            -- which is the half that was never in doubt: they sent us the
-            -- announcement.  The half that a stale port-forward or a wrong
-            -- address breaks is ours-to-theirs, and only a successful send
-            -- tests it.
+            -- purpose and becomes noise.  (Deliberately the outbound
+            -- direction: hearing from them proves only that they reach us.)
             local notice = INBOX .. "/.address-update-" .. name
             if file_exists(notice) then
                 os.remove(notice)
@@ -8256,63 +8628,132 @@ local function run_sync_cycle(rt)
             ctimer.mark_failure(name, now)
         end
         -- #115 follow-up, only after a success (a failed contact keeps its
-        -- backoff):
-        --   true    a success left more to send them (the attachment
-        --           offers that follow a delivered message): due now, and
-        --           the main loop's next pass sends it
-        --   "busy"  they answered "busy" (dialing us at that moment): due
-        --           in 1 to 5 s, drawn at random -- not now, or two
-        --           daemons dialing each other would collide again in
-        --           step; "busy" wins over true, for the same reason
-        local follow = ctimer.follow_up[name]
-        if reached and follow == "busy" then
+        -- backoff): "busy" -- they answered busy, dialing us at that
+        -- moment -- makes them due in 1 to 5 s, drawn at random, so two
+        -- daemons dialing each other do not collide again in step.  (A
+        -- success that left more to send them used to make them due at
+        -- once too; the next pass of this sync sends it now, #121.)
+        if reached and ctimer.follow_up[name] == "busy" then
             ctimer.get(name).next_due = now + 1 + random_below(5)
-        elseif reached and follow then
-            ctimer.get(name).next_due = now
         end
     end
-    local reached_this_cycle = ctimer.outcome
+    local outcome = ctimer.outcome
     ctimer.outcome = {}
     ctimer.follow_up = {}
 
+    -- #115: a contact who was due but had nothing queued still needs their
+    -- timer moved on, back to the floor (having nothing to say to somebody
+    -- is not evidence they are unreachable).  Not one this sync already
+    -- moved in an earlier pass.
     for name in pairs(load_contacts()) do
         if name ~= rt.my_name
             and not ctimer.attempted[name]
             and not ctimer.skipped[name]
+            and not sync.touched[name]
             and ctimer.is_due(name, now)
         then
             ctimer.get(name).next_due = now + ctimer.jittered(ctimer.FLOOR)
         end
     end
 
-    -- #120: contacts heard from while this cycle waited (requests are
-    -- served meanwhile now).  One the cycle reached keeps the due time its
-    -- success set: making it due at once as well would have two daemons
-    -- that just exchanged mail dial each other again at once.  Anyone else
-    -- is due now, at the floor, as saw_inbound makes them between cycles.
-    ctimer.settle_heard(reached_this_cycle)
-
-    -- The contacts file may have gained or lost its last contact during
-    -- this cycle; keep the mailbox's own timer in step, then move it on by
-    -- the same floor as a contact with nothing queued.  Nothing here can
-    -- fail to reach anyone, so it never backs off.
+    -- The contacts file may have gained or lost its last contact; keep the
+    -- mailbox's own timer in step and move it on by the floor.
     ctimer.refresh_self(load_contacts(), rt.my_name)
     if ctimer.timers[ctimer.SELF] then
         ctimer.timers[ctimer.SELF].next_due = now + ctimer.jittered(ctimer.FLOOR)
     end
 
-    -- One summary log for contacts whose every op failed this cycle
-    -- (#114), instead of a separate "failed to X" line per queued op.
-    -- Also clears the per-cycle attempted/skipped sets, so it has to run
-    -- after the sweep above reads them.
+    -- One summary line for contacts whose every op failed (#114).  Also
+    -- clears the attempted/skipped sets, so it runs after the sweep above.
     flush_unreachable_summary()
 
-    -- The old global interval lived here, moved by the aggregate did_work
-    -- flag across all seven op types.  It is gone: cadence is per contact
-    -- now, set at the gate in http_post_batch_with_fallback from that
-    -- contact's own result.  The w1..w7 flags are kept because the builders
-    -- still report them and they read as documentation of what a cycle does.
-    local _ = w1 or w2 or w3 or w4 or w5 or w6 or w7
+    ctimer.record_failures(rt, pass, outcome, now)
+end
+-- }}}
+
+-- {{{ ctimer.same_plan
+function ctimer.same_plan(a, b)
+    if #a.actions ~= #b.actions then return false end
+    for i = 1, #a.actions do
+        if a.actions[i].key ~= b.actions[i].key then return false end
+    end
+    return (a.error and a.error.msg) == (b.error and b.error.msg)
+end
+
+function ctimer.plan_text(pass)
+    if #pass.actions == 0 then return "nothing" end
+    local seen, out = {}, {}
+    for _, a in ipairs(pass.actions) do
+        if not seen[a.label] then seen[a.label] = true; out[#out + 1] = a.label end
+    end
+    return table.concat(out, "; ")
+end
+-- }}}
+
+-- {{{ ctimer.passes
+function ctimer.passes(rt, sync)
+    local previous
+    sync.requests = 0
+    local function done()
+        ctimer.drain_notices(rt, true)
+    end
+    while true do
+        sync.passes = sync.passes + 1
+        cfg.sync_quiet = sync.passes > 1
+        ctimer.drain_notices(rt)
+        local pass = {n = sync.passes, actions = {}, failed = {}}
+        ctimer.pass = pass
+        local ok, err = xpcall(ctimer.run_steps, ctimer.trace, rt)
+        if not ok then
+            pass.error = err
+            -- The step that threw and every step after it are unfinished;
+            -- what they had queued is still queued, and the next pass's
+            -- check plans it again.
+            if err.msg ~= sync.last_error then
+                log("sync error in pass %d, at the %s step; it and the steps after it "
+                    .. "are left for the next pass: %s", pass.n, tostring(pass.step), err.trace)
+            end
+            sync.last_error = err.msg
+        end
+        ctimer.after_pass(rt, sync, pass)
+        sync.requests = sync.requests + #pass.actions
+        if ok and #pass.actions == 0 then
+            -- one line for a sync that sent anything; an idle one is silent
+            if sync.requests > 0 then
+                log("sync done: %d passes, %d requests", sync.passes, sync.requests)
+            end
+            return done()
+        end
+        if previous and ctimer.same_plan(previous, pass) then
+            log("sync stopped: pass %d planned exactly what pass %d planned%s: %s",
+                pass.n, previous.n, pass.error and ", and met the same error" or "",
+                ctimer.plan_text(pass))
+            return done()
+        end
+        previous = pass
+    end
+end
+-- }}}
+
+-- the names of the functions a sync calls through a table, by the line
+-- each begins on, for ctimer.trace
+ctimer.step_names = {}
+for _, step in ipairs(ctimer.STEPS) do
+    ctimer.step_names[debug.getinfo(step.run, "S").linedefined] = step.fn
+end
+for _, n in ipairs({"run_steps", "passes", "after_pass", "record_failures"}) do
+    ctimer.step_names[debug.getinfo(ctimer[n], "S").linedefined] = "ctimer." .. n
+end
+
+local function run_sync_cycle(rt)
+    local sync = ctimer.start_sync(rt, socket.gettime())
+    local ok, err = xpcall(ctimer.passes, ctimer.trace, rt, sync)
+    -- contacts heard from while the sync ran: those it reached keep the
+    -- due time their success set; the rest are due now (#120)
+    ctimer.settle_heard(sync.reached)
+    ctimer.sync, ctimer.pass = nil, nil
+    cfg.sync_said, cfg.sync_quiet, cfg.sync_co = nil, false, nil
+    if not ok then log("sync error after a pass: %s", err.trace) end
 end
 
 -- ============================================================
@@ -8817,6 +9258,9 @@ local function main()
         -- a step that failed let its own leases go (ctimer.hold); none
         -- may outlive the cycle
         for name in pairs(ctimer.leases) do ctimer.leases[name] = nil end
+        -- nor the sync's own records, if it died without clearing them
+        ctimer.sync, ctimer.pass = nil, nil
+        cfg.sync_said, cfg.sync_quiet, cfg.sync_co = nil, false, nil
         -- heard after the cycle settled them, or the cycle failed first
         ctimer.settle_heard(nil)
         -- callers held while a batch outside the cycle waited
@@ -8839,28 +9283,14 @@ local function main()
             end
         end
 
-        -- Drain any inotify events caused by the sync cycle itself
-        inotify.read(rt.outbox_inotify_fd)
-        -- ...which swallows the notice of an outbox file the phone wrote
-        -- while the cycle ran (#120: such requests are served during it
-        -- now); that one is honoured by syncing again at once.
+        -- #119/#121: the outbox and contacts notices are no longer drained
+        -- here but before each pass's check (ctimer.drain_notices), so a
+        -- notice still waiting now came after the last check and starts
+        -- the next sync at once.  An outbox file the phone wrote after
+        -- that check does the same.
         if ctimer.outbox_written then
             ctimer.outbox_written = false
             rt.sync_again = true
-        end
-        -- The sync cycle (and requests served during it) can rewrite the
-        -- contacts file: an announced address, a LAN-discovered
-        -- local-ip, a port change.  Those writers append plain
-        -- `name.field = value` lines and rely on align_contacts to tidy
-        -- them, but draining the event here meant the tidy never came --
-        -- a discovered `local-ip` line stayed ragged until the next hand
-        -- edit.  So a contacts event swallowed here is honoured on the
-        -- spot: align (a no-op write when already tidy), then drain the
-        -- event our own align produced.
-        local contacts_events = inotify.read(rt.contacts_inotify_fd)
-        if contacts_events and #contacts_events > 0 then
-            align_contacts()
-            inotify.read(rt.contacts_inotify_fd)
         end
     end
     -- }}}
@@ -8887,7 +9317,10 @@ local function main()
     -- }}}
 
     -- {{{ start_cycle
-    local function start_cycle()
+    local function start_cycle(by_outbox)
+        -- #119: started by an outbox change, the sync also takes contacts
+        -- only waiting out the floor (ctimer.start_sync)
+        rt.sync_by_outbox = by_outbox and true or false
         ctimer.heard_during = {}
         ctimer.wanted_during = {}
         ctimer.outbox_written = false
@@ -9079,7 +9512,7 @@ local function main()
                         clients[raw_sock] = nil
                     end
                 end
-                start_cycle()
+                start_cycle(outbox_changed or rt.sync_again)
             end
         end
     end

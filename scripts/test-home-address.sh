@@ -91,7 +91,9 @@ EOF
 
 # Its RAM log is named after the mailbox path; cleared before and after.
 RAM_LOGS="/tmp/rmail-progress/log-tmp-rmail-tests-home-address-"
-rm -f "$RAM_LOGS"*
+# and the stored failures (#121), named the same way
+RAM_FAILURES="/tmp/rmail-progress/failures-tmp-rmail-tests-home-address-"
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 "$LAUNCHER" "$BOX/config" > "$WORK/box.log" 2>&1 &
 BOX_PID=$!
@@ -171,7 +173,7 @@ fi
 
 kill "$BOX_PID"
 wait "$BOX_PID" 2>/dev/null
-rm -f "$RAM_LOGS"*
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
