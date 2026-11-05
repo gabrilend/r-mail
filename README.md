@@ -152,11 +152,12 @@ port = 8025
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
 
-The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and three more:
+The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and four more:
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
 - `cannot_reach_notice_after` — seconds a contact may go unreached, with mail waiting for them, before the daemon leaves a notice in the outbox, `CANNOT-REACH-<name>`, for you (default: `86400`, a day). It is not mail and goes to nobody; the daemon removes it once that contact is reached.
+- `wake_gap` — seconds the daemon's wait may overrun by the clock before it takes it that the machine slept (default: `60`). On waking it checks its address, announces itself to every contact, and tries every contact at once, so mail held for it while it slept comes in on their next pass.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 

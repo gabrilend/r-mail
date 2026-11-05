@@ -92,8 +92,51 @@ need entirely for anyone whose router can run it.
 
 ## Status
 
-Open, low priority. Design recorded; not scheduled.
+Built 2026-11-05, the first slice: a running daemon notices that its
+machine slept, and on waking checks its address, owes every contact an
+announcement, and makes every contact due at once.  This is steps 1 and 2
+of a wake ("check our public IP", "announce to every contact") done by
+the daemon that was already running, which is the common case on a
+laptop that suspends with rmail under systemd.  The scheduled windows
+for a machine that stays asleep (wake on a timer, hold a window, sleep
+again) remain operating-system configuration around the existing
+`--once[=SECONDS]`, as the suggested steps already say; nothing in rmail
+was needed for that, and it is not tested here.
 
-The "announce, hold a window open, stop" step now exists as
+The "announce, hold a window open, stop" step exists as
 `rmail.lua <config> --once[=SECONDS]` (added for portable drives in
-#409).  A wake-to-sync implementation can call it from a timer.
+#409).  A wake-to-sync timer can call it.
+
+## Decisions (2026-11-05)
+
+- **How a wake is noticed.**  The main loop's `select()` waits on the
+  monotonic clock, which stops while the machine is suspended; the wall
+  clock does not.  A wait that comes back more than `wake_gap` seconds
+  later by the wall clock than it was asked to wait is taken as a sleep.
+  No logind or D-Bus hook: rmail runs on machines without either, and
+  this needs nothing outside the daemon.  A wall clock stepped forward by
+  more than `wake_gap` reads the same way; the cost is one announcement
+  nobody needed, so it is not guarded against.
+- **`wake_gap` defaults to 60 seconds.**  The loop never asks to wait
+  more than 3 seconds, so anything over a minute is not the daemon being
+  slow; a shorter suspend is not worth announcing.  It is a config key so
+  the test can use 3.
+- **Address first, then the announcement** -- the order this issue gives,
+  since the announcement is only worth sending with the current address.
+  The check is the same one the daily re-check runs (#410), and it
+  reschedules that check.
+- **Every contact is made due at once**, not only those owed an
+  announcement: contacts who tried us while we slept have backed off,
+  and our own outgoing mail to them has waited too.  Contacts that only
+  listen (#420) and contacts without an address are not announced to, as
+  at start-up; the start-up announcement and this one are now one
+  function, `addrchk.announce`.
+- **Not done here:** scheduled wake windows (a systemd timer with
+  `WakeSystem=true` that runs `--once`) are left to the machine's own
+  configuration, and wake on an incoming request stays rejected for the
+  reasons above.  The owner's words in this issue -- "low, and
+  deliberately so", and that disabling suspend is better for a machine
+  that is a mailbox -- are kept: this slice costs nothing on a machine
+  that never sleeps.
+- Test: `scripts/test-wake-to-sync.sh`, which plays the sleep by
+  stopping the daemon (SIGSTOP) for 12 seconds.
