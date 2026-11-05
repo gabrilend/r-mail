@@ -365,18 +365,20 @@ Hooks let you run scripts in response to message events. Configure them in your 
 
 | Hook            | `$1`       | `$2`       | `$3`               | stdout        |
 |-----------------|------------|------------|--------------------|---------------|
-| `on_send`       | recipient  | subject    | message body       | replaces body |
-| `on_receive_raw`| sender     | subject    | message body       | replaces body |
+| `on_send`       | recipient  | subject    | message body*      | replaces body |
+| `on_receive_raw`| sender     | subject    | message body*      | replaces body |
 | `on_receive`    | sender     | subject    | path to inbox file | ignored       |
-| `on_update`     | sender     | path to inbox file | new body   | replaces body |
+| `on_update`     | sender     | path to inbox file | new body*  | replaces body |
 | `on_delete`     | other party| —          | —                  | ignored       |
 | `on_package`    | sender     | filename   | path to saved file | ignored       |
 | `on_consent`    | sender     | filename   | path to consent form | answers the form |
 
-- **`on_send`** — runs once per recipient, and again for every edit sent and for mail to yourself (`$1` is then your own name). The message only sends after the script finishes. stdout replaces the body for that recipient only.
-- **`on_receive_raw`** — runs to completion before the message is written. stdout replaces the saved body. It does not run for edits (updates).
+\* The three body hooks also get the whole body on stdin, whatever its size; `$3` holds it only up to 64 KiB, and is empty beyond (#215).
+
+- **`on_send`** — runs once per recipient, and again for every edit sent and for mail to yourself (`$1` is then your own name). The message only sends after the script finishes. stdout replaces the body for that recipient only. A non-zero exit is logged, and the body goes as written.
+- **`on_receive_raw`** — runs to completion before the message is written. stdout replaces the saved body. It does not run for edits (updates). If it cannot run or exits non-zero, the message is refused and the sender's daemon sends it again later.
 - **`on_receive`** — runs in the background after the message is on disk.
-- **`on_update`** — runs when an edited version arrives; any non-empty stdout replaces the new body. Its exit status is not checked.
+- **`on_update`** — runs when an edited version arrives; any non-empty stdout replaces the new body. If it cannot run or exits non-zero, the edit is refused and sent again later.
 - **`on_delete`**  — runs, and the daemon waits for it, when the *other* side deletes: a recipient deleting your message, or the author deleting one you received; also when you delete an inbox file. Not when you delete your own outbox file or remove a `to:` line.
 - **`on_package`** — runs in the background after an attachment is fully received and saved. `$4` is the inbox file of the message it came with (empty if that message is gone).
 - **`on_consent`** — runs to completion when a contact asks to send you an attachment, after its consent form is written. `$4` is the message's inbox file and `$5` the expected size in bytes. Printing `accept` or `deny` answers the form for you; printing nothing leaves it for you.

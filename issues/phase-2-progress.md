@@ -20,6 +20,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#210](completed/210-delete-edit-race-condition-matrix.md) — Audit delete/edit race conditions between sender and receiver**  If a receiver deletes an inbox message and the sender edits (updates) the same outbox message, the outcome depends on whose sync cycle runs first.
 - **[#212](completed/212-hooks.md) — Hooks: the owner's scripts, run at six moments**  A mailbox may name a script for each of six moments, in its config.
 - **[#213](completed/213-hook-config-cleanup.md) — Clean up hook script configuration in config file**  The hook configuration in the config file is hard to follow — commented-out examples, argument documentation mixed in, duplicate names.
+- **[#215](completed/215-a-hook-sees-every-body-whatever-its-size.md) — A hook sees every message body, whatever its size, and a hook that cannot run refuses the message**  Two hooks may rewrite a message's text before it is written into the inbox: `on_receive_raw` (a new message) and `on_update` (the author's edit of one).
 - **[#216](completed/216-the-consent-hook-and-the-message-on-package.md) — An on_consent hook answers attachment forms, and on_package names the message**  A consent form fires no hook.
 
 ## Open
@@ -27,7 +28,6 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#206](206-duplicate-filename-warning.md) — Warn about duplicate filename conflicts**  If you send a message to a recipient who already has a file with the same name in their inbox, the behavior is undefined — the message may fail silently, overwrite, or cause confusion.
 - **[#211](211-preserve-sender-creation-time-as-received-mtime.md) — Set received message file mtime to the sender's creation time**  A message's file date is carried across every hop a message file makes:
 - **[#214](214-outbox-contact-folders.md) — Contact-named outbox folders: drop a file in, it sends to that contact**  The current outbox workflow puts the recipient inside the file, as `to: <name>` at the top of the header block.
-- **[#215](215-a-hook-sees-every-body-whatever-its-size.md) — A hook sees every message body, whatever its size, and a hook that cannot run refuses the message**  Two hooks may rewrite a message's text before it is written into the inbox: `on_receive_raw` (a new message) and `on_update` (the author's edit of one).
 
 <!-- notes: kept when regenerated -->
 

@@ -3,9 +3,10 @@
 #
 # Synchronous; called separately for each recipient with fresh args.
 # Args: $1 = recipient, $2 = subject, $3 = message body as it will
-# be sent to that recipient.  stdout replaces the body for that
-# recipient only; empty output or non-zero exit sends the original
-# body unchanged.
+# be sent to that recipient (empty when over 64 KiB; the whole body is
+# on stdin).  stdout replaces the body for that recipient only; empty
+# output sends the original body unchanged.  A non-zero exit is logged
+# and the original body is sent.
 #
 # This is a default pass-through.  Replace it, or call out from here
 # to your own scripts.  See docs/scripting-tutorial.md in your rmail

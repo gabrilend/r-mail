@@ -484,17 +484,65 @@ local function expand_tilde(path)
 end
 -- }}}
 
+-- {{{ run_hook
+-- Runs a hook program with its arguments and returns three things: what
+-- it printed, whether it ran and succeeded (exit status 0), and, when it
+-- did not, why ("could not be run: not found", "stopped with exit status
+-- 3" ...).
+--
+-- A hook that is handed a message body (on_receive_raw, on_update,
+-- on_send) is called with a table as its last argument, {body = text}.
+-- The body then goes to the program on its standard input, through a
+-- private temporary file, which has no size limit (#215): Linux will not
+-- start a program with any one argument over 128 KiB, so a big body
+-- passed only as an argument never reached the hook at all.  The body is
+-- also still the last argument when it is at most 64 KiB, so a hook
+-- written to read it there keeps working for the bodies it could always
+-- see; a longer body leaves that argument empty.
+--
+-- The exit status is read by a marker the shell prints after the
+-- program's own output (byte 0x1E, then the status), which works the
+-- same in every Lua rmail runs on (io.popen's close does not report it
+-- in Lua 5.1 or LuaJIT).
 local function run_hook(script, data, ...)
+    local extras = {...}
+    local body
+    if type(extras[#extras]) == "table" then body = table.remove(extras).body or "" end
     local args = shell_quote(data)
-    for _, extra in ipairs({...}) do
+    for _, extra in ipairs(extras) do
         args = args .. " " .. shell_quote(extra)
     end
-    local handle = io.popen(script .. " " .. args)
-    if not handle then return nil end
-    local output = handle:read("*a")
+    local input
+    if body then
+        local ARG_BODY_MAX = 64 * 1024
+        args = args .. " " .. shell_quote(#body <= ARG_BODY_MAX and body or "")
+        input = os.tmpname()
+        local f = input and io.open(input, "wb")
+        if not f then
+            if input then os.remove(input) end
+            return nil, false, "could not be run: no temporary file for the body"
+        end
+        f:write(body)
+        f:close()
+        args = args .. " < " .. shell_quote(input)
+    end
+    local handle = io.popen(script .. " " .. args .. "; printf '\036%d' \"$?\"")
+    if not handle then
+        if input then os.remove(input) end
+        return nil, false, "could not be run: the shell would not start"
+    end
+    local all = handle:read("*a") or ""
     handle:close()
-    return output
+    if input then os.remove(input) end
+    local output, status = all:match("^(.*)\036(%d+)$")
+    if not status then return all, false, "could not be run: no exit status" end
+    status = tonumber(status)
+    if status == 0 then return output, true end
+    if status == 127 then return output, false, "could not be run: not found" end
+    if status == 126 then return output, false, "could not be run: not executable" end
+    return output, false, "stopped with exit status " .. status
 end
+-- }}}
 
 -- Returns true if the address string is IPv6 (contains a colon).
 local function is_ipv6(addr)
@@ -2238,8 +2286,14 @@ local function handle_deliver_message(data, sender)
     end
 
     if hooks.on_receive_raw then
-        local transformed = run_hook(hooks.on_receive_raw, sender, subject, body or "")
-        if transformed and transformed ~= "" then body = transformed end
+        -- #215: a hook that cannot run, or fails, refuses the message; the
+        -- sender's daemon keeps it and tries again on a later pass
+        local transformed, ran, why = run_hook(hooks.on_receive_raw, sender, subject, {body = body or ""})
+        if not ran then
+            log("on_receive_raw %s: refused %s from %s, which the sender will send again", why, message_id, sender)
+            return 500, {error = "the receiver's on_receive_raw hook failed"}
+        end
+        if transformed ~= "" then body = transformed end
     end
 
     body = body:gsub("^[\n\r]+", "")
@@ -2287,8 +2341,13 @@ local function handle_deliver_update(data, sender)
             end
 
             if hooks.on_update then
-                local transformed = run_hook(hooks.on_update, sender, target, new_body)
-                if transformed and transformed ~= "" then new_body = transformed end
+                -- #215: as on_receive_raw, a failed hook refuses the edit
+                local transformed, ran, why = run_hook(hooks.on_update, sender, target, {body = new_body})
+                if not ran then
+                    log("on_update %s: refused the edit of %s from %s, which the sender will send again", why, filename, sender)
+                    return 500, {error = "the receiver's on_update hook failed"}
+                end
+                if transformed ~= "" then new_body = transformed end
             end
 
             new_body = new_body:gsub("^[\n\r]+", "")
@@ -5566,6 +5625,9 @@ local function sync_outbox(my_name)
     -- marker explaining the problem was written into it.  Held here so
     -- the cleanup pass can tell the two apart.
     local outbox_files_with_unresolved_recipients = {}
+    -- #215: files a body hook refused for this mailbox itself (self-delivery):
+    -- kept, like a file with work queued, so the next pass tries again
+    local held_by_hooks = {}
 
     -- Completed transfers left from a cycle that stopped part-way (the
     -- chunk sender normally clears them itself): the recipient's answer
@@ -5683,13 +5745,21 @@ local function sync_outbox(my_name)
                             end
                             local inbox_body = body or ""
                             if hooks.on_send then
-                                local transformed = run_hook(hooks.on_send, my_name, name, inbox_body)
-                                if transformed and transformed ~= "" then inbox_body = transformed end
+                                local transformed, ran, why = run_hook(hooks.on_send, my_name, name, {body = inbox_body})
+                                if not ran then log("on_send %s: %s goes to %s as written", why, name, my_name)
+                                elseif transformed ~= "" then inbox_body = transformed end
                             end
+                            local refused
                             if hooks.on_receive_raw then
-                                local transformed = run_hook(hooks.on_receive_raw, my_name, name, inbox_body)
-                                if transformed and transformed ~= "" then inbox_body = transformed end
+                                local transformed, ran, why = run_hook(hooks.on_receive_raw, my_name, name, {body = inbox_body})
+                                if not ran then
+                                    -- #215: not written, not recorded, so the next pass tries again
+                                    log("on_receive_raw %s: %s not delivered to yourself; tried again next pass", why, name)
+                                    refused = true
+                                    held_by_hooks[name] = true
+                                elseif transformed ~= "" then inbox_body = transformed end
                             end
+                            if not refused then
                             inbox_body = inbox_body:gsub("^[\n\r]+", "")
                             write_file(target, inbox_body)
                             set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
@@ -5710,6 +5780,7 @@ local function sync_outbox(my_name)
                             }
                             log("self-delivered: %s -> %s", name, inbox_name)
                             did_work = true
+                            end
                         elseif contacts[rname] and contactfile.listens(contacts[rname]) then
                             -- #420: a listen-only contact is a door, not a
                             -- person; nothing is ever sent to it.  Marked in
@@ -6020,25 +6091,34 @@ local function sync_outbox(my_name)
                             if rmeta.self then
                                 -- self-delivery update: apply directly to own inbox
                                 local inbox_state = load_state("inbox.json")
+                                local held
                                 for iname, imeta in pairs(inbox_state) do
                                     if imeta.message_id == rmeta.message_id and imeta["from"] == my_name then
                                         local target = INBOX .. "/" .. iname
                                         local update_body = body or ""
+                                        local ran, why = true
                                         if hooks.on_update then
-                                            local transformed = run_hook(hooks.on_update, my_name, target, update_body)
-                                            if transformed and transformed ~= "" then update_body = transformed end
+                                            local transformed
+                                            transformed, ran, why = run_hook(hooks.on_update, my_name, target, {body = update_body})
+                                            if ran and transformed ~= "" then update_body = transformed end
                                         end
-                                        update_body = update_body:gsub("^[\n\r]+", "")
-                                        write_file(target, update_body)
-                                        set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
-                                        log("self-updated: %s -> %s", name, iname)
-                                        did_work = true
+                                        if ran then
+                                            update_body = update_body:gsub("^[\n\r]+", "")
+                                            write_file(target, update_body)
+                                            set_file_mtime(target, file_mtime(OUTBOX .. "/" .. name))
+                                            log("self-updated: %s -> %s", name, iname)
+                                            did_work = true
+                                        else
+                                            -- #215: the edit stays owed; tried again next pass
+                                            log("on_update %s: the edit of %s not applied to yourself; tried again next pass", why, name)
+                                            held = true
+                                        end
                                         break
                                     end
                                 end
                                 -- Applied, or our own copy was deleted from
                                 -- the inbox: either way nothing is owed.
-                                rmeta.body_checksum = current_checksum
+                                if not held then rmeta.body_checksum = current_checksum end
                             elseif contacts[rname] then
                                 ops[#ops + 1] = {
                                     type = "update", filename = name,
@@ -6078,6 +6158,7 @@ local function sync_outbox(my_name)
     -- track which outbox files had ops this cycle (to avoid premature cleanup on delivery failure)
     local files_with_ops = {}
     for _, op in ipairs(ops) do files_with_ops[op.filename] = true end
+    for name in pairs(held_by_hooks) do files_with_ops[name] = true end
 
     -- Phase 2: encode attachments and build requests
     if #ops > 0 then
@@ -6223,8 +6304,9 @@ local function sync_outbox(my_name)
                     -- Original oversized body never reaches the hook
                     -- (ARG_MAX would truncate it anyway).
                     if hooks.on_send then
-                        local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
-                        if transformed and transformed ~= "" then send_body = transformed end
+                        local transformed, ran, why = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, {body = op.body or ""})
+                        if not ran then log("on_send %s: %s goes to %s as written", why, op.filename, op.recipient)
+                        elseif transformed ~= "" then send_body = transformed end
                     end
                     data = {type = "message",
                             subject = op.subject, message_id = op.message_id, body = send_body,
@@ -6235,8 +6317,9 @@ local function sync_outbox(my_name)
                 path = "/deliver"
                 local send_body = op.body
                 if hooks.on_send then
-                    local transformed = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, op.body or "")
-                    if transformed and transformed ~= "" then send_body = transformed end
+                    local transformed, ran, why = run_hook(hooks.on_send, op.recipient, op.subject or op.filename, {body = op.body or ""})
+                    if not ran then log("on_send %s: the edit of %s goes to %s as written", why, op.filename, op.recipient)
+                    elseif transformed ~= "" then send_body = transformed end
                 end
                 data = {type = "update",
                         message_id = op.message_id, subject = op.subject, body = send_body,
