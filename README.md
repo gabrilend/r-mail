@@ -47,6 +47,8 @@ When all `to:` lines are gone (everyone deleted or was removed), the outbox file
 
 Editing works one way: change the text of your outbox file and the new version is sent to every recipient (a "living message"). Only the author's edits travel. A recipient who edits their inbox copy keeps that change to themselves, and the author's next edit overwrites it. An edit is owed to each recipient until that recipient's daemon has answered it: a contact that is offline, or not yet due for a sync, when you edit receives the newest version once it is reached.
 
+**Contact folders.** A folder in `outbox/` named exactly as a contact sends every file put in it to that contact, with no `to:` line needed: `outbox/alice/quick-note` goes to alice under the subject `quick-note`. Folders below it travel too: `outbox/alice/projects/q2-plan.md` arrives as `inbox/projects/q2-plan.md` on her side. The file is never written to say so, so a photo or a PDF can be dropped in as it is. `to:` lines inside such a file add recipients. Edits, moves and deletes work as for any outbox file (moving a file between contact folders is a delete for one contact and a new message for the other). When the folder's contact deletes their copy, the file is removed from the folder, unless its `to:` lines still name someone else. Hidden files, symbolic links, and paths a receiver would refuse (a control character in a name, more than 16 levels) are not sent. A folder named after nobody in `contacts` is ignored with a warning, as before. A receiving daemon refuses any subject that would land outside its inbox: an absolute path, `..`, an empty or hidden name, a control byte, or a folder that is a symbolic link. Files added inside a contact folder are found on the next sync (within about a minute while the contact answers), not the moment they appear.
+
 There is no history for deleted messages. The [scripting hooks](docs/.templates/scripting-tutorial.md) run when a message is received, sent or updated, and when the *other* side deletes one. `on_delete` does not run for your own deletions and is given only the other party's name, so it cannot back up a message you delete.
 
 ### Attachments
@@ -413,8 +415,8 @@ If the port isn't open or forwarded, the connection will either time out (packet
 
 **Renaming a contact** — the daemon does not follow a rename by itself. Its state files (`.state/*.json`) remember who each message went to by contact name, so after renaming `alice` to `alice-smith` in `contacts`, messages already sent to `alice` look like they went to someone who no longer exists: edits to them stop reaching her, and her deletions are not heard. Changing only the `to:` line in an outbox file is worse — the daemon reads it as one recipient removed and a new one added, and sends her the message a second time. To rename cleanly, with the mailbox's service stopped:
 1. Rename the entry in `contacts` (every `alice.` line becomes `alice-smith.`).
-2. Change `to: alice` to `to: alice-smith` in every outbox file that has it.
-3. Rename her in the state files: `sed -i 's/"alice"/"alice-smith"/g' .state/*.json`
+2. Change `to: alice` to `to: alice-smith` in every outbox file that has it, and rename her contact folder if you have one: `mv outbox/alice outbox/alice-smith`.
+3. Rename her in the state files: `sed -i 's/"alice"/"alice-smith"/g; s|"alice/|"alice-smith/|g' .state/*.json` (the second part is for files in her contact folder, recorded as `alice/<path>`).
 4. Start the service again.
 
 The state files are plain JSON on purpose, so that this is a few seconds of `sed` rather than a program.
@@ -436,6 +438,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
 
 - **2026-10-13 →** An arriving message never writes over a file already in your inbox. If its name is taken, it gets the next free `-2`, `-3` and so on, with no upper limit. Before this, three cases wrote over a file: one you made by hand (rmail had no record of it), a contact's second message under a subject another contact had already used, and the 100th message whose name clashed, which a contact could force on purpose.
 

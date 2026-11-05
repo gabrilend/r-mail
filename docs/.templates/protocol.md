@@ -101,6 +101,19 @@ the receiver sets it on the inbox file, clamped to 2001-09-09 … 2100-01-01
 message) carries the same fields.  `auto_body` marks a large body sent as an
 attachment (see attachments, "Large message bodies").
 
+A `subject` with no `/` is a file name, made safe as it always was (only what
+follows the last `\` kept, leading dots dropped, control characters made
+`_`, spaces made `-`).
+A `subject` holding `/` (#214: a message from the sender's contact folder,
+`projects/q2-plan.md`) names folders below the receiver's inbox, which are
+made as needed.  It is refused with `400` and nothing written when it is
+absolute, has an empty name (`a//b`, `a/`), a `.` or `..`, a name starting
+with `.`, any control byte (NUL and DEL included), a name over 255 bytes,
+more than 16 levels, or over 1024 bytes in all; or when a folder on the way
+is a symbolic link, or the folders resolve outside the inbox.  When a file
+holds one of the folder names, the message is saved without its folders.
+An older receiver keeps only the last name, as it always did.
+
 **`POST /delete`** — notify of a deletion:
 
 ```json

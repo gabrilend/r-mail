@@ -648,6 +648,77 @@ local function sanitize_filename(name)
     return name
 end
 
+-- {{{ mailpath: a message's subject as a path in the inbox (#214)
+-- A message sent from a contact folder carries the path below that folder
+-- as its subject ("projects/q2-plan.md"), and the receiver keeps the same
+-- folders.  This is the one place that decides whether such a subject may
+-- become a path, on both sides: the receiver refuses anything it would not
+-- write, and the sender holds back anything the receiver would refuse.
+-- A subject with no "/" never comes here; sanitize_filename keeps it flat,
+-- as it always has.
+local mailpath = {MAX_DEPTH = 16, MAX_NAME = 255, MAX_TOTAL = 1024}
+
+-- {{{ function mailpath.relative
+-- Gives the path the subject names, as written below the inbox (each name
+-- with spaces made dashes and backslashes made underscores, as a flat
+-- subject's are), and its names as a list; or nil and why it is refused.
+-- Refused: an absolute path, an empty name ("a//b", "a/"), "." or "..",
+-- a hidden name (".x"), any control byte (NUL included), a name over 255
+-- bytes, more than 16 levels, or over 1024 bytes in all.
+function mailpath.relative(subject)
+    if type(subject) ~= "string" or subject == "" then return nil, "an empty subject" end
+    if #subject > mailpath.MAX_TOTAL then return nil, "a path over 1024 bytes" end
+    for i = 1, #subject do
+        local b = subject:byte(i)
+        if b < 32 or b == 127 then return nil, "a control character" end
+    end
+    if subject:sub(1, 1) == "/" then return nil, "an absolute path" end
+    local names = {}
+    for name in (subject .. "/"):gmatch("([^/]*)/") do
+        -- Path: each name in turn; the first that cannot be a folder or file
+        -- name refuses the whole subject.
+        if name == "" then return nil, "an empty name" end
+        if name == "." or name == ".." then return nil, "a \"" .. name .. "\"" end
+        if name:sub(1, 1) == "." then return nil, "a hidden name" end
+        if #name > mailpath.MAX_NAME then return nil, "a name over 255 bytes" end
+        names[#names + 1] = (name:gsub("\\", "_"):gsub(" ", "-"))
+    end
+    if #names > mailpath.MAX_DEPTH then return nil, "more than 16 levels" end
+    return table.concat(names, "/"), names
+end
+-- }}}
+
+-- {{{ function mailpath.make_folders
+-- Make the folders `names` (a list, outermost first) below `root`, one
+-- level at a time, and answer how it went:
+--   "ok"       they all exist now, as real folders inside root
+--   "file"     a file (not a folder) already holds one of the names
+--   "link"     one of them is a symbolic link: never followed
+--   "outside"  they resolve outside root (cannot happen without a link;
+--              checked anyway)
+--   "failed"   mkdir or cd failed (permissions, a full disk)
+-- Every name is passed as "./<name>", so one starting with "-" is never
+-- read as an option.
+function mailpath.make_folders(root, names)
+    local lines = {"cd " .. shell_quote(root) .. " || { echo failed; exit; }", "top=$(pwd -P)"}
+    for _, name in ipairs(names) do
+        local q = shell_quote("./" .. name)
+        lines[#lines + 1] = string.format(
+            "if [ -L %s ]; then echo link; exit; fi; " ..
+            "if [ -e %s ] && [ ! -d %s ]; then echo file; exit; fi; " ..
+            "[ -d %s ] || mkdir %s || { echo failed; exit; }; " ..
+            "cd %s || { echo failed; exit; }", q, q, q, q, q, q)
+    end
+    lines[#lines + 1] = 'case "$(pwd -P)/" in "$top"/?*) echo ok ;; *) echo outside ;; esac'
+    local h = io.popen(table.concat(lines, "\n"))
+    if not h then return "failed" end
+    local answer = h:read("*l") or "failed"
+    h:close()
+    return answer
+end
+-- }}}
+-- }}}
+
 -- ---- Randomness --------------------------------------------------------
 --
 -- math.random is unusable until the generator is seeded, and nothing seeded
@@ -831,9 +902,11 @@ local function list_files(dir)
                                 "message with a line like:", abs)
                             log("    attach: %s", abs)
                         elseif INBOX and dir == INBOX then
-                            log("ignoring directory %s in inbox — rmail " ..
-                                "doesn't put directories there; your daemon " ..
-                                "didn't create this one", abs)
+                            -- #214: rmail makes folders here for messages
+                            -- sent from a contact folder, and keeps track of
+                            -- those by its own record, not by this listing
+                            log("directory %s in inbox: rmail looks inside " ..
+                                "only for messages it saved there itself", abs)
                         else
                             log("ignoring directory %s — rmail only " ..
                                 "processes regular files at this path", abs)
@@ -1072,6 +1145,102 @@ end
 -- rather than more top-level locals: the main chunk is close to Lua's
 -- 200-local ceiling.
 local contactfile = {}
+
+-- {{{ contact folders in the outbox (#214)
+-- A folder directly inside the outbox named after a contact sends every
+-- file in it, and in the folders below it, to that contact.  The outbox
+-- record keys such a file by its path from the outbox ("alice/q2-plan"),
+-- and the subject it travels under is the path below the contact's folder
+-- ("q2-plan"), which the receiver keeps as folders of its own (mailpath).
+
+-- {{{ function contactfile.folder_of
+-- The contact folder an outbox record's name lies in, or nil for a file
+-- directly in the outbox.
+function contactfile.folder_of(name)
+    return name:match("^([^/]+)/")
+end
+-- }}}
+
+-- {{{ function contactfile.subject_of
+-- The subject an outbox file travels under: its path below its contact
+-- folder, or its name when it is directly in the outbox.
+function contactfile.subject_of(name)
+    return name:match("^[^/]+/(.+)$") or name
+end
+-- }}}
+
+-- {{{ local function find_names
+-- Run `find` (its arguments already quoted) and give what it prints with
+-- -print0, one entry per name: a file name may hold a line break.
+local function find_names(args)
+    local names = {}
+    local h = io.popen("find " .. args .. " -print0 2>/dev/null")
+    if not h then return names end
+    local out = h:read("*a") or ""
+    h:close()
+    for name in out:gmatch("([^%z]+)%z") do names[#names + 1] = name end
+    return names
+end
+-- }}}
+
+-- {{{ function contactfile.outbox_folders
+-- The contact folders in the outbox, as a set of names.  A folder counts
+-- when it is named exactly as a contact that may be sent to (not a
+-- listen-only one, not this mailbox's own name), or when the outbox record
+-- still holds messages from it (the contact renamed since: those messages
+-- wait, logged as for an unknown contact, instead of being taken for
+-- deleted).  list_files is told these are not stray folders, so it does
+-- not warn about them.
+function contactfile.outbox_folders(contacts, my_name, state)
+    local folders, tracked = {}, {}
+    for name in pairs(state) do
+        local folder = contactfile.folder_of(name)
+        if folder then tracked[folder] = true end
+    end
+    local prefix = OUTBOX .. "/"
+    for _, path in ipairs(find_names(shell_quote(OUTBOX) ..
+            " -mindepth 1 -maxdepth 1 -type d ! -name '.*'")) do
+        local name = path:sub(1, #prefix) == prefix and path:sub(#prefix + 1)
+        if name and name ~= "" then
+            local c = contacts[name]
+            if (c and name ~= my_name and not contactfile.listens(c)) or tracked[name] then
+                folders[name] = true
+                _listed_dir_warned[prefix .. name] = true
+            end
+        end
+    end
+    return folders
+end
+-- }}}
+
+-- {{{ function contactfile.folder_files
+-- Every regular file in a contact folder and the folders below it, as
+-- paths below the contact folder.  Hidden files and folders are skipped,
+-- as directly in the outbox, and so are symbolic links (decision 5 of
+-- #214).  A path the receiver would refuse (mailpath.relative) is left
+-- out, and said once a session, so it is never sent to be refused.
+function contactfile.folder_files(folder)
+    local files = {}
+    local dir = OUTBOX .. "/" .. folder
+    for _, path in ipairs(find_names(shell_quote(dir) ..
+            " -mindepth 1 -name '.*' -prune -o -type f")) do
+        local rel = path:sub(1, #dir + 1) == dir .. "/" and path:sub(#dir + 2)
+        if rel and rel ~= "" then
+            local ok, why = true, nil
+            if rel:find("/", 1, true) then ok, why = mailpath.relative(rel) end
+            if ok then
+                files[#files + 1] = rel
+            elseif not _listed_dir_warned[dir .. "/" .. rel] then
+                _listed_dir_warned[dir .. "/" .. rel] = true
+                log("not sending %s/%s: its path has %s, which the receiver would refuse",
+                    folder, rel, why)
+            end
+        end
+    end
+    return files
+end
+-- }}}
+-- }}}
 
 local function load_contacts()
     local text = read_file(CONTACTS)
@@ -2228,7 +2397,42 @@ local function handle_deliver_message(data, sender)
 
     -- new message
     if not body then body = "" end
-    local filename = sanitize_filename(subject)
+    -- #214: a subject holding "/" names folders below the inbox (a message
+    -- from the sender's contact folder keeps its place there).  The folders
+    -- are checked and made first; every name chosen below is the last part
+    -- only, in those folders.  A subject that cannot be a safe path is
+    -- refused outright, and nothing is written.
+    local folder, leaf = "", subject
+    if type(subject) == "string" and subject:find("/", 1, true) then
+        local path, names = mailpath.relative(subject)
+        if not path then
+            log("refused %s from %s: its subject has %s", message_id, sender, names)
+            return 400, {error = "the subject is not a path this inbox accepts: " .. names}
+        end
+        leaf = table.remove(names)
+        local made = mailpath.make_folders(INBOX, names)
+        if made == "ok" then
+            folder = table.concat(names, "/") .. "/"
+        elseif made == "file" then
+            -- the owner's own file holds a folder's name: the message comes
+            -- in flat, beside it, rather than not at all
+            log("%s from %s: a file holds a folder name in %s; saved without its folders",
+                message_id, sender, path)
+        elseif made == "failed" then
+            log("could not make the folders for %s from %s (%s); the sender will send it again",
+                message_id, sender, path)
+            return 500, {error = "the receiver could not make the message's folders"}
+        else
+            -- "link" or "outside": two separate checks, so that either one
+            -- alone still keeps the message inside the inbox
+            local why = made == "link" and "a folder on the way that is a symbolic link"
+                or "a way out of the inbox"
+            log("refused %s from %s: its path %s has %s", message_id, sender, path, why)
+            return 400, {error = "the subject is not a path this inbox accepts: " .. why}
+        end
+    end
+    local function name_for(words) return folder .. sanitize_filename(words) end
+    local filename = name_for(leaf)
     local target = INBOX .. "/" .. filename
     -- #308: auto-body deliveries carry a stub body generated by the
     -- sender, but the sender doesn't know where OUR attachments live.
@@ -2237,14 +2441,15 @@ local function handle_deliver_message(data, sender)
     if data.auto_body then
         body = string.format(
             "[body too large for a single message — delivered as attachment at %s/%s]",
-            paths.attachments, filename)
+            paths.attachments, sanitize_filename(leaf))
     end
     if file_exists(target) then
         local existing = inbox_state[filename]
         if existing and existing["from"] ~= sender then
             -- Different sender with the same subject: disambiguate by
             -- tagging the filename with the sender.
-            filename = sanitize_filename(subject .. "-from-" .. sender)
+            leaf = leaf .. "-from-" .. sender
+            filename = name_for(leaf)
             target = INBOX .. "/" .. filename
         elseif existing and existing["from"] == sender and
                existing.message_id ~= message_id then
@@ -2257,7 +2462,8 @@ local function handle_deliver_message(data, sender)
             -- both messages as distinct files.
             local suffix = (message_id or ""):gsub("[^%w]", ""):sub(1, 6)
             if suffix == "" then suffix = "2" end
-            filename = sanitize_filename(subject .. "-" .. suffix)
+            leaf = leaf .. "-" .. suffix
+            filename = name_for(leaf)
             target = INBOX .. "/" .. filename
         end
         -- The remaining case (existing AND same sender AND same
@@ -2277,9 +2483,9 @@ local function handle_deliver_message(data, sender)
     -- The sender-tagged name and a hand-made file reach here too; before
     -- this, neither was checked (scripts/test-inbox-never-overwrites.sh).
     if file_exists(target) then
-        local base, n = filename, 2
+        local base, n = sanitize_filename(leaf), 2
         repeat
-            filename = sanitize_filename(base .. "-" .. n)
+            filename = name_for(base .. "-" .. n)
             target = INBOX .. "/" .. filename
             n = n + 1
         until not file_exists(target)
@@ -2424,11 +2630,39 @@ end
 -- Remove a recipient's to: line from an outbox file.
 -- Also removes orphan attach: lines that no longer have a to: above them.
 -- Returns the count of remaining recipients (0 if file was deleted).
+--
+-- #214: a file in a contact folder is addressed by where it is, so this
+-- never deletes it, never drops its attach: lines (the folder's contact
+-- owns them all), and writes it back only when a to: line was taken out
+-- (it may be a photo, never to be touched).  The count is then of the to:
+-- lines left that name someone besides the folder's contact; whether the
+-- folder's contact still wants it is the caller's question (handle_delete).
 local function remove_recipient_from_file(filepath, recipient)
     local text = read_file(filepath)
     if not text then return 0 end
 
     local header_lines, body = _scan_outbox_header(text)
+
+    local in_outbox = filepath:sub(1, #OUTBOX + 1) == OUTBOX .. "/"
+    local folder = in_outbox and contactfile.folder_of(filepath:sub(#OUTBOX + 2))
+    if folder then
+        -- Path: a file in a contact folder; the to: lines for the recipient
+        -- go, and nothing else changes.
+        local kept, removed, others = {}, false, 0
+        for _, line in ipairs(header_lines) do
+            local r = line:lower():match("^to:") and line:match("^[Tt][Oo]:%s*(.-)%s*$")
+            if r == recipient then
+                removed = true
+            else
+                kept[#kept + 1] = line
+                if r and r ~= "" and r ~= folder then others = others + 1 end
+            end
+        end
+        if removed then
+            write_file(filepath, (#kept > 0 and table.concat(kept, "\n") .. "\n" or "") .. body)
+        end
+        return others
+    end
 
     -- remove the matching to: line
     local kept = {}
@@ -2545,7 +2779,24 @@ local function handle_delete(data, sender)
                     meta.recipients[recipient] = nil
                     local remaining = remove_recipient_from_file(OUTBOX .. "/" .. filename, recipient)
                     log("removed recipient %s from %s (they deleted)", recipient, filename)
-                    if not next(meta.recipients) then
+                    -- #214: a file in a contact folder.  Its contact deleting
+                    -- their copy ends the file, as the last recipient of any
+                    -- outbox file does, unless its to: lines still name others:
+                    -- then it stays for them, and the record says the folder's
+                    -- contact is done with it, so it is not sent to them again.
+                    -- Once the others are gone too, so is the file.
+                    local folder = contactfile.folder_of(filename)
+                    if folder then
+                        if recipient == folder then meta.folder_left = true end
+                        if meta.folder_left and remaining == 0 then
+                            os.remove(OUTBOX .. "/" .. filename)
+                            log("removed %s: everyone it was for has deleted it", filename)
+                        end
+                    end
+                    -- (a record that the folder's contact left is kept while
+                    -- the file waits for the others)
+                    if not next(meta.recipients) and not
+                       (meta.folder_left and file_exists(OUTBOX .. "/" .. filename)) then
                         outbox_state[filename] = nil
                     end
                     save_state("outbox.json", outbox_state)
@@ -3666,7 +3917,11 @@ local function _expand_attach_glob(pattern, outbox_file)
     return matches
 end
 
-local function parse_outbox_file(path)
+-- implicit_first_recipient (#214): the contact whose folder the file is in.
+-- It comes first, as if the file began with its to: line, and takes every
+-- attach: line in the file; a to: line naming it again adds nothing.  The
+-- file is never written to say so.
+local function parse_outbox_file(path, implicit_first_recipient)
     local text = read_file(path)
     if not text then return nil, nil end
 
@@ -3712,10 +3967,18 @@ local function parse_outbox_file(path)
 
     -- build per-recipient entries: each to: gets all attach: lines after it
     local entries = {}
+    if implicit_first_recipient then
+        local attachments = {}
+        for _, line in ipairs(expanded_header) do
+            local afp = _extract_attach_path(line)
+            if afp and afp ~= "" then attachments[#attachments + 1] = expand_tilde(afp) end
+        end
+        entries[1] = {name = implicit_first_recipient, attachments = attachments}
+    end
     for i, line in ipairs(expanded_header) do
         if line:lower():match("^to:") then
             local name = line:match("^[Tt][Oo]:%s*(.-)%s*$")
-            if name and name ~= "" then
+            if name and name ~= "" and name ~= implicit_first_recipient then
                 local attachments = {}
                 for j = i + 1, #expanded_header do
                     local afp = _extract_attach_path(expanded_header[j])
@@ -5652,7 +5915,15 @@ local function sync_outbox(my_name)
     end
 
     local current = {}
+    -- #214: contact folders first, so the listing below does not warn about
+    -- them; each file in one is known by its path from the outbox
+    local folders = contactfile.outbox_folders(contacts, my_name, state)
     for _, name in ipairs(list_files(OUTBOX)) do current[name] = true end
+    for folder in pairs(folders) do
+        for _, rel in ipairs(contactfile.folder_files(folder)) do
+            current[folder .. "/" .. rel] = true
+        end
+    end
 
     -- Contact renames are a user-serviced operation (#505 reversal).  A
     -- recipient name in state that no longer exists in contacts is
@@ -5665,7 +5936,10 @@ local function sync_outbox(my_name)
     local ops = {}
 
     for name in pairs(current) do
-        local entries, body = parse_outbox_file(OUTBOX .. "/" .. name)
+        -- #214: the folder's contact is a recipient until they delete it
+        local implicit = contactfile.folder_of(name)
+        if implicit and state[name] and state[name].folder_left then implicit = nil end
+        local entries, body = parse_outbox_file(OUTBOX .. "/" .. name, implicit)
         local current_set = {}
         local current_attach = {}  -- name -> {filename -> filepath}
         if entries then
@@ -5818,7 +6092,7 @@ local function sync_outbox(my_name)
                                 ops[#ops + 1] = {
                                     type = "deliver", filename = name,
                                     recipient = rname, message_id = uuid(),
-                                    subject = name, body = body,
+                                    subject = contactfile.subject_of(name), body = body,
                                     -- of the outbox body, even when an
                                     -- oversized one goes as a stub (#308):
                                     -- what #208 compares is the author's text
@@ -5835,9 +6109,13 @@ local function sync_outbox(my_name)
                         else
                             log("unknown contact '%s' in %s", rname, name)
                             -- Mark unknown contact in the outbox file so user can see and fix it
-                            mark_recipient_problem(OUTBOX .. "/" .. name,
-                                rname, "UNKNOWN CONTACT",
-                                "not in your contacts file")
+                            -- (not a folder's own contact: there is no to: line
+                            -- to mark, and the file is not rmail's to write)
+                            if rname ~= implicit then
+                                mark_recipient_problem(OUTBOX .. "/" .. name,
+                                    rname, "UNKNOWN CONTACT",
+                                    "not in your contacts file")
+                            end
                             outbox_files_with_unresolved_recipients[name] = true
                         end
                     elseif contacts[rname] then
@@ -6123,7 +6401,7 @@ local function sync_outbox(my_name)
                                 ops[#ops + 1] = {
                                     type = "update", filename = name,
                                     recipient = rname, message_id = rmeta.message_id,
-                                    subject = name, body = body,
+                                    subject = contactfile.subject_of(name), body = body,
                                     body_checksum = current_checksum,
                                     mtime = file_mtime(OUTBOX .. "/" .. name),
                                     contact = contacts[rname],
@@ -6275,7 +6553,7 @@ local function sync_outbox(my_name)
                                 attachment_id = att_id_to_send,
                                 message_id = op.message_id,
                                 filename = display_filename,
-                                subject = op.filename,
+                                subject = contactfile.subject_of(op.filename),
                                 expected_size = expected_for_request,
                             }),
                             psk_key = op.contact.token,
@@ -6330,7 +6608,7 @@ local function sync_outbox(my_name)
                         attachment_id = op.att_id,
                         message_id = op.message_id,
                         filename = op.att_filename,
-                        subject = op.filename,
+                        subject = contactfile.subject_of(op.filename),
                         expected_size = op.expected_size}
             elseif op.type == "attachment_withdraw" then
                 -- the one-attachment cancel, going the author's way (#313)
@@ -6547,6 +6825,13 @@ local function sync_inbox(my_name)
 
     local current = {}
     for _, name in ipairs(list_files(INBOX)) do current[name] = true end
+    -- #214: a message kept in a folder (from a sender's contact folder) is
+    -- not in the flat listing; it is there while its file is
+    for name in pairs(state) do
+        if name:find("/", 1, true) and file_exists(INBOX .. "/" .. name) then
+            current[name] = true
+        end
+    end
 
     -- collect deletion notifications (newly missing files + pending retries)
     local ops = {}
