@@ -121,7 +121,11 @@ and bob's `HI` saved, no two inbox files differing only in case), the
 sender not told (the answer to a message whose name was taken names no
 file, and the daemon's log says the name was taken), and attachments
 (three messages each carrying an attachment named `pic` leave three
-files).
+files).  `scripts/test-contact-folders.sh` (#214's) read the saved name
+from the answer; it now finds the file in the inbox by its body instead,
+and checks the answer names no file.  Each of three broken versions fails
+a check: the answer naming the file again, the case check removed, and the
+attachment numbering removed.
 
 ## Decisions (2026-11-05, the owner can overturn any of these)
 
