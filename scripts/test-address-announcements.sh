@@ -26,7 +26,9 @@
 #              message but never an announcement
 #   hook       an owed file written again: on_send sees it (subject, payload
 #              on stdin) and rewrites the public address; the receiver
-#              merges the rewritten set and the file goes
+#              merges the rewritten set and the file goes; the payload
+#              names the sender, and since the receiver calls it the same,
+#              no THEIR-NAME notice (#506)
 #   merge      the receiver keeps the hostname it holds (localhost) as the
 #              pinned default, gains the public address as ip[1] and the
 #              local address as local-ip
@@ -240,6 +242,13 @@ case "$line" in
     *"\"ips\""*"$PUBLIC"*) ok "on_send saw it: recipient, the file's name as subject, the payload on stdin" ;;
     *) note_fail "on_send did not see the announcement: $line" ;;
 esac
+case "$line" in
+    *'"name":"sender"'*) ok "the announcement names the mailbox it comes from (#506)" ;;
+    *) note_fail "the announcement does not carry the sender's own name: $line" ;;
+esac
+if [ -e "$WORK/receiver/inbox/THEIR-NAME-sender" ]; then
+    note_fail "a name the receiver already uses for the sender produced a notice"
+fi
 
 echo ""
 echo "merge"
