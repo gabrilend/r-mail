@@ -87,6 +87,16 @@ also runs for every edit sent (each update) and for mail to yourself, where
 `$1` is your own name.  A failing `on_send` is logged, and the body is sent
 as written.
 
+It also runs for each announcement of your addresses (#409).  An
+announcement owed to a contact waits as the hidden file
+`outbox/.address-announcement-<name>` until it reaches them; the hook gets
+the contact as `$1`, that file's name as `$2`, and the announcement's JSON
+(the addresses as they are when it goes) on stdin and in `$3`.  What it
+prints replaces the announcement only when the whole output is one JSON
+object; anything else, such as a footer added to every body, is logged and
+the announcement goes as computed.  To not send an announcement, delete its
+file.
+
 **on_delete** fires when the *other* side deletes: a recipient deleting a
 message you sent (`$1` is the recipient), the author deleting one you
 received (`$1` is the author), and when you delete an inbox file.  It does

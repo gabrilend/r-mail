@@ -2166,6 +2166,112 @@ local function unmigrate_hashed_keys(state, contacts)
     return migrated
 end
 
+-- ---- Announcements owed, as hidden files in the outbox (#409 phase 2) ----
+--
+-- An announcement of our addresses owed to a contact is the file
+-- `outbox/.address-announcement-<name>`: one per contact, written by the
+-- daemon, removed once the announcement has reached them.  It used to be an
+-- entry in `.state/pending-address.json`, which only the daemon could read.
+-- As a file it can be seen with `ls -a`, it passes through `on_send` like
+-- any outgoing message, and deleting it by hand means it is not sent (a
+-- contact gone for good, say).  The leading dot keeps it out of the
+-- message list and off the phone (list_files skips dotfiles), as
+-- `inbox/.address-update-<name>` is.
+--
+-- The file holds `ip`, `port` and `ipv6` lines: what was true when it was
+-- owed.  The addresses actually sent are read when it goes (addrset.mine),
+-- so an announcement that waited through another change carries where we
+-- are now.  (A field of addrset, not a new top-level local: the main chunk
+-- is at Lua's limit of 200.)
+
+addrset.OWED_PREFIX = ".address-announcement-"
+
+-- {{{ addrset.owed_path
+function addrset.owed_path(name)
+    return OUTBOX .. "/" .. addrset.OWED_PREFIX .. name
+end
+-- }}}
+
+-- {{{ addrset.read_owed_file
+-- The ip/port/ipv6 lines of an owed announcement's file, as strings.
+function addrset.read_owed_file(path)
+    local info = {}
+    for line in ((read_file(path) or "") .. "\n"):gmatch("([^\n]*)\n") do
+        local key, value = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+        if (key == "ip" or key == "ipv6" or key == "port") and value ~= "" then info[key] = value end
+    end
+    return info
+end
+-- }}}
+
+-- {{{ addrset.owe
+-- Owe `name` an announcement, merging `fields` ({ip, port, ipv6}) into one
+-- already owed.  The file is written only when its text changes: the
+-- outbox is watched, and an unchanged rewrite would start a sync for
+-- nothing.
+function addrset.owe(name, fields)
+    local path = addrset.owed_path(name)
+    local info = addrset.read_owed_file(path)
+    for _, key in ipairs({"ip", "port", "ipv6"}) do
+        if fields[key] ~= nil then info[key] = tostring(fields[key]) end
+    end
+    local lines = {
+        "// rmail owes " .. name .. " an announcement of this mailbox's addresses (#409).",
+        "// It goes at the next sync and this file is then removed.  Delete it",
+        "// and it is not sent.  The addresses sent are read when it goes.",
+    }
+    for _, key in ipairs({"ip", "port", "ipv6"}) do
+        if info[key] then lines[#lines + 1] = key .. " = " .. info[key] end
+    end
+    local text = table.concat(lines, "\n") .. "\n"
+    if read_file(path) ~= text then write_file(path, text) end
+end
+-- }}}
+
+-- {{{ addrset.owed
+-- name -> {ip, port, ipv6} for every announcement owed.  A
+-- pending-address.json left by an older rmail is turned into files the
+-- first time (a contact that already has a file keeps it), then removed.
+function addrset.owed()
+    local legacy_path = STATE .. "/pending-address.json"
+    if file_exists(legacy_path) then
+        local ok, legacy = pcall(load_state, "pending-address.json")
+        if ok and type(legacy) == "table" then
+            legacy = unmigrate_hashed_keys(legacy, load_contacts())
+            local moved = 0
+            for name, info in pairs(legacy) do
+                if type(info) == "table" and name:match("^[%w_%-][%w_%-%.]*$")
+                   and not file_exists(addrset.owed_path(name)) then
+                    addrset.owe(name, {ip = info.ip, port = info.port, ipv6 = info.ipv6})
+                    moved = moved + 1
+                end
+            end
+            if moved > 0 then
+                log("#409: %d owed announcement(s) moved from .state/pending-address.json to outbox/%s<name>",
+                    moved, addrset.OWED_PREFIX)
+            end
+        end
+        os.remove(legacy_path)
+    end
+    local owed, prefix = {}, addrset.OWED_PREFIX
+    for _, f in ipairs(list_notices(OUTBOX)) do
+        local name = f:sub(1, #prefix) == prefix and f:sub(#prefix + 1)
+        if name and name ~= "" then
+            local info = addrset.read_owed_file(OUTBOX .. "/" .. f)
+            owed[name] = {ip = info.ip, port = tonumber(info.port), ipv6 = info.ipv6}
+        end
+    end
+    return owed
+end
+-- }}}
+
+-- {{{ addrset.paid
+-- The announcement reached them, or is no longer owed: its file goes.
+function addrset.paid(name)
+    os.remove(addrset.owed_path(name))
+end
+-- }}}
+
 
 -- ============================================================
 -- NAT traversal (automatic port forwarding)
@@ -7189,18 +7295,16 @@ local function detect_ip_change(my_name, port)
     log("public IP changed: %s -> %s (confirmed)", stored_ip, new_ip)
     write_file(STATE .. "/public_ip", new_ip)
 
-    -- write pending notifications for all contacts, keyed by plaintext
-    -- contact name.
+    -- an announcement owed to every contact (#409: a hidden file in the
+    -- outbox for each)
     local contacts = load_contacts()
-    local pending = unmigrate_hashed_keys(
-        load_state("pending-address.json"), contacts)
+    addrset.owed()   -- an older rmail's pending-address.json, moved first
     for name, contact in pairs(contacts) do
         -- never to a listen-only contact (#420), even one given an ip
         if name ~= my_name and contact.ip and not contactfile.listens(contact) then
-            pending[name] = {ip = new_ip, port = port}
+            addrset.owe(name, {ip = new_ip, port = port})
         end
     end
-    save_state("pending-address.json", pending)
     return true
 end
 
@@ -7242,26 +7346,23 @@ local function detect_ipv6_change(my_name, port)
     log("public IPv6 changed: %s -> %s", stored_ip, new_ip)
     write_file(STATE .. "/public_ipv6", new_ip)
 
-    -- Queue notifications for contacts that have an ipv6 field, keyed
-    -- by plaintext contact name.
+    -- An announcement owed to each contact that has an ipv6 field (#409:
+    -- merged into one already owed, so an IPv4 change waiting is kept).
     local contacts = load_contacts()
-    local pending = unmigrate_hashed_keys(
-        load_state("pending-address.json"), contacts)
+    addrset.owed()   -- an older rmail's pending-address.json, moved first
     for name, contact in pairs(contacts) do
         if name ~= my_name and (contact.ipv6 or is_ipv6(contact.ip))
             and not contactfile.listens(contact) then  -- #420
-            pending[name] = pending[name] or {}
-            pending[name].ipv6 = new_ip
-            pending[name].port = port
+            addrset.owe(name, {ipv6 = new_ip, port = port})
         end
     end
-    save_state("pending-address.json", pending)
 end
 
 local function sync_address_notifications(my_name)
     local contacts = load_contacts()
-    local pending = unmigrate_hashed_keys(
-        load_state("pending-address.json"), contacts)
+    -- #409 phase 2: what is owed is the outbox's .address-announcement-*
+    -- files; one deleted by hand is simply not here
+    local pending = addrset.owed()
 
     -- #409: an unconfirmed address notice is a claim we have not tested.
     -- Testing it needs traffic to that contact, and an idle pair generates
@@ -7280,6 +7381,7 @@ local function sync_address_notifications(my_name)
             if who and contacts[who] and contacts[who].ip and not pending[who]
                 and not contactfile.listens(contacts[who]) then  -- #420
                 pending[who] = {ip = my_public, port = tonumber(config.port)}
+                addrset.owe(who, pending[who])
             end
         end
     end
@@ -7291,19 +7393,18 @@ local function sync_address_notifications(my_name)
         if contacts[name] and contacts[name].ip and not contactfile.listens(contacts[name]) then
             ops[#ops + 1] = {
                 name = name, contact = contacts[name],
-                ip = info.ip, port = info.port,
+                ip = info.ip, port = info.port or tonumber(config.port),
             }
         else
             -- contact removed, or marked listen-only since it was queued
-            -- (#420): drop the pending notification
-            pending[name] = nil
+            -- (#420): no longer owed
+            addrset.paid(name)
+            log("announcement to %s dropped: %s", name,
+                contacts[name] and "no address to send it to, or listen-only" or "not a contact")
         end
     end
 
-    if #ops == 0 then
-        save_state("pending-address.json", pending)
-        return false
-    end
+    if #ops == 0 then return false end
 
     local requests = {}
     for i, op in ipairs(ops) do
@@ -7312,17 +7413,44 @@ local function sync_address_notifications(my_name)
         -- recipient's own network.
         local pub, loc = addrset.mine(op.port)
         if not addrset.contact_on_lan(op.contact) then loc = nil end
+        -- #409: the set is computed now rather than read from the owed
+        -- file, so an announcement that sat through an address change goes
+        -- out with where we are, not where we were.  ip/port stay for peers
+        -- that predate #409.
+        local payload = json.encode({
+            ip = op.ip, port = op.port,
+            ips = pub, local_ips = loc,
+        })
+        -- #409 phase 2: on_send sees the announcement as it sees any
+        -- outgoing message -- the recipient, the file's name as subject,
+        -- the payload as body -- and what it prints replaces the payload,
+        -- but only as a JSON object: a hook written for message bodies (a
+        -- footer, say) would otherwise break every announcement.  A hook
+        -- that fails is logged and the payload goes as computed (#215's
+        -- rule for on_send).
+        if hooks.on_send then
+            local subject = addrset.OWED_PREFIX .. op.name
+            local out, ran, why = run_hook(hooks.on_send, op.name, subject, {body = payload})
+            if not ran then
+                log("on_send %s: the announcement to %s goes as computed", why, op.name)
+            elseif out and out:match("%S") then
+                -- the whole output, not a JSON value at its start: the
+                -- decoder stops after the first value and would let a
+                -- footer through
+                local ok, decoded, after = pcall(json.decode, out)
+                if ok and type(decoded) == "table" and next(decoded) ~= nil and decoded[1] == nil
+                   and type(after) == "number" and not out:sub(after):match("%S") then
+                    payload = json.encode(decoded)
+                elseif out:match("^%s*(.-)%s*$") ~= payload then
+                    log("on_send printed something that is not a JSON object for the announcement to %s;"
+                        .. " it goes as computed", op.name)
+                end
+            end
+        end
         requests[i] = {
             endpoints = contact_endpoints(op.contact),
             path = "/update-address",
-            -- #409: the set is computed now rather than read from the
-            -- pending entry, so a queued announcement that sat through an
-            -- address change goes out with where we are, not where we were.
-            -- ip/port stay for peers that predate #409.
-            payload = json.encode({
-                ip = op.ip, port = op.port,
-                ips = pub, local_ips = loc,
-            }),
+            payload = payload,
             psk_key = op.contact.token,
         }
     end
@@ -7332,14 +7460,14 @@ local function sync_address_notifications(my_name)
     for i, op in ipairs(ops) do
         note_contact_result(op.name, results[i].ok)
         if results[i].ok then
-            pending[op.name] = nil
+            addrset.paid(op.name)
             log("notified %s of address change", op.name)
             did_work = true
         end
-        -- failure: rolls into the unreachable summary (#114)
+        -- failure: the file stays owed, and it rolls into the unreachable
+        -- summary (#114)
     end
 
-    save_state("pending-address.json", pending)
     return did_work
 end
 
@@ -8921,7 +9049,8 @@ local function init_runtime()
     rt.addresses_found = (pub_ok and pub_answered ~= false) and (lan_ok and lan_found == true)
     -- #115 requirement 1, the startup ping itself: tell every contact where
     -- we are, at boot.  Deliberately not a new mechanism -- it queues the
-    -- same pending-address entry that a detected IP change queues, so it
+    -- same owed announcement that a detected IP change writes (#409: a
+    -- hidden file in the outbox), so it
     -- travels as an ordinary /update-address op through the ordinary sync
     -- cycle.  "Hi, I'm still here, at this location."
     --
@@ -8937,16 +9066,14 @@ local function init_runtime()
         local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
         if not my_public or my_public == "" then return end
         local contacts = load_contacts()
-        local pending  = unmigrate_hashed_keys(
-            load_state("pending-address.json"), contacts)
+        addrset.owed()   -- an older rmail's pending-address.json, moved first
         local n = 0
         for name, c in pairs(contacts) do
             if name ~= rt.my_name and c.ip and not contactfile.listens(c) then  -- #420
-                pending[name] = {ip = my_public, port = rt.port}
+                addrset.owe(name, {ip = my_public, port = rt.port})
                 n = n + 1
             end
         end
-        save_state("pending-address.json", pending)
         if n > 0 then log("startup: announcing %s:%d to %d contact(s)", my_public, rt.port, n) end
     end)
 
@@ -9227,7 +9354,7 @@ local function main()
             log("outbox change detected, syncing")
         end
         -- Runs before the sync block so that a confirmed change is written to
-        -- .state and queued into pending-address.json in time for the very
+        -- .state and owed as outbox/.address-announcement-* in time for the very
         -- next cycle to deliver it, rather than a whole interval later.
         if rt.next_addr_check and now >= rt.next_addr_check then
             pcall(addrchk.run, rt)
