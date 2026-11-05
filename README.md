@@ -470,6 +470,8 @@ that phase's work, with what came out and how long it took.
 
 Newest first. Each entry is the date, then what changed, in plain words.
 
+- **2026-11-05 →** A contact's website that reaches you is kept at `attachments/websites/<contact>/`, one per contact; the copy it replaces moves into RAM until the machine restarts (#715a). Beside each file in it that is not part of a page, an `.info.html` page gives its size, checksum and a link to open it.
+
 - **2026-11-05 →** `website = <folder>` in the config publishes a folder to your contacts (#715a). A contact who sends you a message called `website` is offered the whole folder as an attachment, with its size on the consent form; a contact who already has this version, or has an offer waiting, is not offered it again.
 
 - **2026-11-05 →** `to: url` publishes a message as a link someone with only a browser can open (#714). Set `public_http_port` to turn it on. The words after `#` in the link are the key; the page opens the message in the browser, and files arrive in checked pieces that survive a reload.
