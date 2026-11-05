@@ -96,6 +96,29 @@ The sender remembers each recipient's answer per attached file: a file is not of
 
 For full details on the attachment workflow, per-recipient targeting, configuration, and resumption behaviour, see [docs/.templates/attachments.md](docs/.templates/attachments.md).
 
+### A link for someone without rmail
+
+`to: url` publishes a message for someone who has only a browser. It needs `public_http_port` in your config (below) and that port forwarded on your router like your mailbox's own:
+
+```
+to: url
+attach: /path/to/photo.jpg
+
+Here's the photo from yesterday.
+```
+
+The next sync cycle adds a line to the bottom of the file:
+
+```
+URL: http://203.0.113.1:8028/#yahan-firmans-bowls-quai-fig-bien
+```
+
+Hand that link to the person it is for. The words after `#` are the key: a browser never sends them, so your daemon never sees them, and what it answers can be opened only with them. The page shows the message and offers the files under `to: url` (the same rule as a contact's). Pictures show at once; other files are fetched in pieces, each checked as it arrives, and a reload carries on from the first piece missing. The link can also be given as two parts, the address and the words, which the page asks for.
+
+The page is read from the outbox file at every visit: an edit shows at the next one, and taking out the `to: url` line, or deleting the file, takes the page down. Contacts on the same file never see the `URL:` line. Folders are listed but not published yet.
+
+Anyone who has the link can read the message, so treat it like the message itself. Over plain http someone who can *change* your traffic (not only watch it) could hand the reader a different page; a reader who saves the page and opens the saved copy next time, pasting the whole link, is safe from that. See [issue #714](issues/714-public-capability-url-web-server.md).
+
 ## Dependencies
 
 - **Lua**: LuaJIT, or Lua 5.3 or 5.4 (5.4 recommended). Lua 5.1 and 5.2 cannot run the daemon: it uses `goto`, and the zip library refuses to load there.
@@ -152,12 +175,14 @@ port = 8025
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
 
-The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and four more:
+The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and six more:
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
 - `cannot_reach_notice_after` — seconds a contact may go unreached, with mail waiting for them, before the daemon leaves a notice in the outbox, `CANNOT-REACH-<name>`, for you (default: `86400`, a day). It is not mail and goes to nobody; the daemon removes it once that contact is reached.
 - `wake_gap` — seconds the daemon's wait may overrun by the clock before it takes it that the machine slept (default: `60`). On waking it checks its address, announces itself to every contact, and tries every contact at once, so mail held for it while it slept comes in on their next pass.
+- `public_http_port` — the port that serves `to: url` links to browsers (default: none, so nothing listens and a `to: url` file is marked `NO PUBLIC PORT`). It needs forwarding on your router like `port`, and must differ from it.
+- `public_url_words` — how many words a new link's code has (default: `6`, no upper limit). More words make a link harder to guess; links already made keep theirs.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
@@ -442,6 +467,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** `to: url` publishes a message as a link someone with only a browser can open (#714). Set `public_http_port` to turn it on. The words after `#` in the link are the key; the page opens the message in the browser, and files arrive in checked pieces that survive a reload.
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
 
