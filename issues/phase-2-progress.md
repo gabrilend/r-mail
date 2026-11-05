@@ -14,6 +14,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#203](completed/203-tilde-expansion-in-attach-paths.md) — Tilde Expansion in attach: Paths**  When a user specifies an attachment path using tilde notation in an outbox file:
 - **[#204](completed/204-attach-glob-wildcard.md) — Support `*` (glob) wildcards in `attach:` file paths**  An `attach:` line in an outbox file may name one file, or may carry shell-style wildcards (`*`, `?`, `[...]`) in its last path component:
 - **[#205](completed/205-list-files-skip-directories.md) — `list_files` should skip directories and non-regular entries**  `list_files(dir)` shells to `ls -1` and returns every non-hidden entry, including subdirectories.
+- **[#206](completed/206-duplicate-filename-warning.md) — Warn about duplicate filename conflicts**  Built 2026-11-05 (see "Built" and "Decisions" at the end), on top of #211.
 - **[#207](completed/207-living-messages-on-update-hook.md) — Living messages: outbox edits propagate to recipients**  All messages are "living" — editing an outbox file updates the recipient's inbox copy.
 - **[#208](completed/208-an-edit-is-retried-until-delivered.md) — An edit is retried until it is delivered**  When the author edits an outbox file that has already been sent, every recipient is owed the new version, and stays owed until that recipient's daemon answers the update.
 - **[#209](completed/209-deletes-travel-both-ways.md) — Deleting a message, on either side, is told to the other**  A message exists in two places — the author's outbox file and each recipient's inbox file — and deleting either is news for the other.
@@ -27,7 +28,7 @@ regenerate it rather than editing above the notes line.  Counts:
 
 ## Open
 
-- **[#206](206-duplicate-filename-warning.md) — Warn about duplicate filename conflicts**  If you send a message to a recipient who already has a file with the same name in their inbox, the behavior is undefined — the message may fail silently, overwrite, or cause confusion.
+(none)
 
 <!-- notes: kept when regenerated -->
 
