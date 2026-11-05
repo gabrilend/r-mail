@@ -139,4 +139,50 @@ phone → own-mailbox (`sorelu`) send.
 
 ## Status
 
-Open.
+Built 2026-11-05: a message to oneself brings its attached files, filed
+as received attachments in-process, with no consent form.  The three
+separate problems listed above (unresolved `content://` URIs, garbled
+filenames from the Android client, hashed `from`/`to` values in consent
+state) are not part of this and stay open.
+
+## Decisions (2026-11-05)
+
+Made by the builder; the owner can overturn each.
+
+1. **In-process, not a loopback socket.**  A daemon answers nobody while
+   its own sync waits on a reply (the open "blocking sync cycle stalls
+   inbound" issue, and why the tests use a stand-in recipient), so it
+   cannot fetch pieces from itself.  The duplicated code path the
+   question feared is avoided by moving the receiver's last step --
+   unpack with the zip reader under the #310 limit, file each entry
+   without overwriting (#311), run `on_package` -- into
+   `upload.file_received`, which a contact's transfer and a message to
+   oneself both call.  What is skipped is only the wire: the file is
+   still packed, the checksum read back from the packed copy, and the
+   copy unpacked and filed exactly as a contact's would be, so it lands
+   where `/api/attachments` serves it to every own device.
+2. **No consent, by self-detection.**  A message to oneself never makes
+   an offer at all, so there is no form to answer and no flag on any
+   announcement.  It is the self-delivery branch of `sync_outbox` that
+   knows.
+3. **The hashed consent values are not touched.**  A message to oneself
+   never writes `consent-pending.json` or `consent-responses.json`, so it
+   neither depends on nor repairs them; that stays its own problem.
+4. **Every `attach:` line, and the body waits for them.**  As for a
+   contact, the body is held, with the outbox's `MISSING ATTACHMENT`
+   note, until every attached path exists (a file still uploading from
+   the phone, say); then the body goes, then the files, each answered
+   in the record (#312) as `complete`, or `cancelled` if it can never be
+   filed.  A path missing or changing at that moment is tried again next
+   pass, and an `attach:` line added after delivery is filed too.
+   Nothing answered is filed again.  (A `content://` URI never exists on
+   the server, so it now holds the message with a note rather than being
+   dropped silently -- as it would for a contact.)
+
+Tested by `scripts/test-attachments-to-self.sh` (11 cases): the body
+held until a missing file appears; a file staged under
+`attachments/.uploads/` (as the phone leaves it), a folder and a plain
+file filed byte for byte; no consent form; `on_package` run for each
+with the message's inbox file; the record answering each `complete`;
+nothing left in the pending folder; an added line filed; nothing filed
+twice.  Each was shown to catch a mutant of the code it covers.
