@@ -2,13 +2,15 @@
 --
 -- fake-contact.lua plays a contact *talking to* a daemon.  This plays one
 -- the daemon *talks to*: it listens on a port, answers every request at
--- once, and never dials anyone.  Two real daemons on one machine cannot be
--- relied on to talk both ways: a daemon answers no one while its own sync
--- waits on a reply (the open "blocking sync cycle stalls inbound" issue),
--- so two that have something to say to each other at the same moment both
--- stall, and on one machine they always do.  With this in the recipient's
--- place, the daemon under test sends, this answers, and the test speaks
--- for the recipient through fake-contact.lua (a consent answer, a cancel).
+-- once, and never dials anyone.  It was written when two real daemons on
+-- one machine could not be relied on to talk both ways: a daemon answered
+-- no one while its own sync waited on a reply, so two that had something
+-- to say to each other at the same moment both stalled (#120, built
+-- 2026-11-05; scripts/test-serve-while-syncing.sh now runs two real
+-- daemons).  It is still the simplest recipient to check: the daemon
+-- under test sends, this answers, and the test speaks for the recipient
+-- through fake-contact.lua (a consent answer, a cancel).  A <folder>/hold
+-- file makes it a slow recipient, to catch a daemon mid-wait.
 --
 -- Run as a program, in the background, with the same Lua as the daemon:
 --
