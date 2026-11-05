@@ -131,7 +131,9 @@ sensible to assume when it is left out.
 
 (A mailbox on a USB drive is the exception — it carries a trimmed copy of the
 program, because there is no checkout at the far end. See
-`scripts/make-mailbox-drive.sh`.)
+`scripts/make-mailbox-drive.sh`, which places a program that
+`scripts/generate-portable-mailbox.sh` builds for drives: its own Lua without
+readline, and a crypto module carrying its own OpenSSL.)
 
 To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templates/service.md).
 
