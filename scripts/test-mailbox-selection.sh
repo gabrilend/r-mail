@@ -65,7 +65,9 @@ mkdir -p "$WORK"
 # run's logs are cleared at the start (a previous run's must not be read as
 # this one's) and at the end (they must not be left beside the real ones).
 RAM_LOGS="/tmp/rmail-progress/log-tmp-rmail-tests-mailbox-selection-"
-rm -f "$RAM_LOGS"*
+# and the stored failures (#121), named the same way
+RAM_FAILURES="/tmp/rmail-progress/failures-tmp-rmail-tests-mailbox-selection-"
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 # --------------------------------------------------------------------------
 # make_mailbox <dir> <name> <port> [extra-config-line]
@@ -439,7 +441,7 @@ fi
 
 # --------------------------------------------------------------------------
 
-rm -f "$RAM_LOGS"*
+rm -f "$RAM_LOGS"* "$RAM_FAILURES"*
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
