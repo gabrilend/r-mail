@@ -108,10 +108,9 @@ This decouples layout from identity: a text box doesn't need to know
 where it is on screen, only what its tag is. Resize, reflow, and scroll
 can move cells freely — the tags stay attached.
 
-[TODO: implement tag-based batch update. E.g. `buffer:update_tag("selection",
-{ansi_on = "\27[7m"})` to reverse-video all selected cells in one call.
-Architecture is in place — cells have the tags field — but the query/update
-API is not yet built.]
+Built (#711): `renderer:update_tag("selection", {ansi_on = "\27[7m"})`
+reverse-videos every selected cell in one call, and
+`renderer:cells_tagged(tag)` finds them.
 
 ### Double buffer
 
@@ -371,7 +370,7 @@ everywhere — only `rmail_term.c` has platform-specific `#ifdef` blocks.
 ## Open items
 
 - [ ] Decide crypto bootstrap approach (OpenSSL CLI vs embedded C decryptor)
-- [ ] Implement tag-based batch update API (`buffer:update_tag()`)
+- [x] Implement tag-based batch update API (`buffer:update_tag()`) — `renderer.lua` (#711)
 - [ ] Snippet drawer UI (stretch goal)
-- [ ] Emoji width lookup table
+- [x] Emoji width lookup table — `wrap.lua` (#711)
 - [ ] Undo/redo system (stack of buffer diffs? or full snapshot per keystroke?)

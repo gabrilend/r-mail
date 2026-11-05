@@ -610,7 +610,16 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] #803 — Synced phone config (design phase)
 - [ ] #824 — Android script editor (depends on #803)
 - [ ] #707 — Periodics (depends on #803)
-- [ ] #711 — Thin client desktop viewer (design phase)
+- [ ] ~~#711 — Thin client desktop viewer (design phase)~~ — the terminal viewer is built; see below
+
+### Terminal viewer (#711)
+
+- [ ] `clients/linux/view.sh` on a thin client's mirror lists the inbox newest first; Enter opens a message, `q` goes back, `q` again quits and the terminal works normally afterwards (#711)
+- [ ] Resizing the terminal window while a message is open reflows it at the next key, and Ctrl-L redraws (#711)
+- [ ] A message that the client syncs in while the viewer is open shows in the list at the next key (#711)
+- [ ] Emoji and CJK text in a message line up: nothing overlaps or is cut in half at the right edge (#711)
+- [ ] On macOS (Terminal.app and iTerm2), `clients/macos/view.sh` draws, takes arrow keys, and gives the terminal back on quit (#711)
+- [ ] Opening a picture or other binary file in the viewer describes it rather than filling the screen with bytes (#711)
 
 ### Attachment pipeline audit (#307) — implemented 2026-09-22
 
