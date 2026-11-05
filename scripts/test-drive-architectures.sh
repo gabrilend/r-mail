@@ -30,6 +30,9 @@
 #   refused       two payloads for one kind; payloads that differ in more
 #                 than their compiled parts (named); an aarch64 payload
 #                 holding an x86-64 library (named)
+#   no readelf    on a machine without readelf, payloads are placed by
+#                 their ARCH files (the unchecked kind warned of), and one
+#                 with no ARCH file is refused
 #   again         --force over an older drive leaves none of its old
 #                 single-machine layout behind
 #
@@ -238,6 +241,32 @@ elif grep -q "the $OTHER payload holds binaries for another kind of machine: lib
     ok "an $OTHER payload holding a $HOST library is refused, naming it"
 else
     note_fail "refused, but not for that: $(tail -3 "$WORK/mixed.out" | tr '\n' ' ')"
+fi
+
+echo ""
+echo "no readelf"
+# a machine making drives without binutils: every command but readelf
+mkdir -p "$WORK/no-readelf"
+for f in /usr/local/bin/* /usr/bin/* /bin/*; do
+    n=${f##*/}
+    [ "$n" = readelf ] || [ -e "$WORK/no-readelf/$n" ] || ln -s "$f" "$WORK/no-readelf/$n" 2>/dev/null
+done
+P5="$WORK/payload-$OTHER-named"
+cp -R "$P2" "$P5"
+printf '%s\n' "$OTHER" > "$P5/ARCH"
+if PATH="$WORK/no-readelf" make_drive "$WORK/named" "$P1" "$P5" \
+   && [ -x "$WORK/named/mailbox-0/source-code/$OTHER/deps/lua/bin/lua" ] \
+   && grep -q "no readelf to check it with" "$WORK/named.out"; then
+    ok "with no readelf, payloads are placed by their ARCH files, and the unchecked kind is warned of"
+else
+    note_fail "with no readelf and ARCH files: $(tail -3 "$WORK/named.out" | tr '\n' ' ')"
+fi
+if PATH="$WORK/no-readelf" make_drive "$WORK/unnamed" "$P1" "$P2"; then
+    note_fail "a payload with no ARCH file was placed with nothing to tell its kind"
+elif grep -q "cannot tell which kind of machine" "$WORK/unnamed.out"; then
+    ok "and one with no ARCH file is refused: nothing can tell its kind"
+else
+    note_fail "refused, but not for that: $(tail -3 "$WORK/unnamed.out" | tr '\n' ' ')"
 fi
 
 echo ""
