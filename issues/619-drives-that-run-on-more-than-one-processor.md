@@ -193,6 +193,60 @@ fork and exec, and a filesystem, and a target without an operating
 system needs its own implementation rather than another build of this
 one.  macOS is a separate question — see #620.
 
+## Status
+
+Steps 4 to 7 built 2026-11-05, as far as they can be without a cross
+compiler (branch `claude/619-drives-per-architecture`, stacked on #617's
+`claude/617-portable-payload`).  `make-mailbox-drive.sh` takes `--payload`
+once per architecture and lays the drive out per architecture; the
+launchers choose by `uname -m`; each payload is checked before it ships;
+the drive's README and the summary name the kinds.  The generator writes
+`ARCH` into each payload.  Test: `scripts/test-drive-architectures.sh`
+(hand-made payloads: this machine's from the checkout, an aarch64 one of
+bare ELF headers, and a stand-in `uname`); `scripts/test-portable-payload.sh`
+updated for the new layout.
+
+Not done here: building a real aarch64 payload and running a drive on an
+ARM board (needs `gcc-aarch64-linux-gnu` and the hardware), luasocket's
+two modules for ARM (step "Proven", the one unproven piece), and the
+installer's drive-oriented OpenSSL (step 1's "worth taking").  32-bit
+targets stay a separate decision.
+
+## Decisions (2026-11-05)
+
+Made by the builder; the owner can overturn each.
+
+1. **Shared once, compiled per kind.**  `source-code/` holds `rmail.lua`,
+   `run-rmail.sh`, the plain-Lua libraries, the C sources, `LICENSE` and
+   `licenses/`; `source-code/<arch>/` holds that kind's `deps/lua/`, every
+   `.so` under its `libs/`, and its `BUILD-NOTES.txt` (each kind's notes
+   name its own compiler and target).  The split is by kind of file, so a
+   new plain-Lua library joins the shared part without anyone listing it.
+2. **What is shared must be the same in every payload.**  The drive maker
+   compares them and refuses a difference, naming the file: one checkout
+   for every kind, so no machine runs a different rmail from another.
+3. **The launchers assemble a flat copy.**  They already copy the program
+   to a temporary folder before running it (#409); now that copy is the
+   shared part plus this machine's part, laid out as the daemon expects, so
+   `rmail.lua` and `run-rmail.sh` are unchanged.
+4. **A payload says its kind in an `ARCH` file**, written by the
+   generator.  A payload made before that is placed by its interpreter's
+   machine as `readelf -h` reads it.
+5. **Checks before shipping (step 6):** this machine's kind by loading its
+   libraries with its own Lua, as before; every other kind by `readelf -h`
+   on its interpreter and every `.so`, which must name that kind's machine;
+   two payloads for one kind are refused.
+6. **Two messages at launch**, because they mean different things: no
+   program for this kind ("This drive: x86_64, aarch64 / This host:
+   riscv64"), and a program for this kind that does not load (most often a
+   32-bit system on a 64-bit board, so the message names the host's bits).
+7. **`--force` removes the old program** before placing the new one (never
+   mail), so an older single-machine drive keeps nothing of its flat
+   layout.
+8. **The names are `uname -m`'s, mapped as the generator maps them**
+   (`amd64` to `x86_64`, `arm64` to `aarch64`), so a folder name and the
+   generator's `--target` are the same word.
+
 ## Related
 
 - #102 — put the program on the drive in the first place, and added the

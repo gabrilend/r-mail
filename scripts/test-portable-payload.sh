@@ -234,6 +234,8 @@ grep -q "checked: the payload's Lua loads its libraries and round-trips an encry
 grep -q "for x86_64, with cc" "$P/BUILD-NOTES.txt" && grep -q "no-tls" "$P/BUILD-NOTES.txt" \
     && ok "BUILD-NOTES.txt names the target, the compiler and the flags" \
     || note_fail "BUILD-NOTES.txt does not say how it was built"
+[ "$(cat "$P/ARCH" 2>/dev/null)" = x86_64 ] && ok "ARCH names the target, for the drive maker (#619)" \
+    || note_fail "no ARCH file naming x86_64: $(cat "$P/ARCH" 2>/dev/null)"
 if LUA_PATH="$P/libs/?.lua;;" LUA_CPATH="$P/libs/?.so;;" "$P/deps/lua/bin/lua" \
      -e 'local c = require("rmail_crypto"); assert(c.aes_gcm_decrypt(string.rep("k",32), string.rep("n",12),
          c.aes_gcm_encrypt(string.rep("k",32), string.rep("n",12), "hi")) == "hi")' 2>/dev/null; then
@@ -317,8 +319,11 @@ else
     note_fail "make-mailbox-drive.sh failed: $(tail -4 "$WORK/drive.out" | tr '\n' ' ')"
 fi
 SC="$DEST/mailbox-0/source-code"
-if cmp -s "$SC/libs/rmail_crypto.so" "$P/libs/rmail_crypto.so" && cmp -s "$SC/deps/lua/bin/lua" "$P/deps/lua/bin/lua" \
-   && [ -s "$SC/licenses/openssl/LICENSE.txt" ] && cmp -s "$SC/BUILD-NOTES.txt" "$P/BUILD-NOTES.txt"; then
+# laid out per architecture (#619): the compiled part in source-code/x86_64/
+if cmp -s "$SC/x86_64/libs/rmail_crypto.so" "$P/libs/rmail_crypto.so" \
+   && cmp -s "$SC/x86_64/deps/lua/bin/lua" "$P/deps/lua/bin/lua" \
+   && cmp -s "$SC/rmail.lua" "$P/rmail.lua" \
+   && [ -s "$SC/licenses/openssl/LICENSE.txt" ] && cmp -s "$SC/x86_64/BUILD-NOTES.txt" "$P/BUILD-NOTES.txt"; then
     ok "source-code/ is the payload, byte for byte, licences and build notes included"
 else
     note_fail "source-code/ is not the payload: $(ls "$SC" 2>/dev/null | tr '\n' ' ')"

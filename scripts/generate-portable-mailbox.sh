@@ -28,7 +28,8 @@
 #   5  rmail     rmail_crypto.so with OpenSSL linked in (checked to need no
 #                libcrypto from a host), rmail_inotify.so
 #   6  payload   laid out as a drive's source-code/ folder, with each
-#                dependency's licence and BUILD-NOTES.txt; checked: on this
+#                dependency's licence, BUILD-NOTES.txt and ARCH (the
+#                target, for make-mailbox-drive.sh); checked: on this
 #                machine's own architecture the built Lua loads the built
 #                libraries and round-trips an encryption, on another every
 #                binary is checked to be for the architecture asked for
@@ -390,6 +391,10 @@ for name in lua openssl luasocket; do
     fi
 done
 
+# which kind of machine this is for, read by make-mailbox-drive.sh to
+# place it in the drive's source-code/<arch>/ (#619)
+echo "$TARGET" > "$PAYLOAD/ARCH"
+
 cat > "$PAYLOAD/BUILD-NOTES.txt" <<NOTES
 How the compiled parts of this program were built
 =================================================
@@ -473,3 +478,4 @@ for bin in deps/lua/bin/lua libs/rmail_crypto.so libs/socket/core.so; do
     info "  $(du -h "$PAYLOAD/$bin" | cut -f1)	$bin"
 done
 info "place it on a drive with: scripts/make-mailbox-drive.sh --payload $PAYLOAD ..."
+info "  (give --payload once for each kind of machine the drive should run on)"

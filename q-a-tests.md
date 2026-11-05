@@ -574,6 +574,9 @@ The installer and migration rows are not — they need a real run.
 - [ ] `licenses/` on a drive holds Lua's, OpenSSL's and luasocket's licence files, taken from the sources that were built (#617)
 - [ ] A drive daemon logs "AES-256-GCM encryption enabled" and completes a send, proving the static crypto works and not merely links (#102)
 - [ ] A drive carries no `liblua.a`, no `luac`, and no Lua man pages — none are used at runtime (#102)
+- [x] One drive from an x86_64 and an aarch64 payload: shared files once, each kind's compiled part in `source-code/<arch>/`; the launcher runs this machine's part; on another kind it names the kinds the drive holds; two payloads for one kind, payloads that differ outside their compiled parts, and a payload holding another kind's binary are refused (harness, #619)
+- [ ] A drive made with real x86_64 and aarch64 payloads runs on a laptop and on a Raspberry Pi 4 or 5 with a 64-bit system, unchanged (#619)
+- [ ] The same drive on a Raspberry Pi with a 32-bit system says its aarch64 program does not run there, naming 32-bit (#619)
 
 ### Recipients the daemon cannot resolve
 Also covered by `scripts/test-mailbox-selection.sh`.
