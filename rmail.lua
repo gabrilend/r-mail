@@ -181,6 +181,10 @@ local cfg = {
     -- laptop asleep overnight is not news, short enough that a contact
     -- gone for good is noticed by somebody other than the log.
     cannot_reach_after = tonumber(config.cannot_reach_notice_after) or 86400,
+    -- #419: seconds the main loop's wait may overrun by the wall clock
+    -- before the daemon takes it that the machine slept, and checks its
+    -- address and announces itself again on waking
+    wake_gap          = tonumber(config.wake_gap) or 60,
     -- Where to mirror the log.  stderr always goes to whoever started the
     -- daemon -- journald under systemd, a terminal when run by hand -- and
     -- that copy is not optional.  This is the *second* copy, a plain file
@@ -9288,6 +9292,50 @@ function addrchk.run(rt)
     end
 end
 
+-- Owe every contact an announcement of where we are -- the start-up
+-- ping (#115 requirement 1), and the same again on waking (#419).  It
+-- queues the owed file a detected IP change writes (#409), so it travels
+-- as an ordinary /update-address op through the ordinary sync cycle, and
+-- arriving at the contact it resets *their* timer for us to due-now
+-- (ctimer.saw_inbound): a contact backed off to two hours delivers on
+-- its next loop pass.  Contacts stored under a hostname are unaffected:
+-- the receiving end keeps a hostname against an address update.
+function addrchk.announce(rt, why)
+    local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
+    if not my_public or my_public == "" then return end
+    local contacts = load_contacts()
+    addrset.owed()   -- an older rmail's pending-address.json, moved first
+    local n = 0
+    for name, c in pairs(contacts) do
+        if name ~= rt.my_name and c.ip and not contactfile.listens(c) then  -- #420
+            addrset.owe(name, {ip = my_public, port = rt.port})
+            n = n + 1
+        end
+    end
+    if n > 0 then log("%s: announcing %s:%d to %d contact(s)", why, my_public, rt.port, n) end
+end
+
+-- #419: the machine slept.  A suspended host is unreachable, so contacts
+-- that tried us meanwhile have backed off, and resume is when a
+-- residential lease is renewed, so our address may have moved.  On
+-- waking: check our address first (the announcement is only worth
+-- sending if it carries the current one), then announce to every
+-- contact, and make every contact due now so the announcements go on
+-- the next pass.  Noticed in the main loop as a select() that returned
+-- far later by the wall clock than it was asked to wait: the monotonic
+-- clock select() waits on stops while the machine is suspended, and the
+-- wall clock does not.  A clock stepped forward reads the same way; the
+-- cost of that is one announcement nobody needed.
+function addrchk.woke(rt, asleep)
+    log("woke after about %ds asleep (#419): checking our address and announcing to every contact",
+        math.floor(asleep))
+    pcall(addrchk.run, rt)
+    pcall(addrchk.announce, rt, "after waking")
+    for name in pairs(load_contacts()) do
+        if name ~= rt.my_name then ctimer.get(name).next_due = 0 end
+    end
+end
+
 local function init_runtime()
     os.execute('mkdir -p "' .. INBOX .. '" "' .. OUTBOX .. '" "' .. STATE .. '" "' ..
                paths.attachments .. '" "' .. paths.pending .. '" "' .. paths.uploads .. '"')
@@ -9510,20 +9558,7 @@ local function init_runtime()
     -- Contacts stored under a hostname are unaffected by design: the
     -- receiving end preserves a hostname against an address update, because
     -- re-resolution already handles our IP churn.
-    pcall(function()
-        local my_public = (read_file(STATE .. "/public_ip") or ""):match("^%s*(.-)%s*$")
-        if not my_public or my_public == "" then return end
-        local contacts = load_contacts()
-        addrset.owed()   -- an older rmail's pending-address.json, moved first
-        local n = 0
-        for name, c in pairs(contacts) do
-            if name ~= rt.my_name and c.ip and not contactfile.listens(c) then  -- #420
-                addrset.owe(name, {ip = my_public, port = rt.port})
-                n = n + 1
-            end
-        end
-        if n > 0 then log("startup: announcing %s:%d to %d contact(s)", my_public, rt.port, n) end
-    end)
+    pcall(addrchk.announce, rt, "startup")
 
     -- Seed a timer for every contact
     -- with next_due in the past, so the first cycle after boot contacts
@@ -9729,6 +9764,10 @@ local function main()
             #recvt > 0 and recvt or nil,
             #sendt > 0 and sendt or nil,
             sleep_for)
+        -- #419: asked to wait sleep_for, but the wall clock says much
+        -- longer: the machine was asleep
+        local waited = socket.gettime() - now_s
+        if waited > sleep_for + cfg.wake_gap then addrchk.woke(rt, waited - sleep_for) end
 
         -- Handle readable sockets
         local outbox_changed = false
