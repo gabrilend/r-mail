@@ -679,3 +679,11 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Setup: Public/Local switch; LAN scan result sets Local
 - [ ] Outbox → open a message → Back returns to Outbox; Inbox → open → Back returns to Inbox
 
+
+### Wire padding (#901) — 2026-11-05
+
+- [x] Between two daemons that read padding every frame is a power of two plus 32 bytes on the wire; two short messages of different lengths are the same size; a big one gets 16 KiB and no more; bodies arrive byte for byte (harness)
+- [x] An older caller (no padding, no `Rmail-Pad` line) is answered unpadded; the line alone gets a padded answer; the busy answer is padded the same way (harness)
+- [x] Contacts that read padding are noted in `.state/wire-padding.json` and the note survives a restart; one that goes back to an older daemon is forgotten and the message is sent again unpadded (harness)
+- [ ] Two real mailboxes on two machines, both up to date: a capture (`tcpdump -X port <port>`) shows only power-of-two-plus-32 frame sizes after the first exchange
+- [ ] The phone app and the thin client still send, receive and sync with an up-to-date daemon

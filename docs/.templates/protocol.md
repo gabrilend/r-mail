@@ -48,6 +48,36 @@ caller.  JSON bodies use `Content-Type: application/json`.
 
 Limits: a frame is 28 bytes to 64 MiB; a request body over 50 MB is refused.
 
+### Padding (#901)
+
+A daemon adds `Rmail-Pad: 1` to every request it sends, meaning "I read
+padded frames".  Between two daemons that do, the plaintext above is
+padded before it is sealed:
+
+```
+[4 bytes: big-endian length of the plaintext]
+[the plaintext]
+[random bytes]
+```
+
+to `max(64, the next power of two of 4 + length)`, but never more than
+16384 bytes past `4 + length`.  Only plaintexts under 16 MiB are padded,
+so a padded one always starts with a 0 byte; an unpadded one starts with
+a letter.  A receiver takes a plaintext as padded when its first byte is
+0 and the length fits inside it.
+
+When to pad:
+
+- an **answer** is padded when its request was padded or carried the line;
+- a **request** is padded only to a contact known to read padding (it sent
+  a padded answer, or a request carrying the line), noted in
+  `.state/wire-padding.json`;
+- a padded request answered unpadded came from an older daemon: the
+  contact is forgotten and the request sent again unpadded.
+
+Programs that never send the line (the phone app, the thin client, a web
+page) get unpadded answers, as before.
+
 ### A frame sent from a web page
 
 A web page cannot put bare bytes on a connection: the browser always

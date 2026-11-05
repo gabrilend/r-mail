@@ -62,10 +62,19 @@ end
 -- Errors, rather than returning nil, when the daemon cannot be reached or
 -- its answer cannot be decrypted: every caller is a test, and a test that
 -- silently got nothing would pass for the wrong reason.
-function M:request(method, path, body)
-    body = body or ""
+--
+-- `how`, optional, speaks the padded framing of #901 the way a newer
+-- daemon would: how.ask adds the `Rmail-Pad: 1` line, how.pad pads the
+-- request.  After every call self.last says what the wire carried:
+-- {sent = request frame bytes, got = answer frame bytes, padded = whether
+-- the answer was padded}.  Padding is written here from the issue, not
+-- borrowed from the daemon, so a test of it checks the format itself.
+function M:request(method, path, body, how)
+    body, how = body or "", how or {}
     local text = method .. " " .. path .. " HTTP/1.1\r\n" ..
-                 "Content-Length: " .. #body .. "\r\n\r\n" .. body
+                 "Content-Length: " .. #body .. "\r\n" ..
+                 (how.ask and "Rmail-Pad: 1\r\n" or "") .. "\r\n" .. body
+    if how.pad then text = M.pad(self.crypto, text) end
     local nonce = self.crypto.random_bytes(12)
     local sealed = self.crypto.aes_gcm_encrypt(self.key, nonce, text)
     local conn = assert(self.socket.tcp())
@@ -78,10 +87,46 @@ function M:request(method, path, body)
     conn:close()
     local plain = self.crypto.aes_gcm_decrypt(self.key, packet:sub(1, 12), packet:sub(13))
     if not plain then error("fake-contact: the daemon's answer did not decrypt") end
+    local padded
+    plain, padded = M.unpad(plain)
+    self.last = {sent = 4 + 12 + #sealed, got = 4 + #packet, padded = padded}
     local status = tonumber(plain:match("^HTTP/%S+ (%d+)"))
     local head_end = plain:find("\r\n\r\n", 1, true)
     if not status or not head_end then error("fake-contact: unreadable answer: " .. plain:sub(1, 80)) end
     return status, plain:sub(head_end + 4)
+end
+-- }}}
+
+-- {{{ function M.pad_size
+-- #901: what a plaintext of n bytes is padded to, its 4-byte length
+-- included: the next power of two, at least 64, at most 16 KiB more.
+function M.pad_size(n)
+    local target = 64
+    while target < 4 + n do target = target * 2 end
+    return math.min(target, 4 + n + 16384)
+end
+-- }}}
+
+-- {{{ function M.pad
+function M.pad(crypto, text)
+    local parts, owed = {uint32_be(#text), text}, M.pad_size(#text) - 4 - #text
+    while owed > 0 do
+        local take = math.min(owed, 4096)
+        parts[#parts + 1] = crypto.random_bytes(take)
+        owed = owed - take
+    end
+    return table.concat(parts)
+end
+-- }}}
+
+-- {{{ function M.unpad
+-- (inner, true) for a padded plaintext, (it, false) for an old one.
+function M.unpad(plain)
+    if #plain < 4 or plain:byte(1) ~= 0 then return plain, false end
+    local a, b, c, d = plain:byte(1, 4)
+    local n = a * 16777216 + b * 65536 + c * 256 + d
+    if 4 + n > #plain then return plain, false end
+    return plain:sub(5, 4 + n), true
 end
 -- }}}
 
