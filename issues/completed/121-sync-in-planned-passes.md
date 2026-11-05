@@ -226,6 +226,8 @@ sync at once.
    decided against.  #118 proposes collapsing repeated lines everywhere
    (for instance a contact that stays unreachable for a week), with
    options that keep every timestamp.
+   *Answered 2026-11-05 in #118 (decision 3): yes, and #118 keeps every
+   repeat's time while writing the text once.*
 
 Resolved:
 

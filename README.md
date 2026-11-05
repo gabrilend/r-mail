@@ -154,6 +154,7 @@ The generated config file contains a comment above most keys explaining what it 
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
+- `log_coalesce` — a log line that comes again within this many seconds is not written each time: its repeats go out together, a few minutes later, as one line that gives the time of every repeat, like `(repeated x9: 10:00:30 +30 +30 …) timeout connecting to …` (default: 300; `false` or `0` writes every line as it comes).
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
