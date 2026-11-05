@@ -240,8 +240,8 @@ it passes messages longer than the target through unchanged — for long
 messages it's a no-op, and the plaintext size still leaks.  Between two
 up-to-date daemons rmail already pads every frame to a power of two (#901,
 above), which covers short messages without any hook; this one is for a
-fixed size you choose.  For long messages see #902 (body-as-attachment
-padding).
+fixed size you choose.  For long messages, and for sizes hidden more
+coarsely still, see the next section.
 
 ```sh
 #!/bin/sh
@@ -271,6 +271,76 @@ echo "$3" | sed '/^---padding---$/,$d'
 edits (updates), so an edited message arrives with its padding in it.  An
 `on_update` hook with the same `sed` line strips it there (`$3` is the new
 body; its stdout replaces it).
+
+### Sending the body as a padded attachment (#902)
+
+Padding inside the frame (above) hides a message's size to a power of two.
+To hide it more coarsely — so a 10-byte note and a 3 KB letter look the
+same on the wire — send the words as an attachment padded to whole pieces.
+Attachments go out in pieces of `attachment_chunk_size` (5 MiB unless your
+config says otherwise), each the same size on the wire, so the only thing
+an observer can count is the number of pieces.
+
+**Sending.**  Write the message as a draft anywhere outside the outbox, the
+way you would write an outbox file (`to:` lines, a blank line, the words),
+and run:
+
+```sh
+/home/you/programs/email/helpers/rpad.sh /home/you/mail ~/drafts/the-message
+```
+
+`rpad.sh` writes the words into
+`/home/you/mail/padded/the-message/message.padded-body`, followed by the line
+
+```
+-------------------------------------------------------------------------------
+    end of encrypted message. what follows is random data with no meaning.
+-------------------------------------------------------------------------------
+```
+
+and random bytes, up to whole pieces less 4 KiB (room for the zip's own
+headers, so the attachment still fills the same pieces).  Then it writes
+`outbox/the-message` with your `to:` lines, an `attach:` line for that file,
+and a short body that is the same for every padded message.  Every padded
+message is the same size on the wire until its words outgrow a piece:
+the same body, an offer of the same file name and size, and the same
+number of pieces.  Keep `padded/the-message/` until every recipient has
+the file; a big one is sent from where it lies.
+
+**Receiving.**  Your contact needs two hooks, or they see the short body
+and a file of noise.  `on_consent` accepts the padded file without asking
+(up to 64 MiB; a larger one waits for them as usual):
+
+```sh
+#!/bin/sh
+# on_consent hook (#902): $1 sender, $2 file name, $3 form, $4 message, $5 size
+case "$2" in
+    message.padded-body) [ "${5:-0}" -le 67108864 ] && echo accept ;;
+esac
+exit 0
+```
+
+and `on_package` puts the words back into the message once the file has
+arrived, and removes the file:
+
+```sh
+#!/bin/sh
+# on_package hook (#902): $1 sender, $2 file name, $3 saved file, $4 message
+case "$2" in
+    message.padded-body) /home/you/programs/email/helpers/runpad.sh "$3" "$4" ;;
+esac
+exit 0
+```
+
+If they already have hooks of those names, add the `case` lines to them.
+`runpad.sh` cuts at the *last* marker, so a message that quotes the marker
+keeps every word.  Until the file arrives, the inbox holds the short body.
+
+What this does not hide: when you send, how many pieces go (one for
+anything up to about 5 MiB of words), and that it is a padded message —
+the file name and the short body are the same every time, which is the
+point, but they mark it as one.  Both sides set it up by hand; if the
+receiver has no hooks it does not fail loudly, it just leaves noise.
 
 ### IP address hiding
 

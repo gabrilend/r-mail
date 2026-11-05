@@ -182,3 +182,40 @@ helpers/filename.sh /home/ritz/mail/inbox/hello-world
 ```
 
 Strips the directory, returning only the final path component.
+
+---
+
+## rpad.sh — send a message's words as a padded attachment (#902)
+
+```
+helpers/rpad.sh <mailbox> <draft> [<name>]
+```
+
+Reads a draft written like an outbox file (`to:` lines, a blank line, the
+words), writes the words into `<mailbox>/padded/<name>/message.padded-body`
+padded with random bytes to whole attachment pieces, and writes
+`outbox/<name>` with the draft's header lines, an `attach:` line for that
+file and a short body that is the same for every padded message.  `<name>`
+is the draft's own name unless given.  Refuses a draft with no `to:` line
+and a name already in the outbox.
+
+```sh
+helpers/rpad.sh ~/mail ~/drafts/for-alice
+```
+
+The receiver needs the `on_consent` and `on_package` hooks in the
+[encryption guide](encryption.md#sending-the-body-as-a-padded-attachment-902).
+
+---
+
+## runpad.sh — put a padded attachment's words back into its message (#902)
+
+```
+helpers/runpad.sh <padded-file> <inbox-file>
+```
+
+The receiving half of `rpad.sh`, called from `on_package` with its `$3` and
+`$4`.  Writes everything before the last end-of-message marker into the
+inbox file, in place, and removes the padded file.  Exits 1 and changes
+nothing when the file has no whole marker.  With an empty `<inbox-file>`
+(the message was deleted first) the words go to `<padded-file>.txt`.

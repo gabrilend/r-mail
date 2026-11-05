@@ -160,4 +160,47 @@ fixed-size padding trailer."*
 
 ## Status
 
-Open.
+Built 2026-11-05 as the issue's option 1, a hook recipe, waiting for the
+owner's checks.  `helpers/rpad.sh` (sending) and `helpers/runpad.sh`
+(receiving, from `on_package`), and the two hooks in
+`docs/.templates/encryption.md`, "Sending the body as a padded
+attachment".  No daemon change.  Test: `scripts/test-padded-body.sh`,
+which takes the hooks from the guide itself.  Stacked on #901.
+
+## Decisions (2026-11-05)
+
+Made by the builder; the owner can overturn each.
+
+1. **A helper the owner runs, not an `on_send` hook.**  `on_send` runs per
+   recipient at send time and can only replace the body; by then the
+   attachments are already planned, so it cannot add one.  So the sending
+   half is `rpad.sh <mailbox> <draft>`: the owner writes the message as a
+   draft outside the outbox (where the daemon would send it at once) and
+   rpad writes the outbox file, moved in whole.  The receiving half is
+   hooks, as the issue asks: `on_consent` (#216) accepts the padded file
+   and `on_package` (#216's `$4`) puts the words back.
+2. **A fixed file name, `message.padded-body`, in `padded/<name>/`.**  The
+   zip's headers hold the name twice, so a name that changed with the
+   message would change the attachment's size by its length.  With one
+   name, every padded message's zip is the same size until it outgrows a
+   piece (61594 bytes for 64 KiB pieces in the test).  The folder is in
+   the mailbox, not /tmp: a big file is sent from where it lies (#317).
+3. **Padded to whole pieces less 4 KiB,** not to whole pieces: the zip
+   adds its headers (about 150 bytes), and a file of exactly whole pieces
+   would spill a tiny extra piece.  The last piece is then always the same
+   size.  Pieces smaller than 16 KiB keep a quarter of a piece instead.
+4. **Raw random bytes after the marker** (the issue's "probably raw
+   bytes"), and the receiver cuts at the **last** marker, so a message
+   that quotes the marker keeps every word; random bytes never spell it.
+   The marker is written on its own lines after a newline that is part of
+   the marker, so a message with no last newline comes back exactly.
+5. **The words go back into the inbox file in place** (same file, same
+   name), so the inbox record, the phone and reply/forward all see the
+   message as written.  Until the file arrives the inbox holds the fixed
+   short body, which says what is happening and where to look if the hooks
+   are missing.  With no inbox file the words go beside the padded file.
+6. **`on_consent` accepts only up to 64 MiB.**  The file name is no secret,
+   so any contact could use it to skip the consent form; a cap keeps that
+   from being a way to push large files unasked.  Larger ones wait for the
+   owner as usual.
+7. **No daemon config flag** (option 2), as the issue prefers for now.

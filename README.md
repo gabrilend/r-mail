@@ -444,6 +444,8 @@ that phase's work, with what came out and how long it took.
 
 Newest first. Each entry is the date, then what changed, in plain words.
 
+- **2026-11-05 →** A message can be sent with its words in a padded attachment, so a short note and a long letter look the same on the wire (#902). `helpers/rpad.sh` turns a draft into an outbox message with a fixed short body and the words in a file padded to whole attachment pieces; the receiver's `on_consent` and `on_package` hooks, given in the encryption guide, accept the file and put the words back with `helpers/runpad.sh`. Both sides set it up by hand.
+
 - **2026-11-05 →** Messages between two up-to-date mailboxes are padded inside the encryption, so someone watching the network sees only a rough size: "ok" and "see you at 3pm" are the same length on the wire (#901). Each daemon says inside every request that it reads padding, and pads only to contacts that have shown they do, so older mailboxes, the phone and the thin client keep working unchanged. The contacts known to read padding are listed in `.state/wire-padding.json`.
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.

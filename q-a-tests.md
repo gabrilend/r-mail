@@ -687,3 +687,12 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [x] Contacts that read padding are noted in `.state/wire-padding.json` and the note survives a restart; one that goes back to an older daemon is forgotten and the message is sent again unpadded (harness)
 - [ ] Two real mailboxes on two machines, both up to date: a capture (`tcpdump -X port <port>`) shows only power-of-two-plus-32 frame sizes after the first exchange
 - [ ] The phone app and the thin client still send, receive and sync with an up-to-date daemon
+
+### Body as a padded attachment (#902) — 2026-11-05
+
+- [x] `rpad.sh` keeps the draft's `to:`/`attach:` lines, attaches `padded/<name>/message.padded-body` and writes the fixed body; 10 and 3000 bytes of words give the same file size (one piece less 4 KiB), 70000 bytes two pieces less 4 KiB (harness)
+- [x] `runpad.sh` gives the words back byte for byte (no last newline, binary, quoting the marker), and changes nothing for a file with no whole marker (harness)
+- [x] The guide's `on_consent` hook accepts the padded file with no one at the machine (one over 64 MiB waits), and its `on_package` hook puts the words into the message and removes the file (harness)
+- [x] Two padded messages of different lengths sent to a contact are the same size on the wire: message, offer and piece (harness)
+- [ ] Two real mailboxes: alice writes a draft, runs `rpad.sh`, bob (with the two hooks) reads the words in his inbox; reply and forward quote the words, not the short body
+- [ ] The phone shows the words once they are back in place
