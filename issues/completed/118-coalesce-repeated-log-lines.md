@@ -307,6 +307,11 @@ setting (the 9 held repeats written before the closing line).  Both the
 stderr copy and the file are checked.  Breaking the holding, the `--once`
 flush, or matching only the line before each fails it.
 
+`scripts/test-listen-only-contact.sh` counts one log line per refusal, and
+two of its refusals log the same words; it stops the daemon by signal
+before a held repeat would be written, so it sets `log_coalesce = false`.
+Every other test passes unchanged.
+
 ## Decisions (2026-11-05, the owner can overturn any of these)
 
 1. **Built, after measuring** (the crux).  The flood is gone at its
