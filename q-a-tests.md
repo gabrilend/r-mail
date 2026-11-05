@@ -357,7 +357,9 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [x] A `website` request keeps no file of that name, saves its note under the arrival time, and offers the whole folder (harness: scripts/test-website-request.sh)
 - [x] A second request while the offer waits, or after the same version arrived, makes no offer and one log line (harness)
 - [x] A changed folder is offered again under a new name and the old offer goes; a listen-only contact is offered nothing (harness)
-- [ ] Two real mailboxes: one asks the other for its website, accepts the consent form, and opens the site's pages from the attachments folder
+- [x] A website that arrives lands in attachments/websites/<contact>/, the old copy moved into RAM, information pages beside non-page files (harness: scripts/test-website-received.sh)
+- [ ] Two real mailboxes: one asks the other for its website, accepts the consent form, and opens the site's pages from attachments/websites/<contact>/
+- [ ] An information page in Firefox, Chrome and a phone browser: the boxes look like ads, each opens its Wikipedia article, "Open this file" opens the file
 - [ ] A site of several GB: the offer's size matches the consent form's, and asking again while it transfers makes no second offer
 
 ### A message published as a link: `to: url` (#714) — 2026-11-05

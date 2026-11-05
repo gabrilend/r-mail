@@ -64,7 +64,6 @@ encrypted to only my peers."
 
 ## Status
 
-Open.  715a's sending side is built (2026-11-05) and its two open
-questions are answered there; its receiving side and information pages
-are not.  715b is still being designed (how a stranger's answer can be
+Open.  715a is built, both sides (2026-11-05), and its two open
+questions are answered there.  715b is still being designed (how a stranger's answer can be
 trusted); 715c is deferred by the owner.

@@ -4,9 +4,9 @@ Sub-issue of #715.
 
 ## Current Behavior
 
-*Built in part, 2026-11-05 (see Status):* the config keys, the request,
-the offer and the guard.  Not built: the receiving side (one site per
-contact) and the information pages.
+*Built, 2026-11-05 (see Status):* the config keys, the request, the
+offer and the guard; and on the receiving side, one site per contact
+with the old copy moved into RAM, and the information pages.
 
 Built 2026-10-13 and relied on here: an arriving message never writes over
 a file already in the inbox; a taken name moves the newcomer to the next
@@ -162,7 +162,8 @@ file, an information page that a link to it is pointed at instead:
 
 ## Status
 
-Open: the sending side is built (2026-11-05, branch
+Built, waiting for the owner's checks in `q-a-tests.md`.  The sending
+side first (2026-11-05, branch
 `claude/715a-website-on-request`, stacked on #714's branch only to keep
 the two changes to `rmail.lua` from colliding; it needs nothing of #714).
 
@@ -180,8 +181,18 @@ Built:
   refused request one log line with its reason.
 - Test: `scripts/test-website-request.sh`.
 
-Not built: steps 4 and 5 below (the receiving side, the information
-pages).
+Built in a second slice (2026-11-05, branch
+`claude/715a-website-received`, stacked on the first):
+- The attachment of a message whose name starts `website-for-` is a
+  contact's website when it is a folder.  It is kept at
+  `<attachments>/websites/<contact>/`; the copy it replaces is moved into
+  the daemon's RAM folder, `/tmp/rmail-progress/old-websites/`, named
+  after the mailbox, the contact and the time, and the log says where.
+- Beside every file that is not part of a page, `<file>.info.html`: name,
+  size, kind, date modified, SHA-256, an "Open this file" link and the
+  ad-shaped boxes, each a Wikipedia article.  Plain HTML and CSS, no
+  script.
+- Test: `scripts/test-website-received.sh`.
 
 ## Decisions (2026-11-05)
 
@@ -194,8 +205,7 @@ Made while building, to be overturned by the owner's word:
 - **Open question 2, the information pages: beside the files, the owner's
   pages untouched.**  The zip stays the owner's site byte for byte, and
   rewriting links means parsing HTML, which breaks on hand-written pages.
-  The owner links to `<file>.info.html` where they want the warning.  Not
-  built in this slice.
+  The owner links to `<file>.info.html` where they want the warning.
 - **The fingerprint is over each file's path, size and modification time,
   not its contents.**  Hashing a 15 GB site at every request would let a
   contact make this machine read 15 GB for a few bytes, which is what the
@@ -218,3 +228,32 @@ Made while building, to be overturned by the owner's word:
   do not run on it.
 - No datapath document: `docs/` has none to follow yet; the feature is
   described in `docs/.templates/attachments.md` and the README.
+- **The information pages are written by the receiving daemon, on
+  arrival**, not packed into the zip by the sender.  The zip stays the
+  owner's folder byte for byte (so the fingerprint and the consent
+  form's size are honest), the sender never stages a copy of a large
+  site, and the checksum on the page is of the file the reader actually
+  holds.  A file that already has an `.info.html` beside it (the author
+  wrote their own) is left alone.
+- **Which files get one**: everything but the parts a page loads by
+  itself (`html htm xhtml css js mjs`, the picture formats `png jpg jpeg
+  gif webp avif svg ico bmp`, and fonts).  A picture is shown by the page
+  anyway; a zip, a video or a program is what a link should not open
+  unannounced.
+- **The ad boxes** read "CLICK ME, I'M AN AD" and a few other ad-like
+  lines, each naming its Wikipedia article in small print under it, so
+  the joke is visible and nothing pretends to be what it is not.
+- **How a website is recognised on arrival**: a folder attached to a
+  message whose name starts `website-for-`.  Any contact could name a
+  message so; the result only files that contact's own folder under
+  `websites/<them>/` and replaces their own previous one.  A single file
+  with such a message is an ordinary attachment.
+- **The RAM folder** is the daemon's one RAM folder, `/tmp/rmail-progress`
+  (where its log and progress files already go).  The `/dev/shm` tier
+  the issue mentions does not exist in the daemon yet; when it does, the
+  old copies follow it.  An old copy bigger than the RAM folder's free
+  space is removed instead, with a log line, rather than let fill the
+  machine's memory.
+- **The website keeps its name `websites/<contact>`** whatever the
+  author called the folder, so a reader always finds a contact's site
+  in the same place.

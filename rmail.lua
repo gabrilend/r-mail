@@ -5153,6 +5153,171 @@ function website.note_complete(transfer)
 end
 -- }}}
 
+-- ---- The receiving side: one website per contact (#715a) ----------------
+--
+-- An attachment that comes with a message called `website-for-...` is a
+-- contact's website.  It is kept at <attachments>/websites/<contact>/,
+-- one per contact: the owner (2026-10-13), "it's one website per contact.
+-- So they wouldn't request if they didn't want to overwrite. Maybe we can
+-- move the old version to RAM?"  The copy it replaces is moved into the
+-- daemon's RAM folder rather than deleted, to be looked at until the
+-- machine restarts.  Beside every file that is not part of a page, an
+-- information page is written (website.info_pages).
+
+function website.is_offer(message_name)
+    local leaf = (message_name or ""):match("([^/]+)$") or ""
+    return leaf:match("^website%-for%-") ~= nil
+end
+
+-- os.execute's success: true on Lua 5.4, 0 on LuaJIT
+function website.ran(r) return r == true or r == 0 end
+
+-- {{{ website.received(sender, path) -> where the site now is, or nil
+-- `path` is the folder just filed in the attachments folder.
+function website.received(sender, path)
+    local who = sanitize_filename(sender)
+    local home = paths.attachments .. "/websites"
+    local dest = home .. "/" .. who
+    os.execute("mkdir -p " .. shell_quote(home))
+    if path_state(dest) ~= "absent" then
+        local ram = TMPFS_PROGRESS_DIR .. "/old-websites"
+        os.execute("mkdir -p " .. shell_quote(ram))
+        local base = ram .. "/" .. MAIL:gsub("^/", ""):gsub("/", "-") .. "-" .. who .. "-" ..
+            os.date("%Y-%m-%d-%H-%M-%S")
+        local old, n = base, 2
+        while path_state(old) ~= "absent" do old = base .. "-" .. n; n = n + 1 end
+        -- RAM is small: a copy that does not fit is removed, not let
+        -- fill the machine's memory
+        local size, avail = measure_size(dest) or 0, check_disk_space(ram)
+        if avail and size >= avail then
+            os.execute("rm -rf " .. shell_quote(dest))
+            log("website from %s: the previous copy (%s) did not fit in RAM (%s free) and was removed",
+                sender, fmt_bytes(size), fmt_bytes(avail))
+        elseif website.ran(os.execute("mv " .. shell_quote(dest) .. " " .. shell_quote(old))) then
+            log("website from %s: the previous copy moved to %s, kept until the machine restarts",
+                sender, old)
+        else
+            log("website from %s: the previous copy could not be moved; the new one stays at %s",
+                sender, path)
+            return nil
+        end
+    end
+    if not website.ran(os.execute("mv " .. shell_quote(path) .. " " .. shell_quote(dest))) then
+        log("website from %s: could not be moved to %s; it stays at %s", sender, dest, path)
+        return nil
+    end
+    local pages = website.info_pages(dest)
+    log("website from %s saved at %s (%d information page%s)", sender, dest, pages, pages == 1 and "" or "s")
+    return dest
+end
+-- }}}
+
+-- The files a page shows or uses as it loads: these get no information
+-- page.  Everything else -- a zip, a video, a program -- does.
+website.PAGE_PARTS = {}
+for ext in ("html htm xhtml css js mjs png jpg jpeg gif webp avif svg ico bmp woff woff2 ttf otf")
+        :gmatch("%S+") do
+    website.PAGE_PARTS[ext] = true
+end
+
+website.KINDS = {
+    zip = "a zip archive", tar = "a tar archive", gz = "a compressed file", xz = "a compressed file",
+    ["7z"] = "a 7-Zip archive", rar = "a RAR archive", mp4 = "a video", mkv = "a video",
+    webm = "a video", mov = "a video", avi = "a video", mp3 = "a sound file", ogg = "a sound file",
+    flac = "a sound file", wav = "a sound file", m4a = "a sound file", pdf = "a PDF document",
+    txt = "a text file", md = "a text file", exe = "a Windows program", msi = "a Windows installer",
+    apk = "an Android app", dmg = "a macOS disk image", iso = "a disc image", sh = "a shell script",
+    deb = "a Debian package", rpm = "an RPM package", doc = "a Word document",
+    docx = "a Word document", xls = "a spreadsheet", xlsx = "a spreadsheet", odt = "a document",
+}
+
+-- The ad-shaped boxes, each a Wikipedia article (approved 2026-10-13)
+website.ADS = {
+    { "CLICK ME, I'M AN AD", "Malvertising" },
+    { "Your download is ready!", "Drive-by_download" },
+    { "You won't believe what this file does", "Clickbait" },
+    { "CLICK ME, I'M AN AD", "Phishing" },
+    { "FREE: the program you need to open this", "Trojan_horse_(computing)" },
+    { "Only 2 left! Act now", "Dark_pattern" },
+    { "CLICK ME, I'M AN AD", "Attention_economy" },
+    { "Is it really the file you think it is?", "Checksum" },
+}
+
+function website.html(s)
+    return (tostring(s):gsub("[&<>\"']", { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;",
+        ['"'] = "&quot;", ["'"] = "&#39;" }))
+end
+
+-- {{{ website.info_page(path, name, ext) -> the page's HTML
+function website.info_page(path, name, ext)
+    local size = measure_size(path) or 0
+    local kind = website.KINDS[ext or ""] or (ext and ("a ." .. ext .. " file")) or "a file with no extension"
+    local href = name:gsub("[^%w%-%._~]", function(c) return string.format("%%%02X", c:byte()) end)
+    local ads = {}
+    for _, ad in ipairs(website.ADS) do
+        ads[#ads + 1] = string.format(
+            '<a class="ad" href="https://en.wikipedia.org/wiki/%s"><b>%s</b><small>%s, on Wikipedia</small></a>',
+            ad[2], website.html(ad[1]), website.html((ad[2]:gsub("_", " "))))
+    end
+    return table.concat({
+        '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n',
+        '<title>About ', website.html(name), '</title>\n<style>\n',
+        'body { font: 16px/1.5 sans-serif; max-width: 44rem; margin: 0 auto; padding: 1rem 16px; }\n',
+        'table { border-collapse: collapse; margin: 1rem 0; }\n',
+        'td { padding: .25rem .75rem .25rem 0; vertical-align: top; }\n',
+        'td:first-child { color: #555; } code { word-break: break-all; }\n',
+        '.open { display: inline-block; padding: .5rem 1rem; border: 2px solid; text-decoration: none; }\n',
+        '.ads { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .75rem; margin-top: 2rem; }\n',
+        '.ad { display: block; padding: .75rem; border: 3px dashed #c00; background: #ff0; color: #00c; text-decoration: none; }\n',
+        '.ad b { display: block; font-size: 1.1rem; } .ad small { display: block; color: #333; margin-top: .4rem; }\n',
+        '@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } td:first-child { color: #aaa; } }\n',
+        '</style>\n</head>\n<body>\n',
+        '<h1>', website.html(name), '</h1>\n',
+        '<p>A link on this website points at this file.  It is ', website.html(kind),
+        ', and it was not opened just because a page linked to it.  Here is what is known about it:</p>\n',
+        '<table>\n',
+        '<tr><td>Name</td><td>', website.html(name), '</td></tr>\n',
+        '<tr><td>Size</td><td>', website.html(fmt_bytes(size)), ' (', size, ' bytes)</td></tr>\n',
+        '<tr><td>Kind</td><td>', website.html(kind), '</td></tr>\n',
+        '<tr><td>Modified</td><td>', website.html(os.date("%Y-%m-%d %H:%M", file_mtime(path) or 0)), '</td></tr>\n',
+        '<tr><td>SHA-256</td><td><code>', website.html(sha256_file(path) or "could not be read"), '</code></td></tr>\n',
+        '</table>\n',
+        '<p>Compare the checksum with the one its author gives, if they give one, before you open it.</p>\n',
+        '<p><a class="open" href="', href, '">Open this file</a></p>\n',
+        '<div class="ads">\n', table.concat(ads, "\n"), '\n</div>\n',
+        '</body>\n</html>\n',
+    })
+end
+-- }}}
+
+-- {{{ website.info_pages(dir) -> how many were written
+-- `<file>.info.html` beside each file that is not a page part.  The
+-- author's pages are left as they came: a link that should warn names
+-- the information page.  Written here, on arrival, so the zip stays the
+-- author's site byte for byte.
+function website.info_pages(dir)
+    local h = io.popen("cd " .. shell_quote(dir) .. " && find . -type f ! -name '*.info.html' -print 2>/dev/null")
+    if not h then return 0 end
+    local count = 0
+    for rel in h:lines() do
+        rel = rel:gsub("^%./", "")
+        local name = rel:match("([^/]+)$")
+        local ext = name:match("%.([%w]+)$")
+        ext = ext and ext:lower()
+        if not (ext and website.PAGE_PARTS[ext]) then
+            local info = dir .. "/" .. rel .. ".info.html"
+            if path_state(info) == "absent" then
+                write_file(info, website.info_page(dir .. "/" .. rel, name, ext))
+                count = count + 1
+            end
+        end
+    end
+    h:close()
+    return count
+end
+-- }}}
+
 -- Attachment helpers live in one table because the main chunk is at Lua's
 -- 200-local ceiling: every further `local function` at this level would
 -- push it over.  Declared here, above compress_attachment, which is the
@@ -6165,10 +6330,15 @@ function upload.file_received(zip_path, work_dir, filename, sender, expected_siz
         end
     end
     if lh then lh:close() end
+    -- #715a: the attachment of a `website-for-...` message is a contact's
+    -- website, kept one per contact
+    local message_name = upload.message_name(message_id, sender)
+    if message_name and website.is_offer(message_name) and path_state(target .. "/.") ~= "absent" then
+        target = website.received(sender, target) or target
+    end
     if hooks.on_package then
         -- $4 (#216): the inbox file of the message the attachment came
         -- with, or "" when that message is no longer in the inbox record
-        local message_name = upload.message_name(message_id, sender)
         os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
                    shell_quote(filename) .. " " .. shell_quote(target) .. " " ..
                    shell_quote(message_name and (INBOX .. "/" .. message_name) or "") .. " &")

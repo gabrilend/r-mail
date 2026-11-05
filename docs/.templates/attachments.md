@@ -363,6 +363,15 @@ new version; the next request replaces the old offer with a new one.
 Every request that makes no offer is one line in the log, so you can see
 someone asking repeatedly.  A listen-only contact is never offered it.
 
+When a contact's website reaches you, it is kept at
+`attachments/websites/<contact>/`, one per contact.  The copy it replaces
+is moved into the daemon's RAM folder (`/tmp/rmail-progress/old-websites/`),
+where it stays until the machine restarts.  Beside each file that is not
+part of a page (a video, a zip, a program) the daemon writes
+`<file>.info.html`: its size, kind, date and SHA-256 checksum, and a link
+to open it, so a link can point at the page rather than open the file
+unannounced.  The site's own pages are left exactly as they came.
+
 `website_access = private` (the default) is the only setting built so
 far; `public`, for strangers, waits for #715b, and the daemon will not
 start with it.
