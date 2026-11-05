@@ -323,4 +323,112 @@ on 2026-04-20.
 
 ## Status
 
-Open.
+**Built 2026-11-05** (branch `claude/214-contact-folders`, stacked on
+#215's branch because it changes the same delivery code).  Everything in
+the test plan above is covered by `scripts/test-contact-folders.sh`,
+except where Decisions below say otherwise.
+
+## Decisions
+
+Made while building; each can be changed later at the cost named.
+
+1. **Only a subject holding `/` is a path.**  A subject without one is
+   named exactly as before, byte for byte (renaming and numbering
+   included), so nothing changes for mail between older daemons.  An older
+   receiver given a path keeps only its last name, as it always did.
+2. **A subject that cannot be a safe path is refused, not flattened**
+   (the issue left "rejected, or the component dropped" open): `400`,
+   nothing written, a log line naming the reason.  Refused: an absolute
+   path; an empty name (`a//b`, `a/`); `.` or `..`; a name starting with
+   `.`; any control byte, NUL and DEL included; a name over 255 bytes; more
+   than 16 levels; over 1024 bytes in all.  Within a name, `\` becomes `_`
+   and a space `-` (a flat subject's spaces are dashed the same way).  One
+   function (`mailpath.relative`) decides, on both sides: the sender holds
+   back any file whose path it would refuse, and says so once a session,
+   so an honest sender never sends one to be refused and retried.
+3. **Folders are made one level at a time, by two separate checks**:
+   any folder on the way that is a symbolic link is refused, and after
+   making them the real path (`pwd -P`) must lie inside the inbox.  Either
+   check alone keeps the message inside; the test checks each refusal's
+   own reason, so removing either check fails it.  Names are passed as
+   `./<name>` so one starting with `-` is never read as an option.
+4. **A file holding a folder's name** (the owner's `inbox/projects` is a
+   file): the message is saved without its folders, beside it, rather
+   than refused, so it is not lost and the owner's file is untouched.  A
+   folder that cannot be made for another reason (permissions, a full
+   disk) answers `500`, so the sender sends it again later.
+5. **What counts as a contact folder**: a folder directly in the outbox
+   named exactly as a contact that may be sent to.  Not a listen-only
+   contact (#420; it receives nothing), and not this mailbox's own name:
+   both are warned about as stray folders, as before.  A folder whose name
+   is no longer a contact but which the outbox record still tracks (the
+   contact renamed) stays tracked: its messages wait, logged as for an
+   unknown contact, instead of being taken for deleted.
+6. **Inside a contact folder**: regular files at any depth; hidden files
+   and folders, and symbolic links, are skipped (`find -type f`), so a
+   link is never followed out of the folder.  Undo: allow links to files.
+7. **The record's key is the path from the outbox** (`alice/q2-plan`), and
+   the subject the path below the contact folder (`q2-plan`), as designed
+   above.
+8. **The folder's contact deleting their copy**: the file is removed from
+   the folder, as the last recipient's delete removes any outbox file,
+   unless its `to:` lines still name someone else.  Then it stays for
+   them, the record notes `folder_left`, and the folder's contact is not
+   sent it again; it goes once those others have deleted it too.  Taking a
+   recipient out of a folder file never deletes the file, never drops its
+   `attach:` lines (the folder's contact owns them all), and writes the
+   file only when a `to:` line was actually removed (it may be a photo).
+9. **A `to: <own name>` inside a contact folder file** delivers to your own
+   inbox flat, under the file's name, not in folders.
+10. **No new watches.**  The outbox watcher sees only the outbox itself,
+    so a file added inside a contact folder is found by the next timed
+    sync (within about a minute while the contact answers) or by any
+    change directly in the outbox.  Watching each contact folder needs a
+    watch per folder, and the macOS watcher keeps one open descriptor per
+    watch in a fixed table of 16 (`rmail_kqueue.c`), so that is left as
+    open question 1.
+11. **The receiver's inbox**: messages kept in folders are tracked by the
+    inbox record and checked by their path each sync (deleting one there
+    tells the sender, as for any inbox file).  The once-a-session note
+    about a folder in the inbox no longer says rmail never makes one.
+    Folders emptied by deletes or moves are left in place.
+12. **Not done here**: the phone's outbox listing and the Android client
+    see only files directly in the outbox (#822).  Whether a body that is
+    not text (a photo dropped in a folder) arrives intact is the wire's
+    question, as the issue says; the sender's file is never changed.
+
+## Tested
+
+- `scripts/test-contact-folders.sh` (new): two daemons on loopback, a
+  sender with a contact folder holding a plain note, a nested
+  `projects/2026/q2-plan`, a file naming the folder's contact again, a file
+  with `to:` its own sender, a `hello` beside a flat `hello`, a binary
+  file, hidden files, a path with a line break, and a non-contact folder;
+  then an edit, a move and a delete on the sender's side, and two deletes
+  on the receiver's.  Then a stand-in contact sends the receiving daemon
+  15 hostile subjects, each refused with its own reason and nothing
+  written (also nothing written through a symbolic link out of the inbox),
+  5 that must be accepted (16 levels, a leading `-`, spaces, a file in the
+  way, a flat `a\b`), and a fuzz pass of 600 random subjects checked
+  against the rule written again in the test, then that no link was made,
+  every inbox folder resolves inside the inbox, nothing appeared outside
+  it, and the daemon still answers.  All pass (about 2.5 minutes).
+- The same script against #215's branch (before this): 29 checks fail
+  and 8 pass; every hostile subject is accepted there (the old receiver
+  keeps only the last name, so nothing escaped, but nothing was refused
+  either).  Planted faults, one at a time: without the `..`
+  check, without the symbolic-link check, and without the `folder_left`
+  check, the script fails each time.
+- The fifteen existing test scripts that run two daemons pass unchanged.
+
+## Open questions
+
+1. Watch contact folders (and the folders inside them) so a dropped file
+   is sent at once, at the cost of reworking the macOS watcher's fixed
+   table?
+2. A path subject a receiver refuses is retried by its sender forever.
+   Only a broken or hostile sender sends one; should the receiver instead
+   save it flat under its last name, so nothing is retried?
+3. Remove a folder in the inbox once the last message in it is deleted?
+4. Should a note to yourself from a contact folder keep its folders too
+   (decision 9)?
