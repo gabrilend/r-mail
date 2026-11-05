@@ -585,6 +585,13 @@ Also covered by `scripts/test-mailbox-selection.sh`.
 ### Readability
 - [ ] Install script reads as plain, linear programming — not dense shell idioms (#601)
 
+### The monitor (#713)
+
+- [ ] On a machine with mailboxes installed as services, `lua scripts/rmail-monitor.lua list` shows each one, with its port, whether it is running, its version and its service; a mailbox started by hand shows as "started by hand" (#713)
+- [ ] After `git pull` raises `RMAIL_VERSION`, `rmail-monitor.lua list` says "restart it to run" for every running mailbox until its service is restarted, and once restarted, says once that it is new and names the story between (#713)
+- [ ] `monitor = no` in a mailbox's config keeps it out of `list` and `tell`, while its daemon still runs (#713)
+- [ ] With services under `/etc/systemd/system`, `/etc/sv` and `/etc/init.d`, as root and as a plain user, the monitor reads every rmail service file it is allowed to and says nothing about ones it is not (#713)
+
 ## 12b. State files are plaintext (#505 reversed)
 
 All PII-hashing from #505 steps 1–6 has been reverted; state files

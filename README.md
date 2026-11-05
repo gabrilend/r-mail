@@ -135,6 +135,19 @@ program, because there is no checkout at the far end. See
 
 To run rmail automatically on boot, see [docs/.templates/service.md](docs/.templates/service.md).
 
+To see every mailbox on the machine — which are running, on which port, and
+which version of rmail each runs — use the monitor:
+
+```bash
+lua scripts/rmail-monitor.lua list
+```
+
+Run it with no arguments for everything it can do. It finds mailboxes in the
+service files the installer writes and in the daemons running now. A mailbox
+whose config says `monitor = no` is left out. `lua rmail.lua --version` says
+which rmail a checkout holds, and `scripts/rmail-monitor.lua story` tells what
+changed between two versions, from the chapters in `transitions/`.
+
 ## Configuration
 
 ### Config file
@@ -442,6 +455,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** rmail has a version number, 0.1.0, which `rmail.lua --version` prints and a running mailbox logs and keeps in `.state/version`. The new monitor, `scripts/rmail-monitor.lua`, lists the mailboxes on a machine with their ports, whether each is running and the version it runs, says when one needs a restart to run the program now on disk, and points at the story of what changed when a mailbox moves to a newer version (#713).
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
 

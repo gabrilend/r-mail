@@ -2,7 +2,7 @@
 
 ## Current Behavior
 
-No monitor exists.  Each mailbox runs alone as its own service
+(Before 2026-11-05; see Status.)  No monitor exists.  Each mailbox runs alone as its own service
 (#613); nothing lists the mailboxes on a machine or
 their versions, except the installer's scan of existing installs when it
 runs.  Since #102 a mailbox's config is the `config` file inside it (the
@@ -71,7 +71,74 @@ interface — the monitor is another hook consumer/producer.
 
 ## Status
 
-Design phase. This is a larger project that builds on the stable rmail base.
+First slice built 2026-11-05: instance detection, the opt-out, the
+version number, the version cache and the story, and a capability-led
+command line.
+
+- `rmail.lua` carries `RMAIL_VERSION` (0.1.0), prints it for
+  `--version`, logs it at start and writes it to `.state/version`.
+- `scripts/rmail-monitor.lua` with no arguments says what it can do:
+  `list` (every mailbox, running or not, with port, version and
+  service; `--plain` for other programs), `tell MAILBOX`, `story [FROM
+  [TO]]` and `version`.  It names what it cannot do yet: restart a
+  mailbox, run a script against its hooks, relay between mailboxes.
+- `transitions/0.1.0.md` is the first chapter.
+
+Not built: restart, running scripts against hooks, relaying, the monitor
+as a hook consumer or producer, a web UI, and transition chapters that
+carry migrations.
+
+## Decisions (2026-11-05)
+
+- **Found two ways, merged by config.**  The service files of the five
+  init systems `install.sh` writes for (named `rmail` or `rmail-*`, in
+  all five places whatever is running, as `install.sh`'s own scan does),
+  and the processes whose command line runs `rmail.lua`, so a mailbox
+  started by hand is listed too.  Not `~/.config/rmail/config-*`, which
+  the suggested steps name: since #102 there is no such file, and the
+  service file is what names a mailbox's config.  A process is counted
+  only if the config it names can be read, so an editor open on
+  `rmail.lua` is not a mailbox.
+- **The opt-out is `monitor = no`** in the mailbox's config (also
+  `false` or `off`).  Such a mailbox is not listed, told about or
+  counted; rmail itself ignores the key.
+- **Version 0.1.0, raised by hand.**  There was no version before.  It
+  starts at 0.1.0 because nothing has been released, and it is compared
+  part by part as numbers.  It is raised when a change is worth a
+  chapter, not on every commit, so the story stays one chapter per
+  version.  A commit count or date would number every change and make
+  the story either empty or a log.
+- **The version is read, not run.**  The monitor reads the
+  `local RMAIL_VERSION = "..."` line from the program a service or
+  process names, so it can tell a running daemon that it is behind the
+  program on disk ("restart it to run 0.2.0") without starting anything.
+  What a mailbox last ran is the daemon's own `.state/version`.
+- **The cache lives in `${XDG_STATE_HOME:-~/.local/state}/rmail/monitor-versions`**,
+  one line per mailbox, written only when something changed.  Not in
+  the mailbox: the monitor may be run by a user who can read a system
+  service's mailbox and not write to it, and what the monitor has seen
+  is the monitor's own fact.
+- **A new version is told, not acted on.**  The issue's transition
+  script "walks through the changes ... and running any necessary
+  migrations".  This slice tells: once per mailbox per new version, with
+  the `story` command that shows the chapters between.  It runs nothing:
+  a listing that changes someone's mail would be a surprise, and no
+  change so far has needed a migration that `migrate-mailbox-layout.sh`
+  does not already do.
+- **Chapters are Markdown in `transitions/<version>.md`**, written in
+  plain words (what was built, why, how).  The development story before
+  0.1.0 stays where it is, in `issues/completed/` and `llm-transcripts/`;
+  the first chapter points there rather than retelling it.
+- **Capabilities are the commands.**  Following the owner's "dave the
+  barbarian" direction, the help is a list of "I can ..." sentences, each
+  with the word that asks for it, and an ability it lacks is named as
+  one it cannot do yet rather than left out.  Something asked of it that
+  it cannot do gets "I cannot ..." and the list.
+- **A terminal program in Lua**, the issue's own suggestion, so it runs
+  with the interpreter the checkout already has and needs no library.
+  A web UI is left for later; the `--plain` output is what one would
+  read.
+- Test: `scripts/test-monitor.sh`.
 
 ## Witness material
 
