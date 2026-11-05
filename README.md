@@ -156,6 +156,7 @@ The generated config file contains a comment above most keys explaining what it 
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
+- `cannot_reach_notice_after` — seconds a contact may go unreached, with mail waiting for them, before the daemon leaves a notice in the outbox, `CANNOT-REACH-<name>`, for you (default: `86400`, a day). It is not mail and goes to nobody; the daemon removes it once that contact is reached.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 

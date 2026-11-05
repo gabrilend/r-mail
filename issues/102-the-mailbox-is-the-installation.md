@@ -512,8 +512,12 @@ and waiting to be installed by hand.
 6. The installer stops reading sibling configs — done; it asks the
    system what is listening instead.
 7. The daemon reports its own problems as mail — the mechanism exists
-   and the first case, a port that will not bind, uses it.  Only that
-   one case reports so far.
+   and two cases use it: a port that will not bind (inbound, the
+   inbox's `CANNOT-LISTEN`), and since 2026-11-05 a contact not reached
+   for a day with mail waiting (outbound, the outbox's
+   `CANNOT-REACH-<name>`; see "Step 7's outbound case" below).  The
+   inbound case of a caller that could not be decrypted is not built
+   (decision 5 there).
 8. Service files name the checkout's daemon and the mailbox's config —
    done.  This was briefly the mailbox's own launcher, and is not.
 9. Refresh a mailbox's program files — **deleted along with step 4**.
@@ -523,6 +527,61 @@ and waiting to be installed by hand.
 11. The `mail` key is gone — done.  The mailbox is the config's own
     directory and cannot be written down anywhere.
 12. The port is claimed before the router is probed — done.
+
+### Step 7's outbound case (2026-11-05)
+
+Built in `rmail.lua` (`ctimer.note_unreached`, called from
+`ctimer.mark_failure`; the notice withdrawn in `ctimer.mark_success`).
+Tested by `scripts/test-cannot-reach-notice.sh` (9 cases: no notice
+before the limit, the notice in the outbox after it and left alone by the
+outbox's passes, removed once the contact is reached), each case shown to
+catch a mutant of the code it covers.
+
+Decisions, made by the builder; the owner can overturn each:
+
+1. **The slice.**  Of this issue only step 7's remaining cases and the
+   license question were open.  This builds the outbound case the
+   `report_problem` comment already named, "a contact nobody can reach".
+2. **When.**  A contact counts as unreached when a whole sync cycle's
+   attempts at them failed (the same rule as the log's "unreachable
+   contacts this cycle" line, so only a contact with mail waiting is ever
+   tried).  The notice is written once the first failure of the current
+   streak is `cannot_reach_notice_after` seconds old: a new config key,
+   86400 (a day) by default, since a laptop asleep overnight is not news
+   and a contact gone for good should be noticed by somebody other than
+   the log.  The streak belongs to the running daemon: a restart counts
+   again from its first failure, and a notice an earlier run wrote stays
+   until a success removes it.
+3. **Withdrawn only by reaching them**, not by hearing from them: as with
+   #409's address-change notice, a call from them proves only that they
+   can reach us.
+4. **It is not mail.**  No `to:` line; the outbox's passes skip it
+   without the per-cycle "missing 'to:' header" line (any top-level
+   outbox file whose name starts `CANNOT-REACH-` is skipped quietly, a
+   person's own included).  It is rewritten at each later failure (so it
+   says how long, and comes back if deleted while the problem lasts) and
+   logged once per streak.
+5. **Not built: the inbound case "a caller that could not be
+   decrypted".**  A port on the internet hears from scanners all day; a
+   notice in the inbox for each, or even one rewritten notice, would be
+   noise that teaches the owner to ignore the inbox's notices.  Left for
+   the owner: whether it should exist, and if so what threshold (a known
+   contact's address failing to decrypt, perhaps, rather than any
+   stranger).
+
+### What is left of this issue
+
+- Step 7's inbound case (decision 5 above): the owner's call.
+- The open question on the license's corresponding source, which waits
+  on #615.
+- Text that describes the withdrawn per-mailbox program as current: the
+  Verification paragraph (services "repointed at their own program
+  copies") and the section "What `program-files/` should carry".  Kept
+  as the record of what was done; worth a pass when #615 settles the
+  license half.
+- The operator's own steps from the migration: installing the generated
+  service files by hand, and deciding about the leftover service
+  directories.
 
 ### Claiming the port first
 
