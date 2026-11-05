@@ -409,12 +409,32 @@ local function file_mtime(path)
     return tonumber((out or ""):match("%d+"))
 end
 
+--
+-- set_file_mtime gives true when the time was set, or false and why not, so
+-- a receiver can say the file kept its arrival time instead of falling back
+-- quietly (#211's carried-forward questions, decided 2026-11-05):
+--   not a number, or outside 2001-09-09 .. 2100-01-01   refused, as before
+--   more than 300 s ahead of this machine's clock      refused: a sender's
+--       fast clock must not date a letter in the future; a smaller lead is
+--       ordinary clock skew and is kept, so one sender's order survives
+--   `touch` failing (a BSD or macOS host has no `-d @N`) reported, not
+--       worked around: the file keeps "now"
 local function set_file_mtime(path, epoch)
+    local given = epoch
     epoch = tonumber(epoch)
-    if not epoch then return end
+    if not epoch then return false, "not a number: " .. tostring(given):sub(1, 40) end
     -- clamp to a sane range (2001-09-09 .. 2100-01-01) to reject garbage/overflow
-    if epoch < 1000000000 or epoch > 4102444800 then return end
-    os.execute("touch -m -d @" .. string.format("%d", epoch) .. " " .. shell_quote(path))
+    if epoch < 1000000000 or epoch > 4102444800 then
+        return false, string.format("outside 2001..2100: %d", epoch)
+    end
+    if epoch > os.time() + 300 then
+        return false, string.format("%d is %d s ahead of this clock", epoch, epoch - os.time())
+    end
+    local ok, _, code = os.execute("touch -m -d @" .. string.format("%d", epoch) .. " " .. shell_quote(path))
+    if not ok then
+        return false, "touch could not set it (exit " .. tostring(code) .. "; GNU touch is needed)"
+    end
+    return true
 end
 
 -- ---- Progress-file helpers (#304) ---------------------------------------
@@ -2504,8 +2524,13 @@ local function handle_deliver_message(data, sender)
 
     body = body:gsub("^[\n\r]+", "")
     write_file(target, body)
-    -- preserve the sender's authoring time when provided (older senders omit it)
-    if data.mtime then set_file_mtime(target, data.mtime) end
+    -- preserve the sender's authoring time; when it cannot be (an older
+    -- sender omits it, or it is refused), say so: the file is dated now
+    local stamped, unstamped = false, "the sender gave none"
+    if data.mtime then stamped, unstamped = set_file_mtime(target, data.mtime) end
+    if not stamped then
+        log("authoring time of %s from %s not kept (%s): %s is dated on arrival", message_id, sender, unstamped, filename)
+    end
     log("delivered: %s from %s -> %s", message_id, sender, filename)
 
     if hooks.on_receive then
@@ -2558,7 +2583,12 @@ local function handle_deliver_update(data, sender)
 
             new_body = new_body:gsub("^[\n\r]+", "")
             write_file(target, new_body)
-            if data.mtime then set_file_mtime(target, data.mtime) end
+            local stamped, unstamped = false, "the sender gave none"
+            if data.mtime then stamped, unstamped = set_file_mtime(target, data.mtime) end
+            if not stamped then
+                log("authoring time of the edit of %s from %s not kept (%s): it is dated on arrival",
+                    filename, sender, unstamped)
+            end
             log("updated: %s from %s -> %s", message_id, sender, filename)
             return 200, {ok = true}
         end

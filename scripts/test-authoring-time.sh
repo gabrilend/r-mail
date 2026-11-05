@@ -34,6 +34,12 @@
 #   edit             the letter is rewritten and re-dated 2022 while its
 #                    mailbox is stopped; once it starts again, the other
 #                    inbox's copy is replaced and re-dated to match
+#   not kept, said   when a time cannot be kept, the receiver dates the file
+#                    on arrival and says so in its log (decided 2026-11-05):
+#                    a time a year ahead of the clock; no time at all (an
+#                    older sender, played by a `stat` that fails for one
+#                    file); and a `touch` that cannot set it (a BSD or macOS
+#                    host, played by a `touch` that fails for one file)
 #
 # Attachments are not covered here: they travel as a zip archive, which
 # records each file's time and restores it on unpacking, rather than
@@ -376,12 +382,85 @@ else
 fi
 
 # --------------------------------------------------------------------------
+echo ""
+echo "a time that cannot be kept is said, not dropped quietly"
 
 stop_all
 
-if grep -q "sync error" "$LOG_A" "$LOG_A2" "$LOG_B"; then
+# Stand-ins on PATH, each failing for one file only and passing every other
+# call through to the real tool: a `stat` that cannot read "unstamped" (so
+# the sender sends no time for it, as an older sender would), and a `touch`
+# that cannot set "untouchable" (as on a host without GNU touch).
+SHIMS="$WORK/shims"
+mkdir -p "$SHIMS"
+REAL_STAT=$(command -v stat)
+REAL_TOUCH=$(command -v touch)
+cat > "$SHIMS/stat" <<EOF2
+#!/bin/sh
+case "\$*" in *unstamped*) exit 1 ;; esac
+exec "$REAL_STAT" "\$@"
+EOF2
+cat > "$SHIMS/touch" <<EOF2
+#!/bin/sh
+case "\$*" in *untouchable*) echo "touch: invalid date format" >&2; exit 1 ;; esac
+exec "$REAL_TOUCH" "\$@"
+EOF2
+chmod +x "$SHIMS/stat" "$SHIMS/touch"
+
+AHEAD_EPOCH=$(( $(date +%s) + 31536000 ))
+printf 'to: bravo\n\nfrom a clock a year fast\n' > "$A/outbox/ahead"
+touch -d "@$AHEAD_EPOCH" "$A/outbox/ahead"
+printf 'to: bravo\n\nno time given\n' > "$A/outbox/unstamped"
+touch -d "$LETTER_DATE" "$A/outbox/unstamped"
+printf 'to: bravo\n\na time that cannot be set\n' > "$A/outbox/untouchable"
+touch -d "$LETTER_DATE" "$A/outbox/untouchable"
+
+STARTED=$(date +%s)
+LOG_A3="$WORK/alpha-shims.log"
+LOG_B3="$WORK/bravo-shims.log"
+PATH="$SHIMS:$PATH" "$LAUNCHER" "$B/config" > "$LOG_B3" 2>&1 &
+PID_B=$!
+PATH="$SHIMS:$PATH" "$LAUNCHER" "$A/config" > "$LOG_A3" 2>&1 &
+PID_A=$!
+
+# check_said <name> <reason pattern> <what>: the file arrived, the log says
+# its time was not kept and why, and it is dated on arrival.
+check_said() {
+    if wait_for "$LOG_B3" "delivered: .* from alpha -> $1\$"; then
+        if grep -q "authoring time of .* from alpha not kept ($2.*): $1 is dated on arrival" "$LOG_B3"; then
+            ok "$3: the log says so"
+        else
+            note_fail "$3: the log does not say so"
+            info "$(grep -m1 "authoring time" "$LOG_B3")"
+        fi
+        _got=$(mtime_of "$B/inbox/$1")
+        if [ "$_got" -ge "$STARTED" ] && [ "$_got" -le "$(date +%s)" ]; then
+            ok "$3: the file is dated on arrival"
+        else
+            note_fail "$3: the file is dated $_got ($(date -u -d "@$_got")), not on arrival"
+        fi
+    else
+        note_fail "$3: the file never arrived"
+        info "$(tail -3 "$LOG_B3")"
+    fi
+}
+
+check_said ahead "[0-9]* is [0-9]* s ahead of this clock" "a time a year ahead"
+check_said unstamped "the sender gave none" "no time given"
+check_said untouchable "touch could not set it" "touch failing"
+
+if grep -q "authoring time of .* not kept" "$LOG_B"; then
+    note_fail "a time that was kept earlier was reported as not kept"
+    info "$(grep -m1 'authoring time' "$LOG_B")"
+else
+    ok "nothing was reported for the times that were kept"
+fi
+
+stop_all
+
+if grep -q "sync error" "$LOG_A" "$LOG_A2" "$LOG_B" "$LOG_A3" "$LOG_B3"; then
     note_fail "a sync cycle crashed along the way"
-    info "$(grep -h -m1 'sync error' "$LOG_A" "$LOG_A2" "$LOG_B")"
+    info "$(grep -h -m1 'sync error' "$LOG_A" "$LOG_A2" "$LOG_B" "$LOG_A3" "$LOG_B3")"
 fi
 
 rm -f $RAM_FILES

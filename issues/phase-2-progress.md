@@ -18,6 +18,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#208](completed/208-an-edit-is-retried-until-delivered.md) — An edit is retried until it is delivered**  When the author edits an outbox file that has already been sent, every recipient is owed the new version, and stays owed until that recipient's daemon answers the update.
 - **[#209](completed/209-deletes-travel-both-ways.md) — Deleting a message, on either side, is told to the other**  A message exists in two places — the author's outbox file and each recipient's inbox file — and deleting either is news for the other.
 - **[#210](completed/210-delete-edit-race-condition-matrix.md) — Audit delete/edit race conditions between sender and receiver**  If a receiver deletes an inbox message and the sender edits (updates) the same outbox message, the outcome depends on whose sync cycle runs first.
+- **[#211](completed/211-preserve-sender-creation-time-as-received-mtime.md) — Set received message file mtime to the sender's creation time**  A message's file date is carried across every hop a message file makes:
 - **[#212](completed/212-hooks.md) — Hooks: the owner's scripts, run at six moments**  A mailbox may name a script for each of six moments, in its config.
 - **[#213](completed/213-hook-config-cleanup.md) — Clean up hook script configuration in config file**  The hook configuration in the config file is hard to follow — commented-out examples, argument documentation mixed in, duplicate names.
 - **[#214](completed/214-outbox-contact-folders.md) — Contact-named outbox folders: drop a file in, it sends to that contact**  The current outbox workflow puts the recipient inside the file, as `to: <name>` at the top of the header block.
@@ -27,7 +28,6 @@ regenerate it rather than editing above the notes line.  Counts:
 ## Open
 
 - **[#206](206-duplicate-filename-warning.md) — Warn about duplicate filename conflicts**  If you send a message to a recipient who already has a file with the same name in their inbox, the behavior is undefined — the message may fail silently, overwrite, or cause confusion.
-- **[#211](211-preserve-sender-creation-time-as-received-mtime.md) — Set received message file mtime to the sender's creation time**  A message's file date is carried across every hop a message file makes:
 
 <!-- notes: kept when regenerated -->
 

@@ -62,6 +62,6 @@ recipient answered it, and is retried on that contact's timer until then.
 ## Related documents
 
 - `notes/audit-docs-against-code-2026-10-02.md`
-- `issues/211-preserve-sender-creation-time-as-received-mtime.md`
+- `issues/completed/211-preserve-sender-creation-time-as-received-mtime.md`
 - `#115` (per-contact timers)
 - `#312`, `#314` (attachment answers kept in the same recipient section)
