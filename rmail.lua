@@ -171,6 +171,12 @@ local cfg = {
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
     libs              = config.libs,
     auto_port_forward = config.auto_port_forward == true,
+    -- #102 step 7: seconds a contact may go unreached, with mail waiting
+    -- for them, before the daemon says so in the outbox
+    -- (CANNOT-REACH-<name>).  A day by default: long enough that a
+    -- laptop asleep overnight is not news, short enough that a contact
+    -- gone for good is noticed by somebody other than the log.
+    cannot_reach_after = tonumber(config.cannot_reach_notice_after) or 86400,
     -- Where to mirror the log.  stderr always goes to whoever started the
     -- daemon -- journald under systemd, a terminal when run by hand -- and
     -- that copy is not optional.  This is the *second* copy, a plain file
@@ -1028,6 +1034,9 @@ local ctimer = {
     -- ctimer.refresh_self).  It starts with a byte no contact name can
     -- hold -- names are letters, digits, - and _ -- so it cannot collide.
     SELF    = "\0self",
+    -- #102 step 7: the outbox notice about a contact not reached is
+    -- NOTICE .. <name>
+    NOTICE  = "CANNOT-REACH-",
 
     timers    = {},
     skipped   = {},   -- contacts whose ops we withheld this cycle
@@ -1083,6 +1092,44 @@ function ctimer.mark_success(name, now)
     local t = ctimer.get(name)
     t.interval = ctimer.FLOOR
     t.next_due = now + ctimer.jittered(ctimer.FLOOR)
+    t.failing_since, t.notice_written = nil, nil
+    -- reached them: a notice that they could not be reached is stale,
+    -- whichever run of the daemon wrote it
+    if clear_problem("outbound", ctimer.NOTICE .. name) then
+        log("reached %s again: removed the outbox notice saying they could not be reached", name)
+    end
+end
+
+-- #102 step 7, the outbound case: a contact who has had mail waiting and
+-- has not been reached for cfg.cannot_reach_after seconds gets a notice
+-- in the outbox, the folder of mail leaving.  Rewritten at each failure
+-- after that (so it says how long, and comes back if deleted while the
+-- problem lasts); logged once per streak; removed by the next success.
+-- The streak is this run's: a restart starts counting again, and a
+-- notice an earlier run wrote stays until a success removes it.
+function ctimer.note_unreached(name, now)
+    local t = ctimer.get(name)
+    t.failing_since = t.failing_since or now
+    if now - t.failing_since < cfg.cannot_reach_after then return end
+    local hours = (now - t.failing_since) / 3600
+    local note = report_problem("outbound", ctimer.NOTICE .. name, string.format(
+        "This mailbox has mail waiting for %s and has not been able to\n" ..
+        "reach them since %s (%.1f hours, every attempt failed).\n\n" ..
+        "Nothing is lost: the mail stays in this outbox and is tried again,\n" ..
+        "at least every %d minutes, until it goes.  Worth checking:\n\n" ..
+        "  - whether %s's mailbox is running (ask them some other way);\n" ..
+        "  - whether they moved: an address change from them would be in\n" ..
+        "    the inbox, and their address is the %s.ip / %s.port lines in\n" ..
+        "    this mailbox's contacts file;\n" ..
+        "  - this machine's own network.\n\n" ..
+        "This notice is for you; it is not sent to anyone.  The daemon\n" ..
+        "removes it once %s is reached.",
+        name, os.date("%Y-%m-%d %H:%M", math.floor(t.failing_since)), hours,
+        math.floor(ctimer.CEILING / 60), name, name, name, name))
+    if not t.notice_written then
+        t.notice_written = true
+        log("could not reach %s for %.1f hours: wrote %s", name, hours, note)
+    end
 end
 
 function ctimer.mark_failure(name, now)
@@ -1090,6 +1137,7 @@ function ctimer.mark_failure(name, now)
     local prev = t.interval
     t.interval = math.min(ctimer.CEILING, t.interval + ctimer.STEP)
     t.next_due = now + ctimer.jittered(t.interval)
+    ctimer.note_unreached(name, now)
     -- Logged only when the interval actually moves, so a contact at the
     -- ceiling is silent rather than announcing itself forever -- which is
     -- the failure mode this whole issue is about.  Bounded at ~20 lines per
@@ -6139,7 +6187,11 @@ local function sync_outbox(my_name)
         end
 
         if not entries and not state[name] then
-            log("skipping %s: missing 'to:' header", name)
+            -- the daemon's own notice to the owner (#102 step 7) is not
+            -- mail and names nobody on purpose: no complaint every cycle
+            if name:sub(1, #ctimer.NOTICE) ~= ctimer.NOTICE then
+                log("skipping %s: missing 'to:' header", name)
+            end
         else
             if not state[name] then state[name] = {recipients = {}} end
 
