@@ -1,31 +1,36 @@
 #!/bin/sh
-# test-busy-while-sending.sh — check that a daemon waiting on its own requests answers a contact it is dialing at once, and holds everyone else
+# test-busy-while-sending.sh — check that a daemon waiting on its own requests serves everyone meanwhile, and that a request touching a file the waiting step holds waits for that step only
 #
-# A sync cycle waits on its requests on the main thread.  Until 2026-10-04
-# a daemon answered nobody meanwhile, so two daemons that each had
-# something to send the other both waited out their 8-second limit, both
-# backed off, and then -- each handling the other's late request, which
-# makes the other due at once -- dialed each other at the same instant
-# again, every few seconds, for as long as both had mail (#120).
+# A sync cycle waits on its requests.  Until 2026-10-04 a daemon answered
+# nobody meanwhile, so two daemons that each had something to send the
+# other both waited out their 8-second limit, both backed off, and then
+# -- each handling the other's late request, which makes the other due at
+# once -- dialed each other at the same instant again, every few seconds,
+# for as long as both had mail (#120).  From 2026-10-04 a caller it was
+# dialing got a sealed "503 busy" and everyone else was held until the
+# cycle ended.
 #
-# Now, while a batch waits, a caller it is dialing gets an immediate sealed
-# "503 busy" (retry soon, no backoff), and any other caller is held and
-# handled the moment the cycle ends.
+# Since 2026-11-05 (#120) the cycle is a coroutine of the main loop and
+# requests are served while it waits.  A request that reads or writes a
+# state file the waiting step keeps across its wait (outbox.json and
+# chunks-outgoing.json, for the outbox step) waits for that step, and no
+# longer: its change can then not be lost.
 #
 # One real mailbox.  Its contact alice is a stand-in recipient
 # (scripts/lib/fake-recipient.lua) told to hold its answer for 6 seconds;
 # bob is a contact the daemon has no message for.  While the daemon waits
 # on alice:
 #
-#   alice calls      answered "busy" at once, sealed with alice's key
+#   alice calls      answered properly at once (not "busy")
 #   alice calls      the same, from a web page: her sealed request inside
-#     again          a POST; the busy answer comes inside a web reply
-#   bob calls        held: answered properly, after the cycle -- not
-#                    refused, not "busy"
-#   bob calls again  the same from a web page: held, then answered inside
-#                    a web reply
+#     again          a POST, answered inside a web reply at once
+#   bob calls        answered at once
+#   bob calls again  the same from a web page
+#   bob answers an   that reads chunks-outgoing.json, which the outbox step
+#     attachment     holds: answered (404, no such transfer) only after the
+#     offer          step is done, never before alice answers
 #   afterwards       alice still gets the message; the daemon did not
-#                    back off from her
+#                    back off from her and answered nobody "busy"
 #
 # Usage:
 #   scripts/test-busy-while-sending.sh          # use the enclosing checkout
@@ -90,67 +95,86 @@ if not alice:wait_for(60, function() return exists(WORK .. "/alice/holding") end
     print("-- the daemon never dialed alice")
     os.exit(0)
 end
+local held_since = socket.gettime()
 print("ok the daemon is waiting on alice")
 
--- bob, from another process, at the same moment
-local bob_out = WORK .. "/bob.out"
-os.execute("( " .. arg[1] .. "/deps/lua/bin/lua -e 'package.path=\"" .. arg[1] ..
-    "/scripts/lib/?.lua;\"..package.path local fc=require(\"fake-contact\") local b=fc.new(\"" ..
-    arg[1] .. "\",\"127.0.0.1\"," .. arg[2] .. ",\"" .. arg[4] ..
-    "\") local t0=b.socket.gettime() local s,body=b:request(\"GET\",\"/\") print(s, b.socket.gettime()-t0, body)' > " ..
-    bob_out .. " 2>&1 ) &")
--- and bob again, from a web page: held the same way, and his answer must
--- come back inside a web reply once the cycle ends
-local bob_web_out = WORK .. "/bob-web.out"
-os.execute("( " .. arg[1] .. "/deps/lua/bin/lua -e 'package.path=\"" .. arg[1] ..
-    "/scripts/lib/?.lua;\"..package.path local fc=require(\"fake-contact\") local b=fc.new(\"" ..
-    arg[1] .. "\",\"127.0.0.1\"," .. arg[2] .. ",\"" .. arg[4] ..
-    "\") local t0=b.socket.gettime() local w,s=b:web_post(\"GET\",\"/\") print(tostring(w), tostring(s), b.socket.gettime()-t0)' > " ..
-    bob_web_out .. " 2>&1 ) &")
+-- {{{ local function in_background
+-- Runs one request as bob from another process, so it can wait while this
+-- one goes on: `path` and `body` of a POST to /deliver.  Its status, how
+-- long it took, when it ended and the answer's body land in `out`.
+local function in_background(out, body)
+    local script = out .. ".lua"
+    local h = io.open(script, "w")
+    h:write([[
+package.path = arg[1] .. "/scripts/lib/?.lua;" .. package.path
+local fc = require("fake-contact")
+local b = fc.new(arg[1], "127.0.0.1", tonumber(arg[2]), arg[3])
+local t0 = b.socket.gettime()
+local s, answer = b:request("POST", "/deliver", arg[4])
+print(s, b.socket.gettime() - t0, b.socket.gettime(), answer)
+]])
+    h:close()
+    os.execute(string.format("( %s/deps/lua/bin/lua %s %s %s %s '%s' > %s 2>&1 ) &",
+        arg[1], script, arg[1], arg[2], arg[4], body, out))
+end
+-- }}}
 
-local t0 = socket.gettime()
-local status, body = alice:request("POST", "/deliver", '{"type":"chunk_failed"}')
-local took = socket.gettime() - t0
-if status == 503 and body:find('"busy"') and took < 3 then
-    print(string.format("ok alice, whom it is dialing, was answered busy at once (%.1fs)", took))
+-- bob answers an attachment offer the daemon never made: the handler reads
+-- chunks-outgoing.json, which the outbox step holds while it waits on alice
+local lease_out = WORK .. "/bob-lease.out"
+in_background(lease_out, '{"type":"attachment_response","attachment_id":"nosuchoffer","consent":true}')
+
+-- {{{ local function timed
+local function timed(what, call)
+    local t0 = socket.gettime()
+    local a, b2, c = call()
+    return socket.gettime() - t0, a, b2, c
+end
+-- }}}
+
+local took, status, body = timed("alice", function() return alice:request("POST", "/deliver", '{"type":"chunk_failed"}') end)
+if status == 200 and not body:find('"busy"') and took < 2 then
+    print(string.format("ok alice, whom it is dialing, was answered properly at once (%.1fs)", took))
 else
-    print(string.format("-- alice was answered %s after %.1fs: %s", tostring(status), took, body))
+    print(string.format("-- alice was answered %s after %.1fs: %s", tostring(status), took, tostring(body)))
 end
 
--- the same call the way a web page has to send it, wrapped in a POST
--- (scripts/test-frame-in-web-request.sh); the cycle is still waiting
-t0 = socket.gettime()
-local web, inner, wbody = alice:web_post("POST", "/deliver", '{"type":"chunk_failed"}')
-took = socket.gettime() - t0
-if web == 200 and inner == 503 and wbody and wbody:find('"busy"') and took < 3 then
-    print(string.format("ok alice, calling from a web page, was answered busy inside a web reply (%.1fs)", took))
+local web, inner, wbody
+took, web, inner, wbody = timed("alice web", function() return alice:web_post("POST", "/deliver", '{"type":"chunk_failed"}') end)
+if web == 200 and inner == 200 and wbody and not wbody:find('"busy"') and took < 2 then
+    print(string.format("ok alice, calling from a web page, was answered properly inside a web reply (%.1fs)", took))
 else
     print(string.format("-- alice from a web page was answered %s / %s after %.1fs: %s",
         tostring(web), tostring(inner), took, tostring(wbody)))
 end
 
-alice:wait_for(20, function()
-    local f = io.open(bob_out) if not f then return false end
-    local s = f:read("*a") f:close() return s:match("^%d+") ~= nil
-end)
-local f = io.open(bob_out); local line = f and f:read("*a") or ""; if f then f:close() end
-local bs, btook = line:match("^(%d+)%s+([%d%.]+)")
-if bs == "200" and tonumber(btook) and tonumber(btook) >= 2 then
-    print(string.format("ok bob was held, then answered properly after the cycle (%.1fs)", tonumber(btook)))
+local bob = fc.new(arg[1], "127.0.0.1", tonumber(arg[2]), arg[4])
+took, status, body = timed("bob", function() return bob:request("GET", "/") end)
+if status == 200 and took < 2 then
+    print(string.format("ok bob was answered at once while the daemon waited (%.1fs)", took))
 else
-    print("-- bob was not held and answered: " .. line)
+    print(string.format("-- bob was answered %s after %.1fs: %s", tostring(status), took, tostring(body)))
 end
 
-alice:wait_for(20, function()
-    local g = io.open(bob_web_out) if not g then return false end
-    local s = g:read("*a") g:close() return s:match("%S+%s+%S+%s+[%d%.]+") ~= nil
-end)
-local g = io.open(bob_web_out); local wline = g and g:read("*a") or ""; if g then g:close() end
-local ww, ws, wtook = wline:match("^(%S+)%s+(%S+)%s+([%d%.]+)")
-if ww == "200" and ws == "200" and tonumber(wtook) and tonumber(wtook) >= 2 then
-    print(string.format("ok bob from a web page was held, then answered inside a web reply (%.1fs)", tonumber(wtook)))
+took, web, inner = timed("bob web", function() return bob:web_post("GET", "/") end)
+if web == 200 and inner == 200 and took < 2 then
+    print(string.format("ok bob from a web page was answered at once inside a web reply (%.1fs)", took))
 else
-    print("-- bob from a web page was not held and answered: " .. wline)
+    print(string.format("-- bob from a web page was answered %s / %s after %.1fs", tostring(web), tostring(inner), took))
+end
+
+-- the request that read a held file: answered only once alice was
+alice:wait_for(30, function()
+    local f = io.open(lease_out) if not f then return false end
+    local s = f:read("*a") f:close() return s:match("^%d+") ~= nil
+end)
+local f = io.open(lease_out); local line = f and f:read("*a") or ""; if f then f:close() end
+local ls, ltook, lat = line:match("^(%d+)%s+([%d%.]+)%s+([%d%.]+)")
+if ls == "404" and tonumber(lat) and tonumber(lat) - held_since >= 5 then
+    print(string.format("ok bob's answer to an offer, which reads a file the outbox step holds, waited for that step (%.1fs)",
+        tonumber(ltook)))
+else
+    print("-- bob's answer to an offer was not held for the outbox step: " .. line)
 end
 LUA
 while IFS= read -r line; do
@@ -169,10 +193,15 @@ if grep -q "backing off alice" "$WORK/daemon.log"; then
 else
     ok "the daemon did not back off from alice"
 fi
-if grep -q "alice called while we were sending to them; answered busy" "$WORK/daemon.log"; then
-    ok "the daemon's log says why alice was answered busy"
+if grep -q "answered busy" "$WORK/daemon.log"; then
+    note_fail "the daemon answered someone busy"
 else
-    note_fail "no log line for the busy answer"
+    ok "nobody was answered busy"
+fi
+if grep -q "changed by another request or sync step" "$WORK/daemon.log"; then
+    note_fail "a state file was changed under a request or sync step"
+else
+    ok "no state file was changed under anyone"
 fi
 
 kill "$DAEMON_PID"; wait "$DAEMON_PID" 2>/dev/null

@@ -20,8 +20,8 @@
 # One real sending mailbox; its recipients alice and bob are stand-ins
 # (scripts/lib/fake-recipient.lua) that answer at once and never dial back,
 # and the test speaks for them through scripts/lib/fake-contact.lua.  (Two
-# real daemons on one machine stall each other -- the open "blocking sync
-# cycle stalls inbound" issue -- so they cannot be relied on here.)
+# real daemons on one machine stalled each other when this was written;
+# #120, built 2026-11-05, ended that -- see test-serve-while-syncing.sh.)
 #
 #   a late recipient    bob is offline while alice gets the file; the file
 #                       is then changed on disk; bob, reached later, gets

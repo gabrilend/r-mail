@@ -964,6 +964,14 @@ end
 -- rather than up to two hours later.  Everyone else's backoff is untouched.
 function ctimer.saw_inbound(name)
     if not name or name == "" then return end
+    -- #120: requests are served while a sync cycle waits.  Heard during a
+    -- cycle, the contact is noted and settled when the cycle ends
+    -- (ctimer.settle_heard): moved now, the cycle's own bookkeeping would
+    -- push the due time it set straight back to the floor.
+    if ctimer.cycle then
+        ctimer.heard_during[name] = true
+        return
+    end
     local t = ctimer.get(name)
     t.interval = ctimer.FLOOR
     t.next_due = 0
@@ -1868,14 +1876,133 @@ local function align_contacts()
     if new_text ~= text then write_file(CONTACTS, new_text) end
 end
 
+-- ---- #120: serving requests while a sync cycle waits ----------------------
+--
+-- The sync cycle runs as a coroutine (ctimer.cycle, set by main).  While
+-- it waits on its requests the main loop serves everyone else, so two
+-- pieces of code can now be part-way through the same state file: a cycle
+-- step that read outbox.json, then waits on the network, then writes it
+-- back -- and a request handled in that gap that wrote outbox.json too.
+-- The later write would quietly throw the earlier one away.  Two rules
+-- keep that from happening:
+--
+--   leases   each cycle step that keeps a state file across a wait names
+--            it (ctimer.hold, in run_sync_cycle).  The outbox folder's
+--            files go with outbox.json: the phone's writes and deletions
+--            of them wait for its lease too.  While it holds the
+--            lease, a request that reads or writes that file waits (its
+--            coroutine yields "lease") until the step is done; requests
+--            that touch other files, or none, are served at once.
+--   versions every save of a state file counts.  A coroutine that saves a
+--            file another coroutine saved after it read it is refused with
+--            an error naming the file, and writes nothing: a missing lease
+--            is a loud failure, never a lost update.  (Saves by the same
+--            coroutine are not compared -- that is how the code behaved
+--            before, and it is unchanged.)
+--
+-- Request handlers do their state work without waiting on the network in
+-- between (they read the request, work, then answer), so between their
+-- reads and writes only the cycle -- at its own waits -- can run.
+-- Kept in ctimer: the main chunk is at Lua's limit of 200 locals.
+ctimer.cycle        = nil   -- {co, ...} while a sync cycle runs (main)
+ctimer.leases       = {}    -- state file -> true while a cycle step holds it
+ctimer.versions     = {}    -- state file -> saves by this process
+ctimer.reads        = setmetatable({}, {__mode = "k"})  -- coroutine -> {file -> version read}
+ctimer.heard_during = {}    -- contacts heard while a cycle ran
+ctimer.wanted_during = {}   -- contacts made due by a request while a cycle ran
+ctimer.outbox_written = false  -- the phone wrote an outbox file during a cycle
+
+-- {{{ ctimer.settle_heard
+-- Contacts heard while a cycle ran, settled when it ends: `reached` names
+-- those the cycle reached (they keep their timers); the rest are due now.
+function ctimer.settle_heard(reached)
+    for name in pairs(ctimer.heard_during) do
+        if not (reached and reached[name]) then
+            local t = ctimer.get(name)
+            t.interval = ctimer.FLOOR
+            t.next_due = 0
+        end
+    end
+    ctimer.heard_during = {}
+    -- A request that had something new for a contact (a consent answer
+    -- from the phone) wants them due now whether or not the cycle reached
+    -- them: what it has was not in this cycle.
+    for name in pairs(ctimer.wanted_during) do
+        ctimer.get(name).next_due = 0
+    end
+    ctimer.wanted_during = {}
+end
+-- }}}
+
+-- {{{ ctimer.due_now
+-- A request has something for `name` to send: due on the next pass.  Set
+-- during a cycle, the cycle's bookkeeping would put it back to the floor,
+-- so it is noted and settled when the cycle ends (#120).
+function ctimer.due_now(name)
+    if not name or name == "" then return end
+    if ctimer.cycle then
+        ctimer.wanted_during[name] = true
+        return
+    end
+    ctimer.get(name).next_due = 0
+end
+-- }}}
+
+-- {{{ ctimer.in_cycle
+function ctimer.in_cycle()
+    return ctimer.cycle ~= nil and coroutine.running() == ctimer.cycle.co
+end
+-- }}}
+
+-- {{{ ctimer.wait_for_lease
+-- A request (any coroutine but the cycle's, never the main thread) waits
+-- while a cycle step holds the file.
+function ctimer.wait_for_lease(name)
+    local _, is_main = coroutine.running()
+    if is_main or ctimer.in_cycle() then return end
+    while ctimer.leases[name] do coroutine.yield("lease", name) end
+end
+-- }}}
+
+-- {{{ ctimer.ledger
+-- The running coroutine's record of which version of each file it read.
+function ctimer.ledger()
+    local co = coroutine.running()
+    local ledger = ctimer.reads[co]
+    if not ledger then ledger = {}; ctimer.reads[co] = ledger end
+    return ledger
+end
+-- }}}
+
+-- {{{ ctimer.forget_reads
+-- A new request on a kept-alive connection, or a new pass of the main
+-- loop: what this coroutine read before says nothing about what it does
+-- next.
+function ctimer.forget_reads()
+    ctimer.reads[coroutine.running()] = nil
+end
+-- }}}
+
 local function load_state(name)
+    ctimer.wait_for_lease(name)
     local text = read_file(STATE .. "/" .. name)
+    ctimer.ledger()[name] = ctimer.versions[name] or 0
     if not text or text == "" then return {} end
     return json.decode(text)
 end
 
 local function save_state(name, data)
+    ctimer.wait_for_lease(name)
+    local ledger = ctimer.ledger()
+    local now_version = ctimer.versions[name] or 0
+    -- read before, and someone else has saved it since: refuse (see above)
+    if ledger[name] ~= nil and ledger[name] ~= now_version then
+        error("state file " .. name .. " was changed by another request or sync step after this one "
+            .. "read it; not saved, so that change is kept (#120)", 2)
+    end
     write_file(STATE .. "/" .. name, json.encode(data, {indent = true}) .. "\n")
+    ctimer.versions[name] = now_version + 1
+    ledger[name] = now_version + 1
 end
 
 -- ---- Reading state written while contact names were hashed (#505) -------
@@ -3208,6 +3335,32 @@ function ctimer.answer_while_sending(listener, dialing)
 end
 -- }}}
 
+-- {{{ ctimer.wait_for_sockets
+-- Inside the sync cycle's coroutine: hand the batch's sockets to the main
+-- loop and wait there (yield "sockets") until one is ready or `timeout`
+-- seconds pass, then see which are ready.  Same answer as socket.select.
+function ctimer.wait_for_sockets(recvt, sendt, timeout)
+    coroutine.yield("sockets", recvt, sendt, socket.gettime() + timeout)
+    return socket.select(#recvt > 0 and recvt or nil, #sendt > 0 and sendt or nil, 0)
+end
+-- }}}
+
+-- {{{ ctimer.hold
+-- Runs one sync step holding leases on the state files it keeps across
+-- its waits (see "#120: serving requests while a sync cycle waits"), then
+-- lets the requests that waited on them run before the cycle goes on
+-- (yield "released").  Gives the step's results; an error is passed on
+-- after the leases are let go.
+function ctimer.hold(names, step, ...)
+    for _, name in ipairs(names) do ctimer.leases[name] = true end
+    local results = table.pack(pcall(step, ...))
+    for _, name in ipairs(names) do ctimer.leases[name] = nil end
+    if ctimer.in_cycle() then coroutine.yield("released") end
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+-- }}}
+
 local function http_post_batch(requests)
     if #requests == 0 then return {} end
 
@@ -3262,17 +3415,23 @@ local function http_post_batch(requests)
         local remaining = deadline - socket.gettime()
         if remaining <= 0 then break end
 
-        -- the listening sockets too: see answer_while_sending
+        local readable, writable
         local listening = {}
-        for _, l in ipairs(ctimer.listeners) do
-            recvt[#recvt + 1] = l
-            listening[l] = true
+        if ctimer.in_cycle() then
+            -- #120: inside the sync cycle, wait in the main loop's select,
+            -- which serves requests meanwhile (ctimer.wait_for_sockets)
+            readable, writable = ctimer.wait_for_sockets(recvt, sendt, math.min(remaining, 0.5))
+        else
+            -- the listening sockets too: see answer_while_sending
+            for _, l in ipairs(ctimer.listeners) do
+                recvt[#recvt + 1] = l
+                listening[l] = true
+            end
+            readable, writable = socket.select(
+                #recvt > 0 and recvt or nil,
+                #sendt > 0 and sendt or nil,
+                math.min(remaining, 0.5))
         end
-
-        local readable, writable = socket.select(
-            #recvt > 0 and recvt or nil,
-            #sendt > 0 and sendt or nil,
-            math.min(remaining, 0.5))
 
         for _, sock in ipairs(readable or {}) do
             if listening[sock] then pcall(ctimer.answer_while_sending, sock, dialing) end
@@ -6954,11 +7113,16 @@ local function handle_api_sync(data, caller_name, my_name)
     save_state("inbox.json", inbox_state)
 
     -- Process outbox deletions from phone (delete file; sync_outbox notifies recipients)
+    -- #120: the outbox's files go with outbox.json -- not while a step that
+    -- holds it decides what to do with them -- and a deletion made while a
+    -- cycle runs is honoured when it ends, its change notice drained
+    if #deleted_outbox > 0 then ctimer.wait_for_lease("outbox.json") end
     for _, fname in ipairs(deleted_outbox) do
         fname = sanitize_filename(fname)
         local fpath = OUTBOX .. "/" .. fname
         if file_exists(fpath) then
             os.remove(fpath)
+            if ctimer.cycle then ctimer.outbox_written = true end
             log("phone deleted outbox: %s", fname)
         end
     end
@@ -7039,8 +7203,16 @@ end
 -- mtime (epoch seconds, from the phone's X-Mtime header) preserves authoring time.
 local function handle_api_post_outbox_file(filename, body, mtime)
     filename = sanitize_filename(filename)
+    -- #120: the outbox's files go with outbox.json.  A step that holds it
+    -- may, after its wait, strike a recipient from this file or remove it
+    -- as finished -- judged on the file as it was before the wait -- so a
+    -- new version waits until the step is done.
+    ctimer.wait_for_lease("outbox.json")
     write_file(OUTBOX .. "/" .. filename, body)
     if mtime then set_file_mtime(OUTBOX .. "/" .. filename, mtime) end
+    -- written while a cycle runs, its change notice is drained with the
+    -- cycle's own; main syncs again when the cycle ends
+    if ctimer.cycle then ctimer.outbox_written = true end
     log("phone created outbox: %s", filename)
     return 200, {ok = true}
 end
@@ -7810,6 +7982,9 @@ local function handle_request(rt, client, preread)
     local known_key = nil
 
     while true do
+        -- a new request: what this connection read for the last one says
+        -- nothing about this one (#120, ctimer.forget_reads)
+        ctimer.forget_reads()
         -- Read first 4 bytes: a frame's length, or the start of a web
         -- request -- the health check, or a frame a browser wrapped in a
         -- POST (unwrap_web_request tells them apart and explains why)
@@ -7954,7 +8129,7 @@ local function handle_request(rt, client, preread)
                     write_file(INBOX .. "/" .. entry.inbox_file, table.concat(out, "\n"))
                     -- Make the sender due now, so the answer goes out on the
                     -- next pass instead of whenever their timer comes up.
-                    ctimer.get(entry["from"]).next_due = 0
+                    ctimer.due_now(entry["from"])
                     log("phone answered consent form %s: %s", entry.inbox_file, answer)
                     send_response(resp, 200, {ok = true})
                 end
@@ -8029,13 +8204,18 @@ end
 
 local function run_sync_cycle(rt)
     check_transfers_file_cancellations()
-    local w1 = sync_outbox(rt.my_name)
-    local w2 = sync_inbox(rt.my_name)
-    local w3 = sync_address_notifications(rt.my_name)
+    -- #120: each step that waits on the network holds the state files it
+    -- keeps across that wait (ctimer.hold), so requests served meanwhile
+    -- that touch them wait for the step, and every other request is
+    -- answered at once.  A step with no wait needs none: nothing else runs
+    -- while it works.
+    local w1 = ctimer.hold({"outbox.json", "chunks-outgoing.json"}, sync_outbox, rt.my_name)
+    local w2 = ctimer.hold({"inbox.json"}, sync_inbox, rt.my_name)
+    local w3 = ctimer.hold({"pending-address.json"}, sync_address_notifications, rt.my_name)
     local w4 = check_consent_pending()
-    local w5 = send_consent_responses(rt.my_name)
-    local w6 = send_next_chunks(rt.my_name)
-    local w7 = send_attachment_cancellations(rt.my_name)
+    local w5 = ctimer.hold({"consent-responses.json"}, send_consent_responses, rt.my_name)
+    local w6 = ctimer.hold({"chunks-outgoing.json", "outbox.json"}, send_next_chunks, rt.my_name)
+    local w7 = ctimer.hold({"consent-pending.json"}, send_attachment_cancellations, rt.my_name)
     write_transfers_file(load_state("chunks-outgoing.json"))
 
     -- #115: a contact who was due but had nothing queued this cycle still
@@ -8091,6 +8271,7 @@ local function run_sync_cycle(rt)
             ctimer.get(name).next_due = now
         end
     end
+    local reached_this_cycle = ctimer.outcome
     ctimer.outcome = {}
     ctimer.follow_up = {}
 
@@ -8103,6 +8284,13 @@ local function run_sync_cycle(rt)
             ctimer.get(name).next_due = now + ctimer.jittered(ctimer.FLOOR)
         end
     end
+
+    -- #120: contacts heard from while this cycle waited (requests are
+    -- served meanwhile now).  One the cycle reached keeps the due time its
+    -- success set: making it due at once as well would have two daemons
+    -- that just exchanged mail dial each other again at once.  Anyone else
+    -- is due now, at the floor, as saw_inbound makes them between cycles.
+    ctimer.settle_heard(reached_this_cycle)
 
     -- The contacts file may have gained or lost its last contact during
     -- this cycle; keep the mailbox's own timer in step, then move it on by
@@ -8547,14 +8735,15 @@ end
 -- Active client coroutines: each connection gets its own coroutine.
 -- The main loop uses socket.select() to multiplex across all active
 -- sockets and resumes coroutines when their socket is ready.
--- The sync cycle runs inline between select iterations (not as a
--- coroutine) to keep state management simple.
+-- The sync cycle is a coroutine too (#120): it yields while it waits on
+-- its own requests, and requests are served meanwhile (see "#120: serving
+-- requests while a sync cycle waits" for how state files are kept safe).
 
 local function main()
     local rt = init_runtime()
 
     -- Active client coroutines: raw_socket -> {co, wait_type, wait_sock, last_activity}
-    -- wait_type is "read" or "write", wait_sock is the raw socket to select on
+    -- wait_type is "read" or "write" (wait_sock the raw socket to select on), or "lease" (wait_sock a state file a sync step holds, #120)
     local clients = {}
 
     -- Leaving on our own: a --once visit whose window has closed, or a
@@ -8613,10 +8802,132 @@ local function main()
     end
     -- }}}
 
+    -- {{{ the sync cycle as a coroutine (#120)
+    -- A cycle runs as a coroutine, resumed by this loop, so requests are
+    -- served while it waits on its own requests (it yields "sockets":
+    -- what to wait on, and until when) and between its steps (it yields
+    -- "released" when a step lets its leases go: the requests that waited
+    -- on them run before it goes on).  One cycle at a time.
+
+    -- {{{ finish_cycle
+    -- What followed a cycle when it ran inline, now run when it ends.
+    local function finish_cycle()
+        local cycle = ctimer.cycle
+        ctimer.cycle = nil
+        -- a step that failed let its own leases go (ctimer.hold); none
+        -- may outlive the cycle
+        for name in pairs(ctimer.leases) do ctimer.leases[name] = nil end
+        -- heard after the cycle settled them, or the cycle failed first
+        ctimer.settle_heard(nil)
+        -- callers held while a batch outside the cycle waited
+        local held = ctimer.deferred
+        ctimer.deferred = {}
+        -- the whole record is handed on, not chosen fields of it: a
+        -- copy that named first4 and packet once dropped the envelope
+        -- (how to answer) when it was added, 2026-10-08
+        for _, d in ipairs(held) do
+            start_client(d.sock, d)
+        end
+        local now = socket.gettime()
+        rt.last_sync = cycle.started
+
+        if rt.nat_mapping then
+            if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
+                local ok_r, res = pcall(nat.create_mapping, rt.port)
+                if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
+                rt.nat_mapping.last_renewed = now
+            end
+        end
+
+        -- Drain any inotify events caused by the sync cycle itself
+        inotify.read(rt.outbox_inotify_fd)
+        -- ...which swallows the notice of an outbox file the phone wrote
+        -- while the cycle ran (#120: such requests are served during it
+        -- now); that one is honoured by syncing again at once.
+        if ctimer.outbox_written then
+            ctimer.outbox_written = false
+            rt.sync_again = true
+        end
+        -- The sync cycle (and requests served during it) can rewrite the
+        -- contacts file: an announced address, a LAN-discovered
+        -- local-ip, a port change.  Those writers append plain
+        -- `name.field = value` lines and rely on align_contacts to tidy
+        -- them, but draining the event here meant the tidy never came --
+        -- a discovered `local-ip` line stayed ragged until the next hand
+        -- edit.  So a contacts event swallowed here is honoured on the
+        -- spot: align (a no-op write when already tidy), then drain the
+        -- event our own align produced.
+        local contacts_events = inotify.read(rt.contacts_inotify_fd)
+        if contacts_events and #contacts_events > 0 then
+            align_contacts()
+            inotify.read(rt.contacts_inotify_fd)
+        end
+    end
+    -- }}}
+
+    -- {{{ step_cycle
+    -- Runs the cycle until its next wait, or its end.
+    local function step_cycle()
+        local cycle = ctimer.cycle
+        local ok, kind, recvt, sendt, until_time = coroutine.resume(cycle.co)
+        if not ok then log("sync error: %s", tostring(kind)) end
+        if not ok or coroutine.status(cycle.co) == "dead" then
+            finish_cycle()
+            return
+        end
+        cycle.kind = kind
+        if kind == "sockets" then
+            cycle.recvt, cycle.sendt, cycle.until_time = recvt, sendt, until_time
+        else
+            -- "released" (or anything else): go on as soon as this loop
+            -- has let the waiting requests run
+            cycle.recvt, cycle.sendt, cycle.until_time = {}, {}, socket.gettime()
+        end
+    end
+    -- }}}
+
+    -- {{{ start_cycle
+    local function start_cycle()
+        ctimer.heard_during = {}
+        ctimer.wanted_during = {}
+        ctimer.outbox_written = false
+        rt.sync_again = false
+        ctimer.cycle = {
+            co = coroutine.create(function() run_sync_cycle(rt) end),
+            started = socket.gettime(),
+        }
+        step_cycle()
+    end
+    -- }}}
+
+    -- {{{ resume_lease_waiters
+    -- Requests that waited on a state file a cycle step held, whose lease
+    -- is gone: they go on now (#120).
+    local function resume_lease_waiters()
+        for raw_sock, info in pairs(clients) do
+            if info.wait_type == "lease" and not ctimer.leases[info.wait_sock] then
+                resume_client(raw_sock)
+            end
+        end
+    end
+    -- }}}
+    -- }}}
+
     while true do
+        -- what the main thread read on its last pass says nothing now
+        ctimer.forget_reads()
+        resume_lease_waiters()
+        local cycle = ctimer.cycle
+
         -- Build socket lists for select — includes inotify fd so the kernel
-        -- wakes us on outbox file changes without polling
-        local recvt = {rt.server, rt.outbox_inotify_sock, rt.contacts_inotify_sock}
+        -- wakes us on outbox file changes without polling.  While a cycle
+        -- runs (#120) the file-change notices wait for it to end, as they
+        -- did when it ran inline: its own changes are drained then.
+        local recvt = {rt.server}
+        if not cycle then
+            recvt[#recvt + 1] = rt.outbox_inotify_sock
+            recvt[#recvt + 1] = rt.contacts_inotify_sock
+        end
         if rt.server6 then recvt[#recvt + 1] = rt.server6 end
         local sendt = {}
         for raw_sock, info in pairs(clients) do
@@ -8625,6 +8936,12 @@ local function main()
             elseif info.wait_type == "write" then
                 sendt[#sendt + 1] = info.wait_sock
             end
+        end
+        -- the cycle's own sockets, while it waits on them
+        local cycle_socket = {}
+        if cycle then
+            for _, s in ipairs(cycle.recvt) do recvt[#recvt + 1] = s; cycle_socket[s] = true end
+            for _, s in ipairs(cycle.sendt) do sendt[#sendt + 1] = s; cycle_socket[s] = true end
         end
 
         -- Sleep until: a socket has data, an outbox file changes, it's time
@@ -8646,6 +8963,12 @@ local function main()
         if rt.next_addr_check then
             sleep_for = math.min(sleep_for, math.max(0, rt.next_addr_check - now_s))
         end
+        if rt.sync_again then sleep_for = 0 end
+        if cycle then
+            -- a cycle is running: no new one starts, so what is due waits;
+            -- sleep only until the cycle's own wait ends
+            sleep_for = math.max(0, cycle.until_time - now_s)
+        end
         sleep_for = math.min(sleep_for, stop.every)
         local readable, writable = socket.select(
             #recvt > 0 and recvt or nil,
@@ -8655,9 +8978,12 @@ local function main()
         -- Handle readable sockets
         local outbox_changed = false
         local contacts_changed = false
+        local cycle_ready = false
         if readable then
             for _, sock in ipairs(readable) do
-                if sock == rt.outbox_inotify_sock then
+                if cycle_socket[sock] then
+                    cycle_ready = true
+                elseif sock == rt.outbox_inotify_sock then
                     inotify.read(rt.outbox_inotify_fd)
                     outbox_changed = true
                 elseif sock == rt.contacts_inotify_sock then
@@ -8681,17 +9007,28 @@ local function main()
         -- Handle writable sockets
         if writable then
             for _, sock in ipairs(writable) do
-                for raw_sock, info in pairs(clients) do
-                    if info.wait_sock == sock and info.wait_type == "write" then
-                        resume_client(raw_sock)
-                        break
+                if cycle_socket[sock] then
+                    cycle_ready = true
+                else
+                    for raw_sock, info in pairs(clients) do
+                        if info.wait_sock == sock and info.wait_type == "write" then
+                            resume_client(raw_sock)
+                            break
+                        end
                     end
                 end
             end
         end
 
-        -- Sync cycle: runs on outbox/contacts change OR when the interval expires
         local now = socket.gettime()
+        -- The running cycle goes on when one of its sockets is ready or its
+        -- wait is over -- after the requests above, and after any request
+        -- that waited on a lease it let go (resume_lease_waiters, at the
+        -- top of the loop).
+        if cycle and (cycle_ready or now >= cycle.until_time) then
+            step_cycle()
+        end
+
         if now >= stop.next_check then
             stop.next_check = now + stop.every
             -- The mailbox vanished: a USB drive pulled out, or unmounted
@@ -8714,67 +9051,35 @@ local function main()
                 os.exit(0)
             end
         end
-        if contacts_changed then
-            log("contacts file changed, re-aligning and syncing")
-            align_contacts()
-            -- Drain inotify events from our own align_contacts() write
-            inotify.read(rt.contacts_inotify_fd)
-        end
-        if outbox_changed then
-            log("outbox change detected, syncing")
-        end
-        -- Runs before the sync block so that a confirmed change is written to
-        -- .state and queued into pending-address.json in time for the very
-        -- next cycle to deliver it, rather than a whole interval later.
-        if rt.next_addr_check and now >= rt.next_addr_check then
-            pcall(addrchk.run, rt)
-        end
 
-        local any_due = (ctimer.time_to_due(now) or math.huge) <= 0
-        if outbox_changed or contacts_changed or any_due then
-            for raw_sock, info in pairs(clients) do
-                if now - info.last_activity > 30 then
-                    pcall(function() raw_sock:close() end)
-                    clients[raw_sock] = nil
-                end
-            end
-
-            local ok, err = pcall(run_sync_cycle, rt)
-            if not ok then log("sync error: %s", tostring(err)) end
-            -- callers held while the cycle waited on its own requests
-            local held = ctimer.deferred
-            ctimer.deferred = {}
-            -- the whole record is handed on, not chosen fields of it: a
-            -- copy that named first4 and packet once dropped the envelope
-            -- (how to answer) when it was added, 2026-10-08
-            for _, d in ipairs(held) do
-                start_client(d.sock, d)
-            end
-            rt.last_sync = now
-
-            if rt.nat_mapping then
-                if now - (rt.nat_mapping.last_renewed or rt.nat_mapping.created_at) >= 1800 then
-                    local ok_r, res = pcall(nat.create_mapping, rt.port)
-                    if ok_r and res then log("renewed NAT mapping via %s", res.protocol) end
-                    rt.nat_mapping.last_renewed = now
-                end
-            end
-
-            -- Drain any inotify events caused by the sync cycle itself
-            inotify.read(rt.outbox_inotify_fd)
-            -- The sync cycle (and requests served during it) can rewrite the
-            -- contacts file: an announced address, a LAN-discovered
-            -- local-ip, a port change.  Those writers append plain
-            -- `name.field = value` lines and rely on align_contacts to tidy
-            -- them, but draining the event here meant the tidy never came --
-            -- a discovered `local-ip` line stayed ragged until the next hand
-            -- edit.  So a contacts event swallowed here is honoured on the
-            -- spot: align (a no-op write when already tidy), then drain the
-            -- event our own align produced.
-            local contacts_events = inotify.read(rt.contacts_inotify_fd)
-            if contacts_events and #contacts_events > 0 then
+        -- Everything below changes files a running cycle may be part-way
+        -- through, or starts a cycle: it waits until no cycle runs (#120).
+        if not ctimer.cycle then
+            if contacts_changed then
+                log("contacts file changed, re-aligning and syncing")
                 align_contacts()
+                -- Drain inotify events from our own align_contacts() write
                 inotify.read(rt.contacts_inotify_fd)
+            end
+            if outbox_changed then
+                log("outbox change detected, syncing")
+            end
+            -- Runs before the sync block so that a confirmed change is written to
+            -- .state and queued into pending-address.json in time for the very
+            -- next cycle to deliver it, rather than a whole interval later.
+            if rt.next_addr_check and now >= rt.next_addr_check then
+                pcall(addrchk.run, rt)
+            end
+
+            local any_due = (ctimer.time_to_due(now) or math.huge) <= 0
+            if outbox_changed or contacts_changed or any_due or rt.sync_again then
+                for raw_sock, info in pairs(clients) do
+                    if now - info.last_activity > 30 then
+                        pcall(function() raw_sock:close() end)
+                        clients[raw_sock] = nil
+                    end
+                end
+                start_cycle()
             end
         end
     end
