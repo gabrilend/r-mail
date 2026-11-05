@@ -2,9 +2,9 @@
 
 ## Status
 
-Open, 2026-09-29.  Numbered in phase 4 because phase 3 is full (see
-`phase-4-progress.md`); it belongs with attachments when #621 re-sorts
-the phases.  The owner approved every fix below on 2026-09-29 ("yes,
+Open, 2026-09-29.  Listed with phase 3's attachments
+(`phase-3-progress.md`).  It was first numbered 404 in phase 4, and its
+sub-issues 404a–404f; they are #311 and #311a–#311f now.  The owner approved every fix below on 2026-09-29 ("yes,
 everything that you mentioned"); #311e was found during the work and
 added.
 
@@ -68,16 +68,16 @@ daemon has checked it:
 
 | ID | Name | Dependencies | Description |
 |---|---|---|---|
-| 404a | symbolic-links-become-notes | None | never recreate a link from a received zip; write a note instead; refuse to serve links |
-| 327 | reject-oversized-transfers (reopened) | 404a | measure the unpacked size before extracting |
-| 404b | chunk-checksums-and-counts-are-required | None | refuse chunks without checksums; fix the chunk count per transfer; check chunk numbers |
-| 404c | phone-uploads-are-verified | 404a | per-chunk and whole-file checksums, one entry, checked unzip |
-| 404d | files-changing-while-packed-are-packed-again | None | compare size and time before and after packing |
-| 404e | attachment-ids-and-consent-are-checked-first | 404b | ids must look like ids; no chunk before consent |
-| 404f | arriving-pieces-wait-on-disk | None | the pending folder defaults to a folder on disk, not `/tmp` (RAM on many systems); added 2026-10-02 |
+| 311a | symbolic-links-become-notes | None | never recreate a link from a received zip; write a note instead; refuse to serve links |
+| 310 | reject-oversized-transfers (reopened) | 311a | measure the unpacked size before extracting |
+| 311b | chunk-checksums-and-counts-are-required | None | refuse chunks without checksums; fix the chunk count per transfer; check chunk numbers |
+| 311c | phone-uploads-are-verified | 311a | per-chunk and whole-file checksums, one entry, unpacking checked (by the shared zip reader since #309) |
+| 311d | files-changing-while-packed-are-packed-again | None | compare size and time before and after packing |
+| 311e | attachment-ids-and-consent-are-checked-first | 311b | ids must look like ids; no chunk before consent |
+| 311f | arriving-pieces-wait-on-disk | None | the pending folder defaults to a folder on disk, not `/tmp` (RAM on many systems); added 2026-10-02 |
 
-Execution order: `404a → 327 → 404b → 404c → 404d → 404e → 404f`.  404a and 327
-share the new unpacking step; 404b and 404e both change the chunk
+Execution order: `311a → 310 → 311b → 311c → 311d → 311e → 311f`.  311a and 310
+share the new unpacking step; 311b and 311e both change the chunk
 handler, so they go one after the other.
 
 ## Suggested Implementation Steps
@@ -107,6 +107,44 @@ handler, so they go one after the other.
 
 Each builds its own throwaway mailboxes under `/tmp/rmail/tests/` on its
 own port, so they can run together.
+
+## Decisions (2026-11-05)
+
+Made by the builder, checking this issue against the code on `main`.
+The owner can overturn each one.
+
+1. **Nothing is left to build here except #311c's phone side.**  Every
+   point in Intended Behavior is in `rmail.lua` on `main`:
+   - links are never made, and are never served (`upload.refuse_link`,
+     and the listing leaves them out);
+   - unpacking goes through the shared zip reader (#309), with the
+     size limit (#310);
+   - checksums and counts are required (#311b);
+   - phone uploads are checked piece by piece, as a whole, and as one
+     file (#311c, daemon side);
+   - a file that changes while it is packed is packed again (#311d);
+   - ids are checked and no piece comes before consent (#311e);
+   - pieces wait on disk (#311f).
+
+   The eight scripts under Tests all pass on `main` (run 2026-11-05,
+   loopback only).  So the 2026-11-05 round adds no code.  It
+   corrects this file and records the state.  Undo: none needed.
+2. **#311 stays open until #311c is finished.**  The phone build needs
+   the Android SDK and the owner's phone, so it was not touched.  The
+   owner's 2026-09-29 approval still covers that step.  Undo: close #311
+   now, and leave #311c open on its own.
+3. **The phone stays refused until the new app is installed.**  The
+   daemon refuses a resume without `total_checksum`, so the installed
+   app's uploads fail with a 400.  Accepting them again would mean
+   storing a whole zip that nobody checked, which is what #311 exists to
+   stop.  So the refusal is kept, and #311c says so.  Undo: let
+   `upload.checksums_from` accept a missing `total_checksum`, and have
+   `upload.finish` skip the whole-file comparison when there is none.
+   The owner would be giving up the whole-file check for old apps.
+4. **The sub-issue table uses the current numbers.**  It still named the
+   old 404a–404f and 327, which no file uses any more.  The
+   Current Behavior list keeps its `unzip` wording, because it records
+   what the 2026-09-29 read found; rmail has not run `unzip` since #309.
 
 ## Related
 
