@@ -29,13 +29,21 @@
 # the mailbox — there is no checkout on the far end of a USB cable, so
 # the drive brings one (#102).
 #
-# What travels is an allowlist, not the whole tree minus exclusions:
+# What travels is a payload built for drives by
+# scripts/generate-portable-mailbox.sh (#617), and it is an allowlist,
+# not the whole tree minus exclusions:
 #
 #   rmail.lua, run-rmail.sh, libs/     the daemon and its libraries
 #   deps/lua/                          the interpreter — required, not optional
 #   rmail_crypto.c, rmail_inotify.c    the source behind the two .so files
 #   BUILD-NOTES.txt                    the commands that compiled them
-#   LICENSE                            ships with the binaries
+#   LICENSE, licenses/                 ship with the binaries
+#
+# This script places a payload and compiles nothing.  It used to copy
+# whatever install.sh had left in libs/ and deps/, which was built for a
+# local install, and then patch it up for a drive: relink the crypto
+# module against a static OpenSSL, warn about a readline Lua.  The
+# generator now does the right build in the first place.
 #
 # Not the Android client, the docs, the issues, or the development
 # transcripts.  A drive is somebody's mailbox made portable, not a way
@@ -56,12 +64,13 @@
 #
 # install.sh used to travel, solely to do that recompiling, and it also
 # stood in as the build instructions the licence wants alongside shipped
-# binaries.  BUILD-NOTES.txt covers the second job in fifteen lines, and
-# the first job is one nobody wanted done.
+# binaries.  BUILD-NOTES.txt covers the second job, and the first job is
+# one nobody wanted done.
 #
 # Usage:
 #   scripts/make-mailbox-drive.sh --name NAME --port PORT \
-#                                 [--dest PATH] [--mailbox NAME] [--dry-run]
+#                                 [--payload DIR] [--dest PATH] \
+#                                 [--mailbox NAME] [--dry-run]
 
 set -e
 
@@ -80,6 +89,7 @@ NAME=""
 PORT=""
 MAILBOX_NAME="mailbox-0"
 FORCE=false
+PAYLOAD=""
 
 show_help() {
     cat <<'HELP'
@@ -95,6 +105,10 @@ Required:
 
 Options:
   -h, --help         Show this help and exit
+  --payload DIR      The program to put on the drive, as built by
+                     scripts/generate-portable-mailbox.sh.  Default: this
+                     machine's own, deps/portable/<arch>/payload, which is
+                     built first if it is not there yet.
   --dest PATH        Write to PATH instead of auto-detecting a flash drive
   --mailbox NAME     Name for the mailbox directory (default: mailbox-0)
   --dry-run          Print what would happen; don't modify anything
@@ -106,13 +120,17 @@ Auto-detection looks for a mounted filesystem whose mount-point basename
 matches FLASH_LABEL (currently "RMAIL").  If zero or multiple drives
 match, --dest is required.
 
-This checkout must already have both libs/ and a locally compiled Lua
-under deps/lua — run scripts/install.sh once, choosing to compile Lua,
-before using this generator.  Both are copied onto the drive, which
-then runs without asking the host for an interpreter or a library.
+This script compiles nothing.  The payload carries its own Lua and its
+own OpenSSL, so the drive runs without asking a host for an interpreter
+or a library.  To build one for another kind of machine:
 
-A drive is tied to the CPU architecture it was built on.  Plugged into
-a machine of a different kind, the launchers say so and stop.
+    scripts/generate-portable-mailbox.sh --target aarch64
+
+and pass the directory it prints to --payload.
+
+A drive is tied to the CPU architecture its payload was built for.
+Plugged into a machine of a different kind, the launchers say so and
+stop.
 HELP
 }
 
@@ -135,6 +153,10 @@ while [ $# -gt 0 ]; do
             [ -z "${2:-}" ] && { err "--mailbox requires a value"; exit 1; }
             MAILBOX_NAME="$2"; shift 2 ;;
         --mailbox=*) MAILBOX_NAME="${1#*=}"; shift ;;
+        --payload)
+            [ -z "${2:-}" ] && { err "--payload requires a directory"; exit 1; }
+            PAYLOAD="$2"; shift 2 ;;
+        --payload=*) PAYLOAD="${1#*=}"; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --force) FORCE=true; shift ;;
         *) err "unknown argument: $1"; show_help >&2; exit 1 ;;
@@ -201,27 +223,57 @@ if [ -d "$MAILBOX_DIR" ] && ! $FORCE; then
 fi
 
 # ---------------------------------------------------------------------------
-# Verify libs are present in the source tree.  Without them the drive won't
-# actually run — the generator's one hard prerequisite.
+# The payload: the program this drive will carry.
+#
+# Given one, use it.  Otherwise use this machine's own from where the
+# generator leaves it, and build that first if it is not there — the
+# common case stays one command, and the build is the generator's, with
+# its phases and its checks, rather than a second copy of them here.
 
-if [ ! -d "$ROOT/libs" ] || [ -z "$(ls -A "$ROOT/libs" 2>/dev/null)" ]; then
-    err "no built libs found in $ROOT/libs"
-    err "  run scripts/install.sh locally first to compile them,"
-    err "  then re-run this script."
-    exit 1
+if [ -z "$PAYLOAD" ]; then
+    case "$(uname -m)" in
+        x86_64|amd64) _arch=x86_64 ;;
+        aarch64|arm64) _arch=aarch64 ;;
+        *) _arch=$(uname -m) ;;
+    esac
+    PAYLOAD="$ROOT/deps/portable/$_arch/payload"
+    if [ ! -d "$PAYLOAD" ]; then
+        if $DRY_RUN; then
+            info "would build a payload first: scripts/generate-portable-mailbox.sh"
+        else
+            info "no payload for $_arch yet; building one"
+            "$SCRIPT_DIR/generate-portable-mailbox.sh" --target "$_arch"
+        fi
+    fi
 fi
 
-# The bundled interpreter is required, not preferred.  A drive carrying
-# libraries but no Lua is asking the host for one, and a host that has no
-# Lua — or one too old, or built against a different Lua version than
-# these libraries were — is exactly the situation a portable drive exists
-# to survive.  Refuse to make half a drive.
-if [ ! -x "$ROOT/deps/lua/bin/lua" ]; then
-    err "no bundled Lua at $ROOT/deps/lua/bin/lua"
-    err "  a portable drive carries its own interpreter, so this checkout"
-    err "  needs one compiled before it can make a drive."
-    err "  re-run scripts/install.sh and choose to compile Lua locally."
-    exit 1
+if [ -d "$PAYLOAD" ] || ! $DRY_RUN; then
+    if [ ! -d "$PAYLOAD" ]; then
+        err "no payload at $PAYLOAD"
+        err "  build one with scripts/generate-portable-mailbox.sh"
+        exit 1
+    fi
+    PAYLOAD=$(cd "$PAYLOAD" && pwd)
+
+    # The bundled interpreter is required, not preferred.  A drive carrying
+    # libraries but no Lua is asking the host for one, and a host that has
+    # no Lua — or one built against a different Lua version than these
+    # libraries were — is exactly the situation a portable drive exists to
+    # survive.  Refuse to make half a drive.
+    if [ ! -x "$PAYLOAD/deps/lua/bin/lua" ]; then
+        err "the payload has no Lua at $PAYLOAD/deps/lua/bin/lua"
+        err "  it is not a payload the generator finished; build it again with"
+        err "  scripts/generate-portable-mailbox.sh --force"
+        exit 1
+    fi
+    for _f in rmail.lua run-rmail.sh libs BUILD-NOTES.txt LICENSE; do
+        if [ ! -e "$PAYLOAD/$_f" ]; then
+            err "the payload is missing $_f: $PAYLOAD"
+            err "  build it again with scripts/generate-portable-mailbox.sh --force"
+            exit 1
+        fi
+    done
+    ok "payload: $PAYLOAD"
 fi
 
 if $DRY_RUN; then
@@ -271,153 +323,37 @@ SRC_DIR="$MAILBOX_DIR/source-code"
 info "copying the program into $SRC_DIR"
 mkdir -p "$SRC_DIR"
 
-for _f in rmail.lua run-rmail.sh rmail_crypto.c rmail_inotify.c LICENSE; do
-    if [ -f "$ROOT/$_f" ]; then
-        cp "$ROOT/$_f" "$SRC_DIR/$_f"
-    else
-        err "missing from the checkout: $_f"
-        exit 1
-    fi
-done
-chmod +x "$SRC_DIR/run-rmail.sh"
-
-cp -a "$ROOT/libs" "$SRC_DIR/libs"
-
-# Relink the crypto module so it carries its own OpenSSL.
-#
-# The checkout's copy borrows libcrypto from the machine it was built on
-# — on a normal install that is correct and costs nothing.  On a drive it
-# is a dependency on a stranger: OpenSSL 3 and OpenSSL 1.1 export
-# different symbols, so a drive built against one and plugged into a host
-# with the other fails at load.  That is not an exotic case; it is the
-# difference between a current distribution and a long-term-support one.
-#
-# Only the archive's referenced parts get pulled in, but OpenSSL 3 routes
-# even AES-GCM through its provider machinery, so "referenced" turns out
-# to be most of the library.  It costs about 6.7 MB.  A flash drive has
-# it; a host that cannot load the module does not.
-_libcrypto_a=""
-for _d in /usr/lib /usr/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu "$ROOT/deps/openssl/lib" "$ROOT/deps/openssl/lib64"; do
-    [ -n "$_d" ] || continue
-    if [ -f "$_d/libcrypto.a" ]; then _libcrypto_a="$_d/libcrypto.a"; break; fi
-done
-
-if [ -z "$_libcrypto_a" ]; then
-    err "no static libcrypto.a found"
-    err "  a drive carries its own OpenSSL rather than borrowing the host's,"
-    err "  so the static archive is needed to build it.  Install your"
-    err "  distribution's OpenSSL development package and try again."
-    exit 1
-fi
-
-info "linking a self-contained crypto module against $_libcrypto_a"
-if ! cc -shared -fPIC -O2 -Wall \
-        -I"$ROOT/deps/lua/include" \
-        -o "$SRC_DIR/libs/rmail_crypto.so" \
-        "$ROOT/rmail_crypto.c" \
-        "$_libcrypto_a" -lpthread 2>/dev/null; then
-    err "could not build a self-contained crypto module"
-    err "  needs a C compiler and OpenSSL headers on this machine."
-    exit 1
-fi
-
-if ldd "$SRC_DIR/libs/rmail_crypto.so" 2>/dev/null | grep -q libcrypto; then
-    err "the crypto module still wants libcrypto from a host"
-    err "  the static link did not take; this drive would not be portable."
-    exit 1
-fi
-ok "crypto module carries its own OpenSSL ($(du -h "$SRC_DIR/libs/rmail_crypto.so" | cut -f1))"
-
-
-# The interpreter, and it is not optional.  A drive that relies on the host
-# having a usable Lua is a drive that works on the hosts you tried and not
-# on the one you needed.  Bundling it means the only thing the drive asks
-# of a host is a CPU it was built for.
-mkdir -p "$SRC_DIR/deps"
-cp -a "$ROOT/deps/lua" "$SRC_DIR/deps/lua"
-
-# The interpreter's build-time pieces do not travel.  liblua.a exists to
-# compile modules against and luac compiles Lua to bytecode; neither is
-# touched at runtime, and together they are most of what deps/lua weighs.
-# The headers stay, because BUILD-NOTES.txt tells the reader they can
-# rebuild the compiled parts and that should be true of what is in their
-# hand.
-rm -f "$SRC_DIR/deps/lua/bin/luac" "$SRC_DIR/deps/lua/lib/liblua.a"
-rm -rf "$SRC_DIR/deps/lua/man" "$SRC_DIR/deps/lua/share"
-
-# The recipe for the two compiled libraries.  They are shipped as binaries,
-# and the licence this project is under says that anyone given a binary can
-# ask for the source it came from — where "source" includes the commands
-# that did the compiling, not only the .c files beside them.
-#
-# This used to be satisfied by putting the whole installer on the drive,
-# which was a two-thousand-line answer to a two-line question.
-cat > "$SRC_DIR/BUILD-NOTES.txt" <<'BUILDNOTES'
-How the compiled parts of this drive were built
-===============================================
-
-Two of the files here are compiled from C, and this is how.  You need a C
-compiler, OpenSSL's headers, and the Lua headers from deps/lua/include.
-
-  cc -shared -fPIC -O2 -Wall -I deps/lua/include \
-     -o libs/rmail_crypto.so rmail_crypto.c -lcrypto
-
-  cc -shared -fPIC -O2 -Wall -I deps/lua/include \
-     -o libs/rmail_inotify.so rmail_inotify.c
-
-The interpreter in deps/lua is stock Lua, built with its own makefile and
-no local changes:
-
-  make linux          # deliberately not linux-readline — see below
-  make install INSTALL_TOP=<somewhere>/deps/lua
-
-It is built without readline on purpose.  readline is only used by Lua's
-interactive prompt, which nothing here runs, and linking it would add
-libreadline and libncursesw to what this drive needs from a host.  As
-built, it needs libc and libm and nothing else.
-
-The luasocket libraries under libs/socket and libs/mime are stock
-luasocket.  The full project, including the build script that assembles
-all of this, is at https://github.com/gabrilend/r-mail
-BUILDNOTES
+# The payload is already exactly what travels: the generator laid it out
+# for a drive, trimmed the interpreter's build-time pieces, and wrote the
+# build notes and licences.  So it goes over whole, and nothing here
+# chooses, relinks or rebuilds any part of it.
+cp -R "$PAYLOAD/." "$SRC_DIR/"
+chmod +x "$SRC_DIR/run-rmail.sh" "$SRC_DIR/deps/lua/bin/lua"
 
 # Prove the drive works before handing it over.
 #
-# The launchers run this same check on every launch and, when it fails, tells
+# The launchers run this same check on every launch and, when it fails, tell
 # the user the drive was built for a different kind of machine.  That
-# sentence is only honest if the drive was known to work somewhere, so
-# the somewhere is here, now, on the machine that just built it.
-# Otherwise a drive assembled from a broken checkout would travel and
-# then blame the host it arrived at.
-if ! LUA_PATH="$SRC_DIR/libs/?.lua;;" LUA_CPATH="$SRC_DIR/libs/?.so;;" \
+# sentence is only honest if the drive was known to work somewhere.  For a
+# payload built for this machine the somewhere is here, now; for one built
+# for another kind, the generator checked its file types and this machine
+# cannot run it, so say that instead of failing.
+if LUA_PATH="$SRC_DIR/libs/?.lua;;" LUA_CPATH="$SRC_DIR/libs/?.so;;" \
      "$SRC_DIR/deps/lua/bin/lua" \
      -e 'require "socket.core"; require "rmail_crypto"; require "rmail_inotify"' \
      >/dev/null 2>&1; then
-    err "the copied interpreter cannot load the copied libraries"
+    ok "checked: the drive's own Lua loads the drive's own libraries"
+elif ! "$SRC_DIR/deps/lua/bin/lua" -v >/dev/null 2>&1; then
+    warn "this machine cannot run the payload's Lua, so the drive was not"
+    warn "  tried here.  That is expected for a payload built for another"
+    warn "  kind of machine:"
+    warn "      $(file -b "$SRC_DIR/deps/lua/bin/lua" 2>/dev/null | cut -d, -f1-2)"
+else
+    err "the drive's own interpreter cannot load the drive's own libraries"
     err "  this drive would not run anywhere, including here, so it is"
-    err "  not worth carrying.  Re-run scripts/install.sh --force in the"
-    err "  checkout to rebuild them, then make the drive again."
+    err "  not worth carrying.  Build the payload again with"
+    err "  scripts/generate-portable-mailbox.sh --force, then make the drive again."
     exit 1
-fi
-ok "checked: the drive's own Lua loads the drive's own libraries"
-
-# A Lua built before the no-readline change carries two dependencies it
-# has no use for, and they are the two a spare or unusual host is most
-# likely to be missing.  The drive still works everywhere that has them,
-# so this is worth saying rather than refusing over — but it is worth
-# saying, because otherwise every drive made from this checkout keeps
-# inheriting it silently.
-if command -v ldd >/dev/null 2>&1; then
-    if ldd "$SRC_DIR/deps/lua/bin/lua" 2>/dev/null | grep -q "readline\|ncurses"; then
-        warn "this checkout's Lua was built with readline, so the drive needs"
-        warn "  libreadline and libncursesw from any host it is plugged into."
-        warn "  Nothing here uses Lua's interactive prompt, which is all"
-        warn "  readline is for.  Rebuilding drops them:"
-        warn "      scripts/install.sh --force"
-        warn "  then make the drive again."
-    else
-        ok "its Lua needs only libc and libm from a host"
-    fi
 fi
 
 ok "program: $SRC_DIR ($(du -sh "$SRC_DIR" | cut -f1))"

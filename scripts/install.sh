@@ -521,10 +521,11 @@ download() {
 # of those carries a licence clause requiring that a *binary* redistribution
 # reproduce the upstream copyright notice.  The git repository itself never
 # ships those binaries (deps/ and libs/* are ignored), so the obligation
-# looks dormant — but scripts/make-mailbox-drive.sh rsyncs a fully built
-# tree, deps/ and all, onto a USB drive meant to be handed to another
-# person.  That is a binary redistribution, and without this step it would
-# leave without the notices.
+# looks dormant — but a portable mailbox drive carries built binaries
+# onto a USB drive meant to be handed to another person.  That is a binary
+# redistribution, and without this step it would leave without the
+# notices.  scripts/generate-portable-mailbox.sh, which builds what a drive
+# carries, lifts this routine out of here rather than keeping a copy.
 #
 # Harvested at build time rather than kept as a checked-in NOTICES file on
 # purpose: a hand-written copy goes stale the moment a pinned version moves,

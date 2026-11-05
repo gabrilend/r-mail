@@ -155,5 +155,64 @@ is no user whose preferences it needs.
 
 ## Status
 
-Open.  No steps started.  Every build command it needs has been run by
-hand successfully and is recorded in #619.
+Built 2026-11-05: steps 1 to 7.  `scripts/generate-portable-mailbox.sh`
+builds one architecture's payload in seven numbered phases (target,
+sources, Lua, OpenSSL, luasocket, the two rmail libraries, assemble and
+verify), each skipping what a previous run left and saying so.
+`make-mailbox-drive.sh` now places a payload and compiles nothing: the
+static relink, the `libcrypto.a` search and the readline warning are
+gone from it, because the payload is built right in the first place.
+
+Not yet proven here: a build from the real Lua and luasocket sources.
+The machine this was written on could fetch OpenSSL's release tarball
+but not lua.org or GitHub's source archives, so
+`scripts/test-portable-payload.sh` builds from stand-in archives that
+record how they were driven (`make linux` and never `linux-readline`,
+Configure's flags, the compiler) and install the system's Lua and
+libcrypto.  The real OpenSSL 3.5.1 can be put through the same test
+with `RMAIL_TEST_OPENSSL=<path to openssl-3.5.1.tar.gz>`.  An aarch64
+payload needs `gcc-aarch64-linux-gnu`, which was not installed; the
+refusal that names it is tested.
+
+## Decisions (2026-11-05)
+
+- **Two scripts.**  The generator builds a program; the drive maker
+  writes a mailbox and places a program on it.  The names stopped
+  overlapping by what each says it makes: a *payload* is the built
+  program, a *drive* is where it goes.  #619 already has the drive
+  maker calling the payload builder once per architecture, and this
+  keeps that shape.
+- **Payloads live in `deps/portable/<arch>/`**, beside the build tree
+  that produced them (`deps/portable/<arch>/build/`), and downloaded
+  archives in `deps/sources/`.  `deps/` is already ignored, so no new
+  `.gitignore` entry.  Not RAM: tens of megabytes that take minutes to
+  rebuild, which is the case the project's RAM convention does not cover.
+- **No payload for a machine.**  Nothing needs one, and it would give
+  the output two consumers.  The payload is shaped as a drive's
+  `source-code/` and nothing else.
+- **The drive maker builds one if none is given.**  `--payload DIR`
+  places that one; with none, it uses this machine's own
+  (`deps/portable/<arch>/payload`) and runs the generator first if it
+  is not there, so the common case stays one command.  One payload per
+  drive until #619 lays drives out per architecture.
+- **OpenSSL 3.5.1 with #619's flags**, not install.sh's pinned 3.2.1:
+  #619 measured the flag set on 3.5.1 and checked that encryption still
+  round-trips, and a payload is a separate build from a local install.
+  Lua 5.4.7 and luasocket 3.1.0 as install.sh pins them.
+- **Licences are harvested by install.sh's own routine**, lifted out
+  of it with sed the way `scripts/test-license-harvest.sh` does, and
+  the build refuses to finish a payload missing any of the three.
+- **The load check needs no network.**  On a host-architecture build
+  the generator runs the payload's Lua: it loads `socket.core`,
+  `mime.core`, `rmail_crypto` and `rmail_inotify`, and round-trips
+  AES-256-GCM.  For another architecture it checks every binary's ELF
+  machine with `readelf` (not `file`, which is not on every build
+  machine), and for either it checks with `readelf`'s NEEDED list that
+  the crypto module needs no `libcrypto` and the interpreter needs
+  nothing past libc, libm and the loader.
+- **A drive built from another architecture's payload is not refused.**
+  The drive maker cannot run that Lua, says so and names what it was
+  built for; the generator already checked its file types.
+- **Not built:** `rmail_kqueue.c` for macOS (#620), several payloads on
+  one drive (#619 steps 4 and 5).
+- Test: `scripts/test-portable-payload.sh`.
