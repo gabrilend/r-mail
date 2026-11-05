@@ -169,6 +169,10 @@ local cfg = {
         end
     end)(),
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
+    -- #317: a single file this size or larger is sent from where it lies,
+    -- with no packed copy; smaller files and folders are packed as before.
+    -- 16 MiB by default; 0 sends every single file that way.
+    copy_below        = tonumber(config.attachment_copy_below) or 16777216,
     libs              = config.libs,
     auto_port_forward = config.auto_port_forward == true,
     -- #102 step 7: seconds a contact may go unreached, with mail waiting
@@ -4680,7 +4684,7 @@ function answers.shared_copy(state, name, path)
     if not now_fp then return false end
     for other, meta in pairs(state) do
         local pk = other ~= name and meta.packed and meta.packed[path]
-        if pk and pk.fingerprint == now_fp and file_exists(pk.zip) then
+        if pk and pk.fingerprint == now_fp and upload.copy_intact(pk.zip) then
             local copy = {}
             for k, v in pairs(pk) do copy[k] = v end
             return copy
@@ -4745,6 +4749,201 @@ local function compress_attachment(filepath)
     end
     return zip_path, checksum, comp_size, packed.size
 end
+
+-- ---- A single file sent from where it lies (#317) ------------------------
+--
+-- A stored zip around one file is its local header, the file's bytes
+-- unchanged, and a central directory.  For a single file at or above
+-- `attachment_copy_below` bytes nothing is copied: the header and
+-- directory are computed once and kept in a small layout file in the
+-- pending folder, `rmail-<id>.virtual`, and every piece is assembled from
+-- them and the file itself.  The bytes are exactly what
+-- upload.zip_writer.pack would have written, so the offer, the checksum
+-- and the receiver are unchanged, and an older receiver keeps working.
+--
+-- The layout file stands where the packed copy stood: records name it as
+-- they named the zip, the release passes delete it (never the file it
+-- describes), and a missing one is a lost copy (#314).  What the copy
+-- guaranteed -- the same bytes for as long as anyone is downloading -- is
+-- checked instead: the file's identity (device, inode, size, modification
+-- time) is recorded when it is laid out and compared before every piece.
+-- A file that no longer matches has changed, its layout is deleted, and
+-- the offer goes the #314 lost route.
+--
+-- The layout lives here rather than in libs/zip-writer.lua because that
+-- file is a pinned copy of my-libs' (libs/zip-library.version); the test
+-- checks the two give identical bytes.  Files of 4 GiB or more are still
+-- refused, as the writer refuses them: that needs zip64 on both sides
+-- (rao-chat 216f).
+
+upload.VIRTUAL = ".virtual"
+upload.LIMIT_32 = 4294967295
+upload.zip_inflate = require("zip-inflate")
+upload.zip_compat = require("zip-compat")
+
+-- {{{ upload.is_virtual
+function upload.is_virtual(zip)
+    return type(zip) == "string" and zip:sub(-#upload.VIRTUAL) == upload.VIRTUAL
+end
+-- }}}
+
+-- {{{ upload.identity
+-- "<device> <inode> <size> <mtime>" and the type, mode and whole-second
+-- time of path (followed once if a link, as the packer follows it), or
+-- nil when it cannot be read.  A file replaced by another of the same
+-- size and time still differs by inode.
+function upload.identity(path)
+    local h = io.popen("find -H " .. shell_quote(path) .. " -maxdepth 0 -printf '%D %i %s %T@\\n%y %m'" ..
+        " 2>/dev/null")
+    local text = h and h:read("*a") or ""
+    if h then h:close() end
+    local id, kind, mode = text:match("^([^\n]+)\n(%a) (%d+)$")
+    if not id then return nil end
+    local size, stamp = id:match("^%S+ %S+ (%d+) (%S+)$")
+    return id, kind, tonumber(mode, 8), tonumber(size), math.floor(tonumber(stamp))
+end
+-- }}}
+
+-- {{{ upload.lay_out
+-- Lay out `filepath` as a stored zip without copying it.  Returns (layout
+-- path, SHA-256 of the whole zip, its length, the file's size), or nil and
+-- a reason: "pack" (a folder, a file below the threshold or of 4 GiB or
+-- more: pack it as before), "missing", or "changed" (it changed while it
+-- was read; laid out again next cycle, as compress_attachment does).
+function upload.lay_out(filepath)
+    local path = filepath:gsub("/+$", "")
+    local id, kind, mode, size, seconds = upload.identity(path)
+    if not id then return nil, "missing" end
+    if kind ~= "f" or size < cfg.copy_below or size > upload.LIMIT_32 then return nil, "pack" end
+    local compat, LAP = upload.zip_compat, 4294967296
+    local function le16(n) return string.char(n % 256, math.floor(n / 256) % 256) end
+    local function le32(n)
+        return string.char(n % 256, math.floor(n / 256) % 256, math.floor(n / 65536) % 256,
+                           math.floor(n / 16777216) % 256)
+    end
+    -- the DOS time beside every entry, exactly as the writer makes it
+    local tm = os.date("!*t", seconds)
+    local time, date = 0, compat.bor(compat.lshift(0, 9), compat.lshift(1, 5), 1)
+    if tm.year >= 1980 and tm.year <= 2107 then
+        time = compat.bor(compat.lshift(tm.hour, 11), compat.lshift(tm.min, 5), math.floor(tm.sec / 2))
+        date = compat.bor(compat.lshift(tm.year - 1980, 9), compat.lshift(tm.month, 5), tm.day)
+    end
+    local f = io.open(path, "rb")
+    if not f then return nil, "missing" end
+    local crc, read = 0, 0
+    while true do
+        local piece = f:read(65536)
+        if not piece then break end
+        crc = upload.zip_inflate.crc32_string(crc, piece)
+        read = read + #piece
+    end
+    f:close()
+    if read ~= size or upload.identity(path) ~= id then
+        log("laying out %s: it changed while it was being read -- will try again next cycle", filepath)
+        return nil, "changed"
+    end
+    local name = path:match("([^/]+)$")
+    local extra = le16(0x5455) .. le16(5) .. string.char(1) .. le32(seconds % LAP)
+    local head = "PK\3\4" .. le16(10) .. le16(0x0800) .. le16(0) .. le16(time) .. le16(date)
+        .. le32(crc % LAP) .. le32(size) .. le32(size) .. le16(#name) .. le16(#extra) .. name .. extra
+    if #head + size > upload.LIMIT_32 then return nil, "pack" end
+    local directory = "PK\1\2" .. le16(0x031E) .. le16(10) .. le16(0x0800) .. le16(0)
+        .. le16(time) .. le16(date) .. le32(crc % LAP) .. le32(size) .. le32(size)
+        .. le16(#name) .. le16(#extra) .. le16(0) .. le16(0) .. le16(0)
+        .. le32((0x8000 + mode % 4096) * 65536) .. le32(0) .. name .. extra
+    local tail = directory .. "PK\5\6" .. le16(0) .. le16(0) .. le16(1) .. le16(1)
+        .. le32(#directory) .. le32(#head + size) .. le16(0)
+    os.execute("mkdir -p " .. shell_quote(paths.pending))
+    local base = paths.pending .. "/rmail-" .. uuid()
+    write_file_binary(base .. ".head", head)
+    write_file_binary(base .. ".tail", tail)
+    local h = io.popen("cat " .. shell_quote(base .. ".head") .. " " .. shell_quote(path) .. " "
+        .. shell_quote(base .. ".tail") .. " | sha256sum")
+    local checksum = h and (h:read("*a") or ""):match("^(%x+)")
+    if h then h:close() end
+    os.remove(base .. ".head"); os.remove(base .. ".tail")
+    if not checksum or upload.identity(path) ~= id then
+        log("laying out %s: it changed while it was being read -- will try again next cycle", filepath)
+        return nil, "changed"
+    end
+    local layout, total = base .. upload.VIRTUAL, #head + size + #tail
+    write_file(layout, json.encode({
+        source = path, identity = id, size = total,
+        head = mime.b64(head), tail = mime.b64(tail),
+    }) .. "\n")
+    log("sending %s from where it lies: no packed copy (#317)", filepath)
+    return layout, checksum, total, size
+end
+-- }}}
+
+-- {{{ upload.read_layout
+function upload.read_layout(layout)
+    local text = read_file(layout)
+    local ok, L = pcall(json.decode, text or "")
+    if not ok or type(L) ~= "table" or type(L.source) ~= "string" then return nil end
+    L.head, L.tail = mime.unb64(L.head or "") or "", mime.unb64(L.tail or "") or ""
+    return L
+end
+-- }}}
+
+-- {{{ upload.copy_intact
+-- Whether the bytes first offered can still be read: a packed copy is on
+-- disk, or a layout's file is the one it was laid out from.  A layout
+-- whose file changed is deleted here, so every place that finds a copy
+-- missing finds this one missing too, and the offer is lost (#314).
+function upload.copy_intact(zip)
+    if not upload.is_virtual(zip) then return file_exists(zip) end
+    local L = file_exists(zip) and upload.read_layout(zip)
+    if not L then return false end
+    if upload.identity(L.source) == L.identity then return true end
+    os.remove(zip)
+    log("%s has changed since it was offered: its offer is lost, as a removed packed copy is (#317)", L.source)
+    return false
+end
+-- }}}
+
+-- {{{ upload.open_copy
+-- A reader of the bytes first offered: :read_at(offset, length) gives
+-- them, or nil and "changed" when a layout's file no longer matches;
+-- :close().  Nil when it cannot be opened.
+function upload.open_copy(zip)
+    if not upload.is_virtual(zip) then
+        local f = io.open(zip, "rb")
+        if not f then return nil end
+        return {
+            read_at = function(_, offset, length) f:seek("set", offset); return f:read(length) end,
+            close = function() f:close() end,
+        }
+    end
+    local L = upload.read_layout(zip)
+    local f = L and io.open(L.source, "rb")
+    if not f then return nil end
+    local body_end = #L.head + (L.size - #L.head - #L.tail)
+    return {
+        read_at = function(_, offset, length)
+            if upload.identity(L.source) ~= L.identity then return nil, "changed" end
+            local last = math.min(offset + length, L.size)
+            if offset >= last then return nil end
+            local parts = {}
+            if offset < #L.head then
+                parts[#parts + 1] = L.head:sub(offset + 1, math.min(last, #L.head))
+            end
+            local from, to = math.max(offset, #L.head), math.min(last, body_end)
+            if from < to then
+                f:seek("set", from - #L.head)
+                local bytes = f:read(to - from) or ""
+                if #bytes ~= to - from then return nil, "changed" end
+                parts[#parts + 1] = bytes
+            end
+            if last > body_end then
+                parts[#parts + 1] = L.tail:sub(math.max(offset, body_end) - body_end + 1, last - body_end)
+            end
+            return table.concat(parts)
+        end,
+        close = function() f:close() end,
+    }
+end
+-- }}}
 
 -- ---- Receiver side ----
 
@@ -5938,7 +6137,7 @@ local function send_next_chunks(my_name)
             transfer.zip_id = nil
             changed = true
         end
-        if (zip_path == nil or not file_exists(zip_path)) and not transfer.auto_body then
+        if (zip_path == nil or not upload.copy_intact(zip_path)) and not transfer.auto_body then
             -- The packed copy of an attach: file is gone.  Every recipient
             -- must get the bytes first offered (#314), so it is not packed
             -- again: the transfer and its siblings stop, marked lost, with
@@ -5994,7 +6193,7 @@ local function send_next_chunks(my_name)
                 changed = true; goto continue
             end
         end
-        local f = io.open(zip_path, "rb")
+        local f = upload.open_copy(zip_path)
         if not f then goto continue end
         local missing = transfer.missing or {}
         local aborted = false
@@ -6008,8 +6207,14 @@ local function send_next_chunks(my_name)
         while #missing > 0 and passes < pass_limit do
             passes = passes + 1
             for _, chunk_index in ipairs(missing) do
-                f:seek("set", chunk_index * cfg.chunk_size)
-                local raw = f:read(cfg.chunk_size)
+                local raw, why = f:read_at(chunk_index * cfg.chunk_size, cfg.chunk_size)
+                if why == "changed" then
+                    -- a file sent from where it lies changed (#317):
+                    -- the next cycle finds its layout broken and the
+                    -- offer goes the lost route
+                    upload.copy_intact(zip_path)
+                    aborted = true; break
+                end
                 if not raw then
                     log("chunk read error at %d for %s", chunk_index, att_id)
                     aborted = true; break
@@ -6474,7 +6679,7 @@ local function sync_outbox(my_name)
                                 local packed = state[name].packed and state[name].packed[filepath]
                                 if settled or in_progress then
                                     -- nothing to offer
-                                elseif packed and not file_exists(packed.zip) then
+                                elseif packed and not upload.copy_intact(packed.zip) then
                                     -- the copy others were offered is gone
                                     answers.lost(state, att_state, name, filepath)
                                     att_state_changed = true
@@ -6503,7 +6708,12 @@ local function sync_outbox(my_name)
                                         local expected_size = not shared and (measure_size(filepath) or 0)
                                         local zip_path, checksum, comp_size
                                         if not shared then
-                                            zip_path, checksum, comp_size = compress_attachment(filepath)
+                                            -- a single large file is sent
+                                            -- from where it lies (#317)
+                                            zip_path, checksum, comp_size = upload.lay_out(filepath)
+                                            if not zip_path and checksum == "pack" then
+                                                zip_path, checksum, comp_size = compress_attachment(filepath)
+                                            end
                                         end
                                         if shared then
                                             packed = shared

@@ -152,7 +152,7 @@ port = 8025
 There is no setting for which mailbox this is. The mailbox is the directory
 the file is sitting in, so the daemon already knows.
 
-The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size` — see [attachments](docs/.templates/attachments.md)) and three more:
+The generated config file contains a comment above most keys explaining what it does. Not in it: the attachment settings (`attachments`, `attachment_pending_dir`, `attachment_chunk_size`, `attachment_copy_below` — see [attachments](docs/.templates/attachments.md)) and three more:
 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
