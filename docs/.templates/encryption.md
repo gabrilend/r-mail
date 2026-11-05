@@ -62,18 +62,36 @@ When rmail sends a message, it wraps it in an encrypted frame:
    hasn't been tampered with in transit. If even one bit is changed, the
    receiver detects it and rejects the message.
 
-The wire frame does **not** currently include random padding — an observer
-who watches an encrypted rmail exchange can read the length header and infer
-the message's approximate plaintext size to byte precision. That's a genuine
-gap for short, patterned messages ("ok", "see you at 3pm") where the length
-itself is revealing. Two follow-ups track the fix:
+Between two daemons new enough to read it (#901), the message is **padded
+before it is sealed**: rmail puts its real length in front of it and random
+bytes after it, then seals the whole thing, so the padding is as hidden as
+the message and covered by the same seal.  The sealed size is rounded up to
+the next power of two — 64 bytes at the least, and never more than 16 KiB
+added — so an observer reading the length header learns "between 256 and
+512 bytes", not "300 bytes".  "ok" and "see you at 3pm" are the same size
+on the wire.
 
-- **#901** — add randomized padding inside the encrypted frame so message
-  sizes fall into coarse buckets instead of leaking exactly.
-- **#902** — a hook-based technique for sending the body as a fixed-chunk
-  attachment when you want stronger size normalization than #901 provides.
+Older daemons, the phone app and the thin client cannot read a padded
+frame, so padding is agreed rather than assumed:
 
-See "Mitigating traffic analysis" below for what you can do today via hooks.
+- every request rmail sends carries a line, `Rmail-Pad: 1`, inside the seal;
+  older programs ignore it;
+- an answer is padded only when its request was padded or carried that line;
+- a request is padded only to a contact whose daemon has shown it reads
+  padding.  rmail notes such contacts in `.state/wire-padding.json` (each
+  name, and the day it learned), so the note survives a restart.  The very
+  first request to a contact goes unpadded, because nothing is known yet.
+- if a contact goes back to an older version, it answers a padded request
+  with "not found" in the old format; rmail forgets them and sends the
+  request again unpadded.  (Very occasionally an older daemon closes the
+  connection instead of answering; then delete their line from
+  `.state/wire-padding.json` by hand.)
+
+What padding does not hide: *when* you send, how many requests go, and,
+for big transfers, roughly how big they are (above 16 KiB of padding the
+rest shows).  For long messages see #902, which sends the body as a padded
+attachment whose pieces are all the same size; see "Mitigating traffic
+analysis" below for that and for decoy traffic.
 
 ### How the receiver knows who sent it
 
@@ -113,8 +131,10 @@ Someone watching the network between two rmail daemons sees:
   mitigated by routing traffic through Tor or a multi-hop relay system (see
   [Mitigating traffic analysis](#mitigating-traffic-analysis) below).
 - **When and how much** — they can tell when messages are exchanged and
-  roughly how large each one is (the length header is in cleartext; the
-  plaintext size is ciphertext-size minus 28 bytes of framing).
+  roughly how large each one is.  The length header is in cleartext; between
+  two daemons that pad (#901) it gives only a power-of-two bucket, and
+  otherwise the plaintext size to the byte (ciphertext size minus 28 bytes
+  of framing).
 - **Random-looking bytes** — the actual content is indistinguishable from noise.
 
 They **cannot**:
@@ -217,9 +237,11 @@ outside there's a symmetric trickle of traffic in both directions.
 
 The hook below pads short bodies up to a fixed target length. **Note** that
 it passes messages longer than the target through unchanged — for long
-messages it's a no-op, and the plaintext size still leaks. For stronger
-size obfuscation see #901 (in-frame padding, under development) and #902
-(body-as-attachment padding for long messages).
+messages it's a no-op, and the plaintext size still leaks.  Between two
+up-to-date daemons rmail already pads every frame to a power of two (#901,
+above), which covers short messages without any hook; this one is for a
+fixed size you choose.  For long messages see #902 (body-as-attachment
+padding).
 
 ```sh
 #!/bin/sh

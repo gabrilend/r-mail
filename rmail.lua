@@ -3352,6 +3352,112 @@ local function seal_frame(key, plaintext)
     return uint32_be(#nonce + #ciphertext) .. nonce .. ciphertext
 end
 
+-- ---- Padding inside the seal (#901) ---------------------------------------
+--
+-- A frame's length is on the wire for anyone to read, and without padding
+-- it gives the size of what was sealed to the byte, less 28: "ok" and "on
+-- my way" can be told apart by length alone.  So a padded plaintext is
+--
+--   [4-byte big-endian real length][the real plaintext][random bytes]
+--
+-- sealed whole, so the padding is hidden and covered by the tag like the
+-- rest.  It is padded to the next power of two, 64 bytes at the least and
+-- 16 KiB more at the most: a watcher learns "between 256 and 512 bytes",
+-- not "300".  Only plaintexts under 16 MiB are padded, so a padded one
+-- always opens with a 0 byte, which no old plaintext does (they open with
+-- "POST", "GET " or "HTTP"); that, and a length that fits, is how a
+-- receiver tells the two apart.
+--
+-- An older daemon, the phone and the thin client cannot read a padded
+-- frame, so padding is agreed, not assumed:
+--   * every request this daemon sends carries `Rmail-Pad: 1`, sealed with
+--     it, which older receivers ignore;
+--   * an answer is padded only when its request was padded or carried
+--     that line;
+--   * a request is padded only to a contact whose daemon has shown it reads
+--     padding -- a padded answer, or a request carrying the line -- written
+--     in .state/wire-padding.json (name -> the day it was learned) so it
+--     survives a restart.  The first request to a contact goes unpadded.
+--   * a padded request answered unpadded means the contact went back to an
+--     older daemon (it read the request as nonsense and said 404): they
+--     are forgotten and the request is sent again unpadded.
+-- Decided 2026-11-05; see issues/901.
+local wirepad = {
+    MIN        = 64,        -- the smallest padded size: short messages share one
+    MOST_ADDED = 16384,     -- never more padding than this
+    BELOW      = 16777216,  -- only plaintexts shorter than this are padded
+    LINE       = "Rmail-Pad: 1\r\n",
+    STATE      = "wire-padding.json",
+}
+
+-- {{{ function wirepad.size_for
+-- The size a plaintext of n bytes is padded to, length prefix included.
+function wirepad.size_for(n)
+    local whole, target = 4 + n, wirepad.MIN
+    while target < whole do target = target * 2 end
+    return math.min(target, whole + wirepad.MOST_ADDED)
+end
+-- }}}
+
+-- {{{ function wirepad.pad
+function wirepad.pad(plaintext)
+    local n = #plaintext
+    if n >= wirepad.BELOW then return plaintext end
+    local parts, owed = {uint32_be(n), plaintext}, wirepad.size_for(n) - 4 - n
+    while owed > 0 do
+        local take = math.min(owed, 4096)  -- random_bytes gives at most 4096
+        parts[#parts + 1] = crypto.random_bytes(take)
+        owed = owed - take
+    end
+    return table.concat(parts)
+end
+-- }}}
+
+-- {{{ function wirepad.unpad
+-- (plaintext, true) for a padded one, (it unchanged, false) for any other.
+function wirepad.unpad(plain)
+    if not plain or #plain < 4 or plain:byte(1) ~= 0 then return plain, false end
+    local n = parse_uint32_be(plain)
+    if 4 + n > #plain then return plain, false end
+    return plain:sub(5, 4 + n), true
+end
+-- }}}
+
+-- {{{ function wirepad.reads
+-- Whether contact `name` is known to read padded frames.  Read from the
+-- file each time, so a line the owner deletes by hand takes effect at once.
+function wirepad.reads(name)
+    if not name then return false end
+    local ok, known = pcall(load_state, wirepad.STATE)
+    return ok and type(known) == "table" and known[name] ~= nil
+end
+-- }}}
+
+-- {{{ function wirepad.learn
+function wirepad.learn(name, reads)
+    if not name or wirepad.reads(name) == reads then return end
+    local ok, known = pcall(load_state, wirepad.STATE)
+    if not ok or type(known) ~= "table" then known = {} end
+    known[name] = reads and os.date("!%Y-%m-%d") or nil
+    save_state(wirepad.STATE, known)
+    if reads then
+        log("%s reads padded frames (#901): what is sent to them is padded from now on", name)
+    else
+        log("%s answered a padded request unpadded: their daemon is older than #901, " ..
+            "so what is sent to them goes unpadded again", name)
+    end
+end
+-- }}}
+
+-- {{{ function wirepad.name_for
+-- The contact whose token this is, for a request that carries only the token.
+function wirepad.name_for(token)
+    for name, c in pairs(load_contacts()) do
+        if c.token == token then return name end
+    end
+end
+-- }}}
+
 -- Send every byte of data, handling partial sends (important for large
 -- payloads).  Kept apart from sealing so a frame can also go out inside
 -- a web reply (unwrap_web_request).
@@ -3715,8 +3821,13 @@ local function http_encrypt_and_send(e)
         "Host: " .. e.req.host .. ":" .. e.req.port .. "\r\n" ..
         "Content-Type: application/json\r\n" ..
         "Content-Length: " .. #e.req.payload .. "\r\n" ..
+        wirepad.LINE ..
         "Connection: close\r\n\r\n" ..
         e.req.payload
+    -- #901: padded only to a contact known to read it
+    e.pad_name = wirepad.name_for(e.req.psk_key)
+    e.padded   = wirepad.reads(e.pad_name)
+    if e.padded then req_str = wirepad.pad(req_str) end
     local key   = derive_key(e.req.psk_key)
     local nonce = crypto.random_bytes(12)
     local ct    = crypto.aes_gcm_encrypt(key, nonce, req_str)
@@ -3748,7 +3859,19 @@ end
 -- Read and decrypt the length-prefixed response, then parse the HTTP status/body.
 local function http_read_encrypted_response(e)
     local key  = derive_key(e.req.psk_key)
-    local text = recv_encrypted(e.conn, key)
+    local text, padded = wirepad.unpad(recv_encrypted(e.conn, key))
+    if text and padded then
+        wirepad.learn(e.pad_name, true)
+    elseif text and e.padded then
+        -- #901: a padded request answered unpadded -- an older daemon,
+        -- which read it as nonsense.  Not an answer: sent again, unpadded,
+        -- the way a busy answer is (no status, no backoff).
+        wirepad.learn(e.pad_name, false)
+        e.ok, e.status, e.busy = false, nil, true
+        e.phase = "done"
+        e.conn:close()
+        return
+    end
     if text then
         local status = tonumber(text:match("^HTTP/%S+ (%d+)"))
         local body_start = text:find("\r\n\r\n", 1, true)
@@ -3829,9 +3952,16 @@ function ctimer.answer_while_sending(listener, dialing)
     if not plaintext then c:close(); return end
     if dialing[name] then
         local body = json.encode({busy = true})
-        envelope.reply(c, derive_key(load_contacts()[name].token),
-            "HTTP/1.1 503 Busy\r\nContent-Type: application/json\r\n" ..
-            "Content-Length: " .. #body .. "\r\n\r\n" .. body)
+        local answer = "HTTP/1.1 503 Busy\r\nContent-Type: application/json\r\n" ..
+            "Content-Length: " .. #body .. "\r\n\r\n" .. body
+        -- padded the way the request asked (#901), as in the main handler
+        local inner, padded = wirepad.unpad(plaintext)
+        local _, _, headers = parse_request_string(inner)
+        if padded or (headers and headers["rmail-pad"]) then
+            wirepad.learn(name, true)
+            answer = wirepad.pad(answer)
+        end
+        envelope.reply(c, derive_key(load_contacts()[name].token), answer)
         c:close()
         log("%s called while we were sending to them; answered busy", name)
         return
@@ -8939,6 +9069,8 @@ local function handle_request(rt, client, preread)
             plaintext, contact_name = trial_decrypt(packet)
         end
         if not plaintext then log("decryption failed: no matching contact key"); return end
+        local was_padded  -- #901: the padding taken off, and noted for the answer
+        plaintext, was_padded = wirepad.unpad(plaintext)
 
         -- #115 requirement 3: a contact who talks to us is demonstrably
         -- alive, so drop their backoff to the floor and mark them due now.
@@ -8974,6 +9106,9 @@ local function handle_request(rt, client, preread)
 
         local method, path, headers, body = parse_request_string(plaintext)
         if not method then return end
+        -- #901: answered padded when asked; the asker reads padding
+        local pad_answer = was_padded or headers["rmail-pad"] ~= nil
+        if pad_answer then wirepad.learn(contact_name, true) end
 
         local contacts = load_contacts()
         local key = derive_key(contacts[contact_name].token)
@@ -9098,7 +9233,7 @@ local function handle_request(rt, client, preread)
         else send_response(resp, 404, {error = "not found"}) end
     else send_response(resp, 404, {error = "not found"}) end
 
-    envelope.reply(client, key, resp:get())
+    envelope.reply(client, key, pad_answer and wirepad.pad(resp:get()) or resp:get())
 
     -- a web reply said "Connection: close"; a bare frame loops back for
     -- the next request on this keep-alive connection

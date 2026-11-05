@@ -34,6 +34,13 @@
 --   /delete, /update-address  200 {ok}
 --   anything else             404
 --
+-- Padding (#901): with a file <folder>/pads it reads padded frames and pads
+-- its answer when the request was padded or carried `Rmail-Pad: 1`, as a
+-- newer daemon does; without it, it is an older one, and a padded request
+-- reads as nonsense, answered 404 and noted as {kind = "unreadable"}.
+-- Every event says whether its request was padded (`padded`) and carried
+-- the line (`asked`).
+--
 -- It stops when <folder>/stop appears.  A file <folder>/hold holding a
 -- number makes it wait that many seconds before its next answer (once).
 
@@ -62,12 +69,13 @@ end
 -- }}}
 
 local frame_bytes = 0 -- size on the wire of the request being handled
+local padded, asked = false, false -- the request being handled was padded / carried Rmail-Pad
 
 -- {{{ local function event
 -- Every event also says how big the request's frame was on the wire
 -- (`frame`, bytes): what someone watching the network sees.
 local function event(t)
-    t.frame = frame_bytes
+    t.frame, t.padded, t.asked = frame_bytes, padded, asked
     local f = assert(io.open(FOLDER .. "/events", "a"))
     f:write(json.encode(t), "\n"); f:close()
 end
@@ -156,7 +164,34 @@ local function handle(method, path, body)
         event({kind = "address"})
         return 200, {ok = true}
     end
+    if method and method:byte(1) == 0 then event({kind = "unreadable"}) end
     return 404, {error = "not found"}
+end
+-- }}}
+
+-- {{{ local function unpad
+-- #901, written from the issue: [4-byte length][plaintext][padding].
+local function unpad(plain)
+    if #plain < 4 or plain:byte(1) ~= 0 then return plain, false end
+    local a, b, c, e = plain:byte(1, 4)
+    local n = a * 16777216 + b * 65536 + c * 256 + e
+    if 4 + n > #plain then return plain, false end
+    return plain:sub(5, 4 + n), true
+end
+-- }}}
+
+-- {{{ local function pad
+local function pad(text)
+    local target = 64
+    while target < 4 + #text do target = target * 2 end
+    target = math.min(target, 4 + #text + 16384)
+    local parts, owed = {u32(#text), text}, target - 4 - #text
+    while owed > 0 do
+        local take = math.min(owed, 4096)
+        parts[#parts + 1] = crypto.random_bytes(take)
+        owed = owed - take
+    end
+    return table.concat(parts)
 end
 -- }}}
 
@@ -174,6 +209,9 @@ local function serve(conn)
         frame_bytes = 4 + #packet
         local plain = crypto.aes_gcm_decrypt(KEY, packet:sub(1, 12), packet:sub(13))
         if not plain then return end
+        local reads = io.open(FOLDER .. "/pads")
+        if reads then reads:close(); plain, padded = unpad(plain) else padded = false end
+        asked = plain:find("\r\nRmail%-Pad: 1\r\n") ~= nil
         local method, path = plain:match("^(%S+) (%S+)")
         local head_end = plain:find("\r\n\r\n", 1, true)
         local body = head_end and plain:sub(head_end + 4) or ""
@@ -192,6 +230,7 @@ local function serve(conn)
         local out = json.encode(answer)
         local text = "HTTP/1.1 " .. status .. " X\r\nContent-Type: application/json\r\n" ..
                      "Content-Length: " .. #out .. "\r\n\r\n" .. out
+        if reads and (padded or asked) then text = pad(text) end
         local nonce = crypto.random_bytes(12)
         local sealed = crypto.aes_gcm_encrypt(KEY, nonce, text)
         conn:send(u32(#nonce + #sealed) .. nonce .. sealed)

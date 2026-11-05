@@ -339,6 +339,7 @@ All connections use AES-256-GCM encryption. Every message delivery and deletion 
 
 The protocol:
 - Each packet is `[4-byte length][12-byte random nonce][ciphertext][16-byte GCM auth tag]`
+- Between two daemons that both read it, what is sealed is padded first, with random bytes inside the seal, to a power of two (64 bytes at least, 16 KiB added at most), so the length on the wire says only roughly how big a message is. Older daemons, the phone and the thin client are spoken to without padding, as before (#901; see the encryption guide)
 - The AES key is `SHA256(token)` — a 32-byte key derived from the contact's token
 - The server identifies the sender by trial decryption: it tries each contact's key until the GCM auth tag validates. No identity label is sent in the encrypted traffic — only destination IP and port are visible to an observer. Separately, nothing stops a recorded packet from being sent again later (no replay protection).
 - Your own devices (contacts marked `own`, such as your phone) are sent the whole contacts file, every contact's token included.
@@ -442,6 +443,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-05 →** Messages between two up-to-date mailboxes are padded inside the encryption, so someone watching the network sees only a rough size: "ok" and "see you at 3pm" are the same length on the wire (#901). Each daemon says inside every request that it reads padding, and pads only to contacts that have shown they do, so older mailboxes, the phone and the thin client keep working unchanged. The contacts known to read padding are listed in `.state/wire-padding.json`.
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
 

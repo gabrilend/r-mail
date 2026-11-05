@@ -161,4 +161,60 @@ feature the doc used to promise.
 
 ## Status
 
-Open.
+Built 2026-11-05, waiting for the owner's checks.  Every frame between two
+daemons that read padding is padded inside the seal to the issue's option
+1 (power of two, 64 bytes at least, 16 KiB added at most); older daemons,
+the phone, the thin client and web pages are answered as before.  How the
+two sides agree is below.  Test: `scripts/test-wire-padding.sh`.  Docs:
+`docs/.templates/encryption.md` ("What gets sent over the wire") and
+`docs/.templates/protocol.md` ("Padding").
+
+## Decisions (2026-11-05)
+
+Made by the builder; the owner can overturn each.
+
+1. **Auto-detect on receive, as the issue prefers, plus a learned note for
+   sending.**  Auto-detect alone tells a new receiver what it got, but not
+   a new sender whether the other side can read padding: an older daemon
+   reads a padded request as nonsense.  The phone app, the thin client and
+   web pages would be broken the same way.  So: every request carries
+   `Rmail-Pad: 1` inside the seal (older programs ignore unknown lines); an
+   answer is padded when its request was padded or carried the line; a
+   request is padded only to a contact that has shown it reads padding.
+   No setting and nothing for the owner to coordinate — the issue's reason
+   for preferring auto-detect.  The first request to a new contact goes
+   unpadded; everything after it is padded.
+2. **The note is `.state/wire-padding.json`: contact name -> the day it was
+   learned.**  Plain names, as every state file since #505's reversal.  Read
+   from the file on each request, so deleting a line by hand works at once.
+   Kept on disk so a restart does not send a round of unpadded requests.
+3. **Going back to an older daemon is noticed.**  An older daemon reads a
+   padded request's length prefix as part of the method and answers 404,
+   unpadded — which no newer daemon ever does to a padded request.  The
+   contact is forgotten (logged) and the request treated like a busy
+   answer: sent again shortly, unpadded, with no backoff.  If the length
+   bytes happen to hold a newline the older daemon closes the connection
+   instead; that looks like any failed connection, so the owner deletes
+   the line by hand (said in encryption.md).  A request arriving with no
+   line does *not* forget a contact: the phone may share a contact with a
+   daemon, and flapping would cost more than it saves.
+4. **A padded plaintext always starts with a 0 byte.**  Only plaintexts
+   under 16 MiB are padded, so the length's first byte is 0; old
+   plaintexts start with "POST", "GET " or "HTTP".  The receiver checks
+   that byte and that the length fits — stricter than the issue's
+   length-only check, so the 1-in-4-billion ambiguity cannot happen.
+5. **Every frame under 16 MiB is padded, attachment pieces and auto-body
+   messages (#308) too,** instead of skipping them.  The 16 KiB cap keeps
+   the waste to 0.3% of a 5 MiB piece, and one rule is simpler to reason
+   about than two.  The padding bytes are random (`crypto.random_bytes`,
+   in 4 KiB calls, its limit), as the issue says, though zeros would be as
+   hidden inside AES-GCM.
+6. **The sizes are of the whole sealed plaintext, length prefix included,**
+   so a frame on the wire is always a power of two plus 32 bytes (4 length
+   + 12 nonce + 16 tag) below the cap — what the test checks.
+7. **No new top-level names beyond one table, `wirepad`,** since
+   `rmail.lua`'s main chunk is near Lua's 200-local limit.
+8. **Base: built on #16 (claude/419-wake-to-sync), not on main.**  The
+   change needs nothing from the chain, but `rmail.lua` has moved a long
+   way on it and the framing code would conflict line by line if built
+   on main.  #902 is stacked on this.
