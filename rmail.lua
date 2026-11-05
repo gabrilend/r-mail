@@ -3,6 +3,13 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception
 -- Copyright (C) 2026 ritz.  See LICENSE for the terms and the hook-script permission.
 
+-- Which rmail this is (#713).  Raised by hand when a change is worth a
+-- chapter in transitions/, which is where the monitor
+-- (scripts/rmail-monitor.lua) finds the story of what changed.  The
+-- monitor reads this line from the file rather than running it, so keep
+-- it one line, a quoted string, and in this form.
+local RMAIL_VERSION = "0.1.0"
+
 -- ============================================================
 -- Configuration
 -- ============================================================
@@ -59,6 +66,7 @@ do
     local function usage(problem)
         if problem then io.stderr:write("error: " .. problem .. "\n") end
         io.stderr:write("usage: rmail.lua <config-file> [--once[=SECONDS]]\n")
+        io.stderr:write("       rmail.lua --version\n")
         io.stderr:write("  --once  announce, sync, stay reachable SECONDS (default 60), exit\n")
         io.stderr:write("  e.g. lua rmail.lua ~/mail/config\n")
         io.stderr:write("  the mailbox served is the directory that file sits in\n")
@@ -75,6 +83,10 @@ do
     -- }}}
 
     if not ARG or ARG == "" then usage() end
+    if ARG == "--version" then
+        io.write("rmail " .. RMAIL_VERSION .. "\n")
+        os.exit(0)
+    end
     ARG = ARG:gsub("^~", os.getenv("HOME") or "/tmp")
 
     -- A directory argument used to be accepted and is not any more.
@@ -9385,6 +9397,14 @@ local function init_runtime()
 
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
+    -- What this mailbox last ran, for the monitor (#713): a daemon started
+    -- from an older checkout and never restarted is told apart from one
+    -- running the program now on disk by comparing the two.  Written
+    -- whole and renamed into place, so a reader never sees half of it.
+    log("version: %s", RMAIL_VERSION)
+    if write_file(STATE .. "/version.tmp", RMAIL_VERSION .. "\n") then
+        os.rename(STATE .. "/version.tmp", STATE .. "/version")
+    end
 
     -- Which of dkjson's two decoders this run is on (#104).  dkjson decides
     -- by itself, once, while loading: it tries to switch to its LPeg decoder
