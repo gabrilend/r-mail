@@ -21,6 +21,7 @@ regenerate it rather than editing above the notes line.  Counts:
 - **[#411](completed/411-automatic-port-forwarding.md) — Asking the router to forward the port, and warning contacts when the router allows it**  A mailbox behind a home router can only be reached if the router forwards its port to this machine.
 - **[#412](completed/412-update-port-forwarding-lan-ip.md) — Update port forwarding after LAN IP change (optional)**  sorelu's LAN IP changed from 192.168.0.8 to 192.168.1.60.
 - **[#413](completed/413-disable-nat-pmp-on-router.md) — Disable NAT-PMP on router (optional)**  rmail's security check detected that the router has NAT-PMP enabled.
+- **[#414](completed/414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  Closed 2026-11-05 with nothing built: superseded by #411.
 - **[#415](completed/415-udp-lan-discovery-protocol.md) — UDP LAN Discovery Protocol**  When two rmail daemons are on the same LAN but their contacts files contain the public IP (required for external connectivity), communication fails if hairpin NAT is not supported by the router.
 - **[#416](completed/416-lan-discovery-router-ip-rewrite.md) — LAN Discovery Router IP Rewrite**  When a UDP broadcast is received, some routers rewrite the source IP address to their own IP (e.g., 192.168.0.1).
 - **[#417](completed/417-lan-discovery-files-address-under-the-contact.md) — LAN discovery files a found address under the contact it came from**  A discovery packet (request or answer) is identified by the contact whose token decrypts it, and the found address is filed under that contact's
@@ -30,7 +31,6 @@ regenerate it rather than editing above the notes line.  Counts:
 ## Open
 
 - **[#409](409-announce-full-address-set.md) — Announce the full address set, and confirm it before clearing the notice**  Phase 1 built 2026-09-22 (see Status): announcements carry the whole address set (`ips`: hostname, public IPv4, IPv6; `local_ips` only to a contact on our LAN); the receiver merges it under the contact's pinned `ip`, files private addresses on its own /24 a...
-- **[#414](414-nat-warning-sender-attribution.md) — NAT warning message should identify sender**  Since 2026-10-08 (#411) rmail sends no such warning at all: the daemon no longer checks the router at start-up, and the installer's check reports only to the person installing.
 - **[#419](419-wake-to-sync-availability-windows.md) — Wake-to-sync: scheduled availability windows for a machine that sleeps**  rmail assumes the daemon is listening.
 
 <!-- notes: kept when regenerated -->

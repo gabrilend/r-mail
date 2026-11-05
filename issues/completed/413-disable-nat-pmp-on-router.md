@@ -11,8 +11,9 @@ a known security risk that malware commonly exploits.
 Log into the router admin panel and disable NAT-PMP (and UPnP if enabled).
 Use manual port forwarding instead.
 
-After disabling, rmail will automatically send a "resolved" message to
-contacts on the next startup.
+Before 2026-10-08 rmail then sent a "resolved" message to contacts on
+its next start.  Since #411 it checks the router only at install and
+tells no contact either way.
 
 ## Status
 

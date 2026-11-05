@@ -954,9 +954,8 @@ end
 -- the folders already mean.  A problem on the way in — a port that will
 -- not bind, a caller that could not be decrypted — is news that arrives,
 -- so it goes in the inbox.  A problem on the way out — a contact nobody
--- can reach, a router announcing itself insecurely — concerns mail
--- leaving, so it goes in the outbox, where the existing router-security
--- warning already writes itself.
+-- can reach — concerns mail leaving, so it goes in the outbox.  (The
+-- router-security warning that once also wrote there was removed, #411.)
 --
 -- Rewritten rather than appended: one file per distinct problem, holding
 -- the current state of that problem.  A daemon restarting in a loop
