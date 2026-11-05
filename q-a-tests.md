@@ -595,7 +595,7 @@ should be fully plaintext mirrors of contacts/inbox/outbox.
 - [ ] `cat .state/chunks-outgoing.json` shows plaintext `.to` (recipient name), `.original_path`, `.filename`, `.outbox_file`, AND `.compressed_path` — no `.zip_id` field; paths are greppable
 - [ ] `cat .state/consent-pending.json` shows plaintext `.from`; `cat .state/consent-responses.json` shows plaintext `.to`
 - [ ] `cat .state/nat_security_warned.json` is keyed by plaintext contact names (truthy values only)
-- [ ] `cat .state/pending-address.json` is keyed by plaintext contact names
+- [ ] There is no `.state/pending-address.json` (#409 phase 2): an owed address announcement is `outbox/.address-announcement-<name>`, named by plaintext contact name; one left by an older rmail is moved into such files at start-up and removed
 - [ ] Loading legacy `.state/` files written by pre-revert code still works: hashed `.to`/`.from` fields stay as hash strings in memory (no crash) and get rewritten to plaintext on the next save; hashed top-level keys in `nat_security_warned.json` / `pending-address.json` are resolved to plaintext or dropped on load via `unmigrate_hashed_keys`
 - [ ] Renaming a contact while outbox messages are in-flight produces an `unknown contact <name>` log line for the stale recipient (no auto-rename detection); documented recovery is `sed -i 's/"<old>"/"<new>"/g' .state/*.json`
 - [ ] After rename + sed fix, body edits (#207) propagate correctly to the renamed recipient on the next sync

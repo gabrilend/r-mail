@@ -8,9 +8,11 @@ contact on our LAN); the receiver merges it under the contact's pinned
 `ip`, files private addresses on its own /24 as `local-ip`, and writes the
 file only when the set really changed.  A real change leaves a hidden
 `.address-update-<name>` note that queues our own announcement as a test,
-removed by the first request that reaches them.  Phase 2 — owed
-announcements as files in the mailbox rather than
-`.state/pending-address.json` — is not started.
+removed by the first request that reaches them.  Phase 2 built
+2026-11-05: an owed announcement is the hidden file
+`outbox/.address-announcement-<name>`, not an entry in
+`.state/pending-address.json`; `on_send` sees it, and deleting it by hand
+means it is not sent.
 
 
 ## Problem
@@ -119,15 +121,17 @@ Deliberately *not* extended to the other state files:
    removal in `run_sync_cycle`.  (The test once named here,
    `scripts/test-lan-address-learning.sh`, tested addresses learned from
    incoming connections, not announcements; it was deleted with that
-   learning by #418.  The announcement merge has no test of its own yet.)
-2. Phase 2: an owed announcement becomes a hidden file in the outbox
-   (one per contact), visible to `on_send`, deletable by hand; the state
-   file goes.  Test: an announcement deleted by hand is not sent.
+   learning by #418.  The announcement merge is tested by
+   `scripts/test-address-announcements.sh`, since phase 2.)
+2. Built 2026-11-05: an owed announcement becomes a hidden file in the
+   outbox (one per contact), visible to `on_send`, deletable by hand; the
+   state file goes.  Test: `scripts/test-address-announcements.sh`, which
+   includes an announcement deleted by hand not being sent.
 
 ## Status
 
-**Phase 1 implemented 2026-09-22.** Phase 2 (`pending-address.json` as
-mailbox files) not started.
+**Phase 1 implemented 2026-09-22.  Phase 2 implemented 2026-11-05** (see
+"Phase 2 built" below).
 
 Verified end to end against a loopback peer pair: a contact holding
 `127.0.0.1` for us keeps it as the pinned default and gains the public and
@@ -269,3 +273,106 @@ currently sync to the Android client -- the trap flagged above is real and
 unfixed. `list_notices` exists for daemon-side management of them, but the
 sync manifest and the client's listing still need to carry dotfiles while
 excluding them from the message list.
+
+### Phase 2 built (2026-11-05)
+
+`.state/pending-address.json` is gone.  An announcement owed to a contact
+is the file `outbox/.address-announcement-<name>`:
+
+```
+// rmail owes alice an announcement of this mailbox's addresses (#409).
+// It goes at the next sync and this file is then removed.  Delete it
+// and it is not sent.  The addresses sent are read when it goes.
+ip = 198.51.100.7
+port = 8025
+```
+
+All four writers write it: a confirmed public-IP change, an IPv6 change
+(merged into one already owed), the start-up announcement, and an
+unconfirmed `.address-update-<name>` notice.  `sync_address_notifications`
+reads the files, sends each through `on_send`, and removes a file once its
+announcement has reached the contact.  A file for a contact removed, or
+marked listen-only, is removed and logged.  The functions live in the
+`addrset` table (`owed_path`, `read_owed_file`, `owe`, `owed`, `paid`), not
+as new top-level locals, since the main chunk is at Lua's limit of 200.
+
+Tested by `scripts/test-address-announcements.sh`: two mailboxes on this
+machine, run in a network namespace with only loopback, with the sender's
+public address written into its `.state` by hand, so nothing is looked up
+outside.  It covers:
+- a legacy `pending-address.json` moved into a file and removed;
+- the start-up announcement waiting as a file while the receiver is down;
+- the file deleted by hand, and the announcement not sent;
+- `on_send` rewriting an announcement;
+- a footer-printing hook refused;
+- the merge: a hostname kept as the pinned default, the public address
+  as `ip[1]`, the local address as `local-ip`;
+- a repeat announcement that changes nothing leaving the receiver's
+  contacts file unwritten.
+
+All 16 cases pass.  Against the base `rmail.lua`, 11 fail.
+
+### Decisions (2026-11-05)
+
+Made by the builder.  The owner's standing instruction is to answer open
+questions rather than wait, choosing the option that is easiest to undo.
+Each can be overturned.
+
+1. **Where the file goes: the top of the outbox,** as
+   `.address-announcement-<name>`.  It mirrors
+   `inbox/.address-update-<name>`.  The alternative was
+   `outbox/<name>/.address-announcement`, which would have made the daemon
+   create contact folders.  Under #214 a contact folder sends every file put
+   in it, so a folder the user did not make would change what their outbox
+   does.  Undo: change `addrset.owed_path`.
+2. **The file says what was owed; what is sent is computed when it goes.**
+   The file holds `ip`, `port` and `ipv6`, as the state entry did.  The set
+   sent is read from `addrset.mine` at send time, as in phase 1, so an
+   announcement that waited through another change carries the current
+   addresses.  A hand edit of the file's `ip` changes only the
+   `ip`/`port` fields that pre-#409 peers read.
+3. **`on_send` sees an announcement as it sees a message.** It gets the
+   contact as `$1`, the file's name as `$2`, and the JSON on stdin and in
+   `$3`.  Its output replaces the announcement only when the whole output
+   is one JSON object.  A hook written for message bodies, such as a footer,
+   would otherwise break every announcement.  That case is logged, and the
+   announcement goes as computed.  A failing hook is logged, and the
+   announcement goes as computed: this is #215's rule for `on_send`.
+   Holding announcements alone on a failing hook would answer #215's open
+   question 1 for one kind of message only.  Undo: one branch in
+   `sync_address_notifications`.
+4. **To stop an announcement, delete its file.** This is the only way, and
+   the hook is not one.  Two writers can owe it again, as before:
+   - the start-up announcement, at each start;
+   - an `.address-update-<name>` notice still standing in the inbox. Delete
+     the notice too to stop that one.
+5. **A legacy `pending-address.json` is moved, not ignored.** The first
+   time anything reads or owes, each entry becomes a file, unless that
+   contact already has one.  The state file is then removed and the move
+   is logged.
+6. **Not on the phone.** The file is a dotfile, so `list_files` skips it
+   for the outbox sync and the phone listing.  This matches the decision
+   already made for `inbox/.address-update-*`: bookkeeping the user never
+   acts on has no place in a message list.
+7. **Written only when its text changes.** The outbox is watched, and an
+   unchanged rewrite would start a sync for nothing.  This is the lesson
+   from phase 1's feedback loop.
+8. **The other state files stay as they are,** as the issue says.
+9. **Base: #206's branch** (`claude/206-duplicate-filename-warning`), the
+   tip of the #216, #215, #214, #211, #206 chain.  The change calls
+   `run_hook` with #215's body-as-table signature and #215's `on_send`
+   rule.  It puts its file in the outbox that #214 restructured and that
+   #211 and #206 now check.  The other open line, #120, #121 and #118,
+   wraps the call in `ctimer.hold({"pending-address.json"}, ...)` and a
+   pass descriptor naming that file.  Whichever of the two lines merges
+   second must drop that name: no state file is touched any more, so the
+   hold has nothing to lease.
+10. **A finding about the merge rule.** "No guessing from digits"
+    (2026-09-23) made every non-hostname `ip` ours to replace.  So a
+    private address held as a pinned default is now replaced by the
+    announced public address.  The Status paragraph above, about
+    `127.0.0.1` being kept as the default, describes the rule before that
+    day.  So does the Merge rules section's "Private addresses: never
+    overwrite".  A private address meant to stay belongs in `local-ip`
+    now.  The test uses a hostname as the pinned default (it is kept),
+    which is the rule as it stands.
