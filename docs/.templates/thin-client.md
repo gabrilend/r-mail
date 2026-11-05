@@ -157,6 +157,17 @@ ls ~/mail-remote/inbox/
 cat ~/mail-remote/inbox/hello-from-alice.txt
 ```
 
+Or read them in the terminal with the viewer, which lists the inbox and
+outbox newest first and opens a message wrapped to the window (Linux and
+macOS; it changes nothing, so writing is still your own editor's job):
+```sh
+clients/linux/view.sh                      # the one mirror under ~/mail-remote
+clients/linux/view.sh ~/mail-remote/mailbox-1
+```
+Arrow keys or `j`/`k` move, Enter opens, Tab switches between inbox and
+outbox, `q` goes back and then quits.  Mail that syncs in while it is open
+shows at the next key.  It also reads a daemon's own mailbox folder.
+
 ### Send a message
 
 Write a file to `~/mail-remote/outbox/`:
