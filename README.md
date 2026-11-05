@@ -422,6 +422,8 @@ If the port isn't open or forwarded, the connection will either time out (packet
 
 The state files are plain JSON on purpose, so that this is a few seconds of `sed` rather than a program.
 
+A contact's mailbox tells yours its own name when it announces its address. If that is not the name you use for them, the daemon writes `inbox/THEIR-NAME-<your name for them>` once, with these steps filled in, and renames nothing; the note goes if the names come to match (#506).
+
 ## Docs
 
 Every document, and the nine phases the project's issues are sorted into,

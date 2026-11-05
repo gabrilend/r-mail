@@ -3053,6 +3053,83 @@ local function handle_delete(data, sender)
     return 404, {error = "message not found"}
 end
 
+-- {{{ contactfile.note_their_name
+-- #506: a contact's own name, as they announce it, against the name the
+-- owner gave them.  The name rides on the address announcement, which is
+-- sealed with that contact's key, so only they can have said it; the
+-- plaintext health check also states a mailbox's name, but anyone can
+-- answer that.
+--
+-- Mail keeps showing under the owner's name for them: the owner's words
+-- (2026-09-22) were "a messaged addressed from someone shows up with the
+-- name we have listed for them", and "we shouldn't shift user's contacts
+-- file without their permission".  So a difference changes nothing here.
+-- It is said once, in the inbox, with how to rename (renames are the
+-- owner's to make by hand since #505's reversal).  `.state/` records
+-- which name each contact was last said to use, so the next
+-- announcement, and the one after a restart, says nothing new; a
+-- different name is said again.  A deleted notice stays deleted.
+--
+-- The notice goes when it is answered: when the contact's announced name
+-- and the owner's name for them agree again, whether because the owner
+-- renamed them or because they went back to the old name.
+contactfile.THEIR_NAME = "THEIR-NAME-"
+contactfile.THEIR_NAME_STATE = "their-names.json"
+
+function contactfile.note_their_name(sender, theirs, contacts)
+    -- a name that could be a contact's name, or nothing: an older peer
+    -- sends none, and anything else is not said to the owner
+    if type(theirs) ~= "string" or #theirs > 64 or not theirs:match("^[%w_%-]+$") then
+        return
+    end
+    local told = load_state(contactfile.THEIR_NAME_STATE)
+    local prefix = contactfile.THEIR_NAME
+    if theirs == sender then
+        -- agree: the notice under this name is answered, and so is one
+        -- under a name the owner has since renamed them away from
+        local changed = false
+        for old, said in pairs(told) do
+            if old == sender or (said == theirs and not contacts[old]) then
+                told[old] = nil
+                changed = true
+                if clear_problem("inbound", prefix .. old) then
+                    log("%s's name in contacts now matches their own: removed %s%s", sender, prefix, old)
+                end
+            end
+        end
+        if changed then save_state(contactfile.THEIR_NAME_STATE, told) end
+        return
+    end
+    if told[sender] == theirs then return end
+    local clash = ""
+    if contacts[theirs] then
+        clash = string.format(
+            "\nYour contacts file already has someone else called %s (a\n" ..
+            "different key), so one of the two would need another name.\n", theirs)
+    end
+    write_file(INBOX .. "/" .. prefix .. sender, string.format(
+        "Your contact %s calls themselves %s.\n\n" ..
+        "Their mail keeps showing under %s, the name in your contacts\n" ..
+        "file, and nothing has been changed.  If you would rather use\n" ..
+        "their name, rename them by hand, with this mailbox's service\n" ..
+        "stopped:\n\n" ..
+        "  1. in contacts, every %s. line becomes %s.\n" ..
+        "  2. in the outbox, every to: %s becomes to: %s, and a folder\n" ..
+        "     outbox/%s becomes outbox/%s\n" ..
+        "  3. sed -i 's/\"%s\"/\"%s\"/g; s|\"%s/|\"%s/|g' .state/*.json\n" ..
+        "  4. start the service again\n\n" ..
+        "The README's \"Renaming a contact\" says why each step is needed.\n%s\n" ..
+        "-- %s, written by the rmail daemon itself, once.  Delete it when\n" ..
+        "you have read it; it is not written again unless they announce a\n" ..
+        "different name, and it is removed if the names come to match.\n",
+        sender, theirs, sender, sender, theirs, sender, theirs, sender, theirs,
+        sender, theirs, sender, theirs, clash, os.date("%Y-%m-%d %H:%M:%S")))
+    told[sender] = theirs
+    save_state(contactfile.THEIR_NAME_STATE, told)
+    log("%s calls themselves %s: wrote %s%s to the inbox", sender, theirs, prefix, sender)
+end
+-- }}}
+
 local function handle_update_address(data, sender)
     local new_ip = data.ip or ""
     local new_port = data.port
@@ -3061,6 +3138,9 @@ local function handle_update_address(data, sender)
     if not contacts[sender] then
         return 404, {error = "sender not in contacts"}
     end
+
+    -- #506: before any of the address work, which can return early
+    contactfile.note_their_name(sender, data.name, contacts)
 
     -- If the existing .ip is a DNS hostname, don't overwrite it — the whole
     -- point of using a hostname is that DNS re-resolution handles IP changes.
@@ -7471,6 +7551,9 @@ local function sync_address_notifications(my_name)
         local payload = json.encode({
             ip = op.ip, port = op.port,
             ips = pub, local_ips = loc,
+            -- #506: this mailbox's own name, so a contact can tell its
+            -- owner when they know us by another
+            name = my_name and tostring(my_name):gsub('^"(.*)"$', '%1') or nil,
         })
         -- #409 phase 2: on_send sees the announcement as it sees any
         -- outgoing message -- the recipient, the file's name as subject,
