@@ -12,7 +12,9 @@ How it was verified:
   closing) runs two real daemons on loopback and checks every message path
   end to end: first delivery, an edit, a note to self, a phone upload
   delivered onward, and a phone download. It passed on three runs in a row
-  on 2026-09-23.
+  on 2026-09-23. On 2026-11-05 it was run again inside a loopback-only
+  network namespace (`unshare -rn`), on top of #214 and with the cases
+  added for the carried-forward questions, and passed.
 - **By running, outside the script:** a `zip -j` / `unzip -o` round trip,
   the same pair of tools the attachment path uses, keeps a 2021 file date
   to the second. That is the basis for the attachments note below.
@@ -70,12 +72,16 @@ A message's file date is carried across every hop a message file makes:
   are sorted by file name, not by time, so the stamped time does not
   change their order.)
 - **Older peers.** A sender that omits `mtime`, or a phone that omits
-  `X-Mtime`, gets the old behaviour: the file is dated "now". No error is
-  raised. (The owner's rules treat a silent fallback as a warning, so
-  this is listed under open questions.)
-- **Garbage times are ignored.** A time that is not a number, or falls
+  `X-Mtime`, gets the old behaviour: the file is dated "now". Since
+  2026-11-05 the receiving daemon logs it for a delivery or an edit from
+  another daemon: `authoring time of <id> from <contact> not kept (the
+  sender gave none): <file> is dated on arrival`. A phone upload without
+  `X-Mtime` is still not logged (see the decisions below).
+- **Garbage times are refused.** A time that is not a number, or falls
   outside 2001-09-09 .. 2100-01-01 (epoch 1000000000 .. 4102444800), is
-  dropped and the file keeps "now".
+  dropped and the file keeps "now". Since 2026-11-05 so is a time more
+  than 300 seconds ahead of the receiver's clock, and a received file says
+  so in the log with the reason.
 - **Attachments** do not go through this mechanism. Between daemons an
   attachment travels as a zip archive, packed and read by rmail's own zip
   library since #309 (no `zip` or `unzip`).  The packer stores each file's
@@ -194,6 +200,47 @@ build answered it:
   there, or detect it?
 - **Future dates** from a sender with a fast clock: clamp to the
   receiver's "now", or leave it?
+
+## Decisions on the carried-forward questions (2026-11-05)
+
+Made by the builder.  The owner's standing instruction is to answer open
+questions rather than wait, choosing the option that is easiest to undo.
+The owner can overturn each one.  Built in `rmail.lua`
+(`set_file_mtime`, `handle_deliver_message`, `handle_deliver_update`) and
+checked by four new cases in `scripts/test-authoring-time.sh`.
+
+1. **Silent fallback to "now": logged.**  `set_file_mtime` now gives
+   `true`, or `false` and the reason.  When a delivery or an edit from
+   another daemon cannot keep its time, the receiver logs one line,
+   `authoring time of ... not kept (<reason>): ... is dated on arrival`.
+   The reason is one of: the sender gave none, not a number, outside
+   2001..2100, ahead of this clock, or `touch` could not set it.  The file
+   is still written and dated "now".  It is a warning, not a refusal, so
+   an older peer's mail still arrives.  Undo: drop the two log calls.
+2. **Future dates: refused beyond 300 seconds of lead.**  A time more than
+   300 seconds ahead of the receiver's clock is not applied; the file
+   keeps its arrival time and the log says so.  A smaller lead is kept as
+   ordinary clock skew, so the order of one sender's letters survives a
+   clock a minute or two fast.  This applies everywhere `set_file_mtime`
+   is used, the phone upload included.  Undo: one comparison.
+3. **BSD/macOS hosts: detected, not supported.**  `touch` failing (no
+   `-d @N` on BSD or macOS) is now reported with the reason, `touch could
+   not set it (exit N; GNU touch is needed)`, for every received message.
+   Using `touch -t` there is left until such a host is in use.  A `stat`
+   that fails on the sending side shows up at the receiver as "the sender
+   gave none".
+4. **Phone-uploaded attachments: not changed.**  The chunk-upload API
+   would need an `X-Mtime` and the Android client would need to send one.
+   The client cannot be built or run where this was decided, so it is
+   left for a round that can test it on a phone.
+5. **The phone upload's own missing `X-Mtime` is not logged yet.**
+   `handle_api_post_outbox_file` is being changed by the open #120
+   branch, so it is left alone here to keep the two independent.  The
+   Android client always sends the header.  Add the same warning there
+   after #120 merges.
+6. **Self-delivery is not logged.**  A note to self copies the outbox
+   file's own time on the same machine.  It is left untouched, because
+   `sync_outbox` is being changed by the open #120 and #121 branches.
 
 ## Found while verifying (not part of this issue)
 
