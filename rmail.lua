@@ -5598,6 +5598,86 @@ function upload.count_held(pending_dir, cpe)
 end
 -- }}}
 
+-- {{{ upload.file_received
+-- A verified zip, unpacked and filed: what every received attachment goes
+-- through, from a contact (handle_attachment_chunk) or from this mailbox
+-- to itself (#315).  Extracts somewhere private under `work_dir` first,
+-- then files each entry into the attachments folder, then runs
+-- on_package.  Returns the path the attachment was filed at, or nil, a
+-- reason and the detail: "extraction-failed" (the disk failed) or the
+-- reader's reason for refusing the zip.
+function upload.file_received(zip_path, work_dir, filename, sender, expected_size, message_id)
+    -- Extract somewhere private first, then file each entry.  Extracting
+    -- straight into attachments/ with -o silently replaced any file of the
+    -- same name -- including one uploaded from the phone.
+    os.execute('mkdir -p ' .. shell_quote(paths.attachments))
+    local extract_dir = work_dir .. "/extract"
+    os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
+    -- The shared zip reader unpacks it (#309): the whole structure checked
+    -- first, then every byte counted before it is made, held to the same
+    -- limit as the packed bytes (#310), so a zip bomb stops with nothing
+    -- past the limit written.  No link is ever made (#311a).
+    local unpacked_limit = upload.size_limit(expected_size)
+    local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir, unpacked_limit)
+    if not unpacked then return nil, why, detail end
+    -- unpacked: every entry in extract_dir is a regular file or folder
+
+    local target = paths.attachments .. "/" .. filename
+    local lh = io.popen('ls -A ' .. shell_quote(extract_dir) .. ' 2>/dev/null')
+    for entry in (lh and lh:lines() or function() end) do
+        local final = upload.file_entry(extract_dir .. "/" .. entry, entry)
+        if final and entry == filename then target = final end
+        if final and final ~= paths.attachments .. "/" .. entry then
+            log("attachment %s from %s: name taken, saved as %s", entry, sender, final)
+        end
+    end
+    if lh then lh:close() end
+    if hooks.on_package then
+        -- $4 (#216): the inbox file of the message the attachment came
+        -- with, or "" when that message is no longer in the inbox record
+        local message_name = upload.message_name(message_id, sender)
+        os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
+                   shell_quote(filename) .. " " .. shell_quote(target) .. " " ..
+                   shell_quote(message_name and (INBOX .. "/" .. message_name) or "") .. " &")
+    end
+    return target
+end
+-- }}}
+
+-- {{{ upload.file_to_self
+-- #315: an attached file of a message this mailbox sends to itself, filed
+-- as a received attachment without a network hop.  A daemon cannot fetch
+-- pieces from itself over a socket (it answers nobody while its own sync
+-- waits), and there is nobody to ask for consent.  What a contact's
+-- transfer guarantees is kept: the file is packed, its checksum read back
+-- from the packed copy, and the copy unpacked and filed by
+-- upload.file_received, so it lands where /api/attachments serves it to
+-- every own device.  Returns the filed path, or nil and a reason:
+-- "missing" or "changed" (try again next pass), or the packer's or
+-- reader's reason for refusing it.
+function upload.file_to_self(filepath, my_name, message_id)
+    local zip, checksum, _, unpacked_size = compress_attachment(filepath)
+    if not zip then return nil, checksum end
+    local work_dir = paths.pending .. "/.pending/self-" .. uuid()
+    os.execute("mkdir -p " .. shell_quote(work_dir))
+    local target, why, detail
+    if sha256_file(zip) ~= checksum then
+        why, detail = "changed", "the packed copy did not match its checksum"
+    else
+        local filename = filepath:gsub("/+$", ""):match("([^/]+)$") or filepath
+        target, why, detail = upload.file_received(zip, work_dir, filename, my_name,
+            unpacked_size, message_id)
+    end
+    os.remove(zip)
+    os.execute("rm -rf " .. shell_quote(work_dir))
+    if not target then
+        log("attach: %s to yourself: %s", filepath, tostring(detail or why))
+        return nil, why
+    end
+    return target
+end
+-- }}}
+
 local function handle_attachment_chunk(data, sender)
     local att_id = data.attachment_id
     local chunk_index = tonumber(data.chunk_index)
@@ -5826,49 +5906,20 @@ local function handle_attachment_chunk(data, sender)
                      held = cpe.pieces_held}
     end
 
-    -- Extract somewhere private first, then file each entry.  Extracting
-    -- straight into attachments/ with -o silently replaced any file of the
-    -- same name -- including one uploaded from the phone.
-    os.execute('mkdir -p ' .. shell_quote(paths.attachments))
-    local extract_dir = pending_dir .. "/extract"
-    os.execute('rm -rf ' .. shell_quote(extract_dir) .. ' && mkdir -p ' .. shell_quote(extract_dir))
-    -- The shared zip reader unpacks it (#309): the whole structure checked
-    -- first, then every byte counted before it is made, held to the same
-    -- limit as the packed bytes (#310), so a zip bomb stops with nothing
-    -- past the limit written.  No link is ever made (#311a).
-    local unpacked_limit = upload.size_limit(cpe.expected_size)
-    local unpacked, why, detail = upload.unpack_received(zip_path, extract_dir, unpacked_limit)
-    if not unpacked and why == "extraction-failed" then
+    -- Unpacked and filed by the code a message to oneself uses too (#315).
+    local target, why, detail = upload.file_received(zip_path, pending_dir, filename, sender,
+        cpe.expected_size, cpe.message_id)
+    if not target and why == "extraction-failed" then
         -- the disk failed, not the zip: the chunks matched their checksums,
         -- so the zip is what the sender sent.  Kept as before: answer 500
         -- and leave the chunks, so the owner can look at them.
         log("failed to extract %s from %s: %s", filename, sender, detail)
         return 500, {error = "extraction failed"}
-    elseif not unpacked then
+    elseif not target then
         -- the zip itself was refused (too large, a bad name, overlapping
         -- entries, damage...): refused for good, by its reason
         log("refused %s from %s: %s -- transfer cancelled", filename, sender, detail)
         return upload.refuse_transfer(att_id, cpe, cprog, why)
-    end
-    -- unpacked: every entry in extract_dir is a regular file or folder
-
-    local target = paths.attachments .. "/" .. filename
-    local lh = io.popen('ls -A ' .. shell_quote(extract_dir) .. ' 2>/dev/null')
-    for entry in (lh and lh:lines() or function() end) do
-        local final = upload.file_entry(extract_dir .. "/" .. entry, entry)
-        if final and entry == filename then target = final end
-        if final and final ~= paths.attachments .. "/" .. entry then
-            log("attachment %s from %s: name taken, saved as %s", entry, sender, final)
-        end
-    end
-    if lh then lh:close() end
-    if hooks.on_package then
-        -- $4 (#216): the inbox file of the message the attachment came
-        -- with, or "" when that message is no longer in the inbox record
-        local message_name = upload.message_name(cpe.message_id, sender)
-        os.execute(hooks.on_package .. " " .. shell_quote(sender) .. " " ..
-                   shell_quote(filename) .. " " .. shell_quote(target) .. " " ..
-                   shell_quote(message_name and (INBOX .. "/" .. message_name) or "") .. " &")
     end
 
     if cprog[att_id] then
@@ -6389,6 +6440,37 @@ local function sync_outbox(my_name)
         clear_marker(outbox_path, "MISSING ATTACHMENT", filepath)
     end
 
+    -- #315: the attached files of a message to oneself, filed as received
+    -- attachments once its body is in the inbox -- as a contact's arrive
+    -- after the message they came with.  Each path gets an answer in the
+    -- recipient record, as a contact's do (#312): "complete", or
+    -- "cancelled" when it cannot be filed for good.  A file that is
+    -- missing or changing is tried again next pass.
+    local function file_to_self(name, rmeta, attachments)
+        rmeta.attachments = rmeta.attachments or {}
+        local filed = false
+        for _, fp in ipairs(attachments or {}) do
+            if rmeta.attachments[fp] == nil then
+                if not file_exists(fp) then
+                    mark_missing_attachment(OUTBOX .. "/" .. name, fp, name)
+                else
+                    clear_missing_marker(OUTBOX .. "/" .. name, fp)
+                    local target, why = upload.file_to_self(fp, my_name, rmeta.message_id)
+                    if target then
+                        rmeta.attachments[fp] = "complete"
+                        log("attachment received: %s from %s -> %s (to yourself)",
+                            fp:gsub("/+$", ""):match("([^/]+)$") or fp, my_name, target)
+                        filed = true
+                    elseif why ~= "missing" and why ~= "changed" and why ~= "extraction-failed" then
+                        rmeta.attachments[fp] = "cancelled"
+                        filed = true
+                    end
+                end
+            end
+        end
+        return filed
+    end
+
     local contacts = load_contacts()
     local state = load_state("outbox.json")
     local att_state = load_state("chunks-outgoing.json")
@@ -6526,7 +6608,21 @@ local function sync_outbox(my_name)
                                 "\xe2\x80\x94 rename one of them")
                             outbox_files_with_unresolved_recipients[name] = true
                         elseif rname == my_name then
-                            -- self-delivery: write directly to own inbox
+                            -- self-delivery: write directly to own inbox.
+                            -- #315: held, as a contact's is, until every
+                            -- attached file exists; the files follow it
+                            local waiting = false
+                            for _, fp in ipairs(entry.attachments or {}) do
+                                if not file_exists(fp) then
+                                    waiting = true
+                                    mark_missing_attachment(OUTBOX .. "/" .. name, fp, name)
+                                else
+                                    clear_missing_marker(OUTBOX .. "/" .. name, fp)
+                                end
+                            end
+                            if waiting then
+                                outbox_files_with_unresolved_recipients[name] = true
+                            else
                             local inbox_state = load_state("inbox.json")
                             local msg_id = uuid()
                             local inbox_name = sanitize_filename(name)
@@ -6575,6 +6671,8 @@ local function sync_outbox(my_name)
                             }
                             log("self-delivered: %s -> %s", name, inbox_name)
                             did_work = true
+                            file_to_self(name, state[name].recipients[my_name], entry.attachments)
+                            end
                             end
                         elseif contacts[rname] and contactfile.listens(contacts[rname]) then
                             -- #420: a listen-only contact is a door, not a
@@ -6638,6 +6736,12 @@ local function sync_outbox(my_name)
                                     "not in your contacts file")
                             end
                             outbox_files_with_unresolved_recipients[name] = true
+                        end
+                    elseif rname == my_name and state[name].recipients[rname].self then
+                        -- #315: delivered to ourselves; any attached path
+                        -- not yet filed is tried again
+                        if file_to_self(name, state[name].recipients[rname], entry.attachments) then
+                            did_work = true
                         end
                     elseif contacts[rname] then
                         -- Existing recipient: offer each attached path they
