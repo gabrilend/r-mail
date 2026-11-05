@@ -12,10 +12,15 @@
 #                up to 119 and that list one time for each repeat
 #   alternating  two different lines in turn, 20 each: both are held
 #                (comparing with the line just before would hold neither)
-#   off          log_coalesce = false: every line written as it comes
+#   default      no setting: every line written as it comes, because the
+#                owner wants repeats left running (2026-09-23)
+#   off          log_coalesce = false: the same
 #   slow         repeats further apart than log_coalesce: written in full
-#   exit         the default setting and --once: the held repeats are
-#                written before the daemon exits on its own
+#   exit         log_coalesce = true (300s) and --once: the held repeats
+#                are written before the daemon exits on its own
+#
+# Holding is off unless the config asks for it, so every case but the first
+# two turns it on explicitly.
 #
 # Both copies of the log are checked: the one on stderr and the file.  Every
 # mailbox is empty and every port is in the high 59xxx range that no install
@@ -188,6 +193,19 @@ else
 fi
 
 echo ""
+echo "default: no log_coalesce setting"
+make_mailbox default 59596
+if start default 59596; then
+    ask 59596 $(repeat_word PUT 30)
+    sleep 1
+    kill "$PID"; wait "$PID" 2>/dev/null
+    expect "stderr" "$WORK/default.stderr" PUT 30 0
+    expect "file  " "$WORK/default.file"   PUT 30 0
+else
+    kill "$PID" 2>/dev/null; note_fail "default: the daemon did not start"
+fi
+
+echo ""
 echo "off: log_coalesce = false"
 make_mailbox off 59593 "log_coalesce = false"
 if start off 59593; then
@@ -212,8 +230,8 @@ else
 fi
 
 echo ""
-echo "exit: the default setting, --once=4, 10 of the same line"
-make_mailbox exit 59595
+echo "exit: log_coalesce = true, --once=4, 10 of the same line"
+make_mailbox exit 59595 "log_coalesce = true"
 if start exit 59595 --once=4; then
     ask 59595 $(repeat_word PUT 10)
     _waited=0

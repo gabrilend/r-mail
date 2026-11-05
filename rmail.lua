@@ -186,10 +186,13 @@ local cfg = {
     log_file          = _log_file(config.log_file, MAIL),
     -- #118: a line logged again within this many seconds of its last
     -- appearance is held back, and the held repeats are written later as
-    -- one line that lists when each one happened.  `log_coalesce = false`
-    -- (or 0) writes every line as it comes, as before.
-    log_coalesce      = config.log_coalesce == false and 0
-                        or tonumber(config.log_coalesce) or 300,
+    -- one line that lists when each one happened.  Off unless asked for:
+    -- the owner wants repeats left running (2026-09-23, "keep it running
+    -- away instead of collapsing identical lines").  A number of seconds
+    -- turns it on, `true` means 300; unset, `false` or 0 writes every line
+    -- as it comes.
+    log_coalesce      = config.log_coalesce == true and 300
+                        or tonumber(config.log_coalesce) or 0,
 }
 
 -- Hook scripts.  The config parser doesn't strip quotes, so a user who

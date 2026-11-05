@@ -221,6 +221,7 @@ of interest when in fact real events were simply buried.
 ## Status
 
 **Built 2026-11-05** (see "Built" and "Decisions" below), on top of #121.
+Off by default: an owner turns it on with `log_coalesce` (decision 3).
 The open questions are answered in the decisions.
 
 2026-09-23: while designing #121, the owner decided a crashing sync's
@@ -263,8 +264,9 @@ seconds while the contacts are at the floor.  Those repeat word for word,
 so matching whole lines is enough for them.
 
 **The log.**  `log()` (in `rmail.lua`) formats the line, lets #121's
-within-a-sync check drop it as before, and then asks `log_state.hold`.  A
-line seen in the last `log_coalesce` seconds (default 300) is held: its
+within-a-sync check drop it as before, and then asks `log_state.hold`.
+Holding is off unless `log_coalesce` is set (decisions 3 and 5).  When it
+is on, a line seen in the last `log_coalesce` seconds is held: its
 time is kept and nothing is written.  Any other line is written as
 before, and remembered.  `log_state.write` is the old body of `log()`
 (stderr first, then the file, then rotation).  The run state is one table,
@@ -293,24 +295,28 @@ log are not on the drive); and when a Lua error stops the daemon (`main`
 now runs under `xpcall`, whose handler writes them and then the error and
 its traceback as Lua would, and exits 1).
 
-**Config:** `log_coalesce = <seconds>`; `false` or `0` writes every line
-as it comes.  In the README's list of settings not in the generated
+**Config:** `log_coalesce = <seconds>` (or `true` for 300) turns holding
+on; unset, `false` or `0` writes every line as it comes, which is the
+default.  In the README's list of settings not in the generated
 config.
 
 **Test:** `scripts/test-log-repeats.sh` runs the real daemon and makes it
-repeat "refused a web PUT request" over loopback: 120 at once (the line
-once in full, then 50, 50 and 19 held, adding to 119, each listing one
-time per repeat, the later ones saying how many so far), two lines in turn
-(both held), `log_coalesce = false` (30 lines in full), repeats further
-apart than the setting (both in full), and `--once` with the default
-setting (the 9 held repeats written before the closing line).  Both the
-stderr copy and the file are checked.  Breaking the holding, the `--once`
-flush, or matching only the line before each fails it.
+repeat "refused a web PUT request" over loopback.  With holding turned on
+it checks: 120 at once (the line once in full, then 50, 50 and 19 held,
+adding to 119, each listing one time per repeat, the later ones saying
+how many so far), two lines in turn (both held), repeats further apart
+than the setting (both in full), and `--once` with `log_coalesce = true`
+(the 9 held repeats written before the closing line).  It also checks
+that with no setting, and with `log_coalesce = false`, all 30 of 30
+repeats are written in full.  Both the stderr copy and the file are
+checked.  Breaking the holding, the `--once` flush, or matching only the
+line before each fails it.
 
 `scripts/test-listen-only-contact.sh` counts one log line per refusal, and
 two of its refusals log the same words; it stops the daemon by signal
 before a held repeat would be written, so it sets `log_coalesce = false`.
-Every other test passes unchanged.
+Since holding became opt-in that is also the default; the line stays, to
+say so.  Every other test passes unchanged.
 
 ## Decisions (2026-11-05, the owner can overturn any of these)
 
@@ -328,22 +334,28 @@ Every other test passes unchanged.
    make up for.  At most 64 different lines are remembered; past that,
    the one seen longest ago is written out and forgotten.
 3. **Every repeat's time is kept** (option 5, without the elision it
-   would need, because a line carries 50 repeats at most).  The owner said
-   on 2026-09-23 that repeats should keep their timing ("That way we have
-   the timing information too").  That was about crash runaways, now
-   gone, but it is the owner's reason for not collapsing lines, and this
-   meets it: the text is written once, the times all stay.  This answers
-   #121's open question 1.
-4. **One window, default 300 seconds, and 50 repeats a line.**  A line
-   is held only when it comes within the window of its last appearance,
-   and held repeats are written once the first is a window old.  So a
-   line repeating every 30 seconds becomes one line every 5 minutes, a
-   line repeating every two hours is written in full each time, and
-   nothing held is more than about 5 minutes late in `tail -F` or
-   `journalctl -f`.  The 50 matters only for bursts.  No separate
-   setting for it.
-5. **One setting, `log_coalesce`,** both the switch and the window:
-   `false` or `0` turns it off, a number sets the seconds.
+   would need, because a line carries 50 repeats at most), **and holding
+   is off unless the owner turns it on** (changed later on 2026-11-05;
+   first built on by default).  The owner said on 2026-09-23: "Nah let's
+   keep it running away instead of collapsing identical lines.  That way
+   we have the timing information too."  That was said about crash
+   runaways, now gone, but it is an explicit wish about this very
+   behaviour, and a reading of its reason does not override it.  So a
+   mailbox logs every line as it comes, as before, and the holding is
+   there for an owner who asks for it, keeping every time when used.
+   This answers #121's open question 1: yes, it applies.
+4. **When turned on: one window, 300 seconds unless set otherwise, and
+   50 repeats a line.**  A line is held only when it comes within the
+   window of its last appearance, and held repeats are written once the
+   first is a window old.  So with 300, a line repeating every 30 seconds
+   becomes one line every 5 minutes, a line repeating every two hours is
+   written in full each time, and nothing held is more than about 5
+   minutes late in `tail -F` or `journalctl -f`.  The 50 matters only for
+   bursts.  No separate setting for it.
+5. **One setting, `log_coalesce`,** both the switch and the window, and
+   **off by default** because of the owner's words in decision 3: unset,
+   `false` or `0` writes every line as it comes; a number turns holding
+   on with that many seconds; `true` turns it on with 300.
 6. **Each held line lists only its own repeats, and says the running
    total too** once there is more than one held line for the same run
    ("x50, 100 so far").  The run ends when the line has not come for a
