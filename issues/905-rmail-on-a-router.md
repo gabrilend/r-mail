@@ -105,8 +105,8 @@ without one.  No router was run, and nothing below is a router result.
 3. **rmail runs on stock Lua 5.3.**  On Ubuntu's Lua 5.3.6, with Ubuntu's
    luasocket for 5.3 and the two C modules compiled here against the 5.3
    headers (`cc -shared -fPIC -I/usr/include/lua5.3`), main's whole test
-   suite was run with Lua 5.3 as the daemon's interpreter: LUA53_RESULT.
-   The five that fail are the five that fail on Lua 5.4 in this container
+   suite was run with Lua 5.3 as the daemon's interpreter: of its 34 tests, 29
+   pass.  The five that fail are the five that fail on Lua 5.4 in this container
    as well (they need a browser, a real home network or a service
    manager).  The 200-local limit is the same in 5.3 as in 5.4 (both
    compile the main chunk).
