@@ -34,6 +34,17 @@
 #               to restart; a stopped one is told what it runs next
 #   story       story prints the chapters between two versions, and
 #               says when there are none
+#   restarting  restart goes through the service manager, with the same
+#               commands as restart-mailboxes.sh (stand-ins for systemctl,
+#               sv, rc-service, sudo and id record what they were asked):
+#               a mailbox started by hand is not touched; --dry-run says
+#               the command and runs nothing; a runit service that is not
+#               enabled is named with the command that enables it;
+#               --behind restarts only the running mailbox that last ran
+#               an older version, waits for its new pid, and says it now
+#               runs the version on disk; not root, sv goes through sudo;
+#               a refused restart is said and fails; and with nothing
+#               behind, --behind says so
 #
 # Usage:
 #   scripts/test-monitor.sh          # use the enclosing checkout
@@ -132,7 +143,7 @@ EOF
 
 PIDS=""
 stop_all() {
-    for p in $PIDS; do kill "$p" 2>/dev/null; done
+    for p in $PIDS $(cat "$WORK"/*.pid 2>/dev/null); do kill "$p" 2>/dev/null; done
     wait 2>/dev/null
 }
 trap stop_all EXIT
@@ -278,6 +289,123 @@ monitor story > "$WORK/story3.out" 2>&1
 grep -qF "$first" "$WORK/story3.out" \
     && ok "with no versions it tells the whole story up to this checkout's" \
     || note_fail "story: $(head -2 "$WORK/story3.out" | tr '\n' ' ')"
+
+echo ""
+echo "restarting"
+# {{{ stand-ins for the service managers
+# Each records the command it was given in $WORK/calls.  The systemd and
+# runit ones restart the test's daemon the way the real ones would: stop
+# the old process, start a new one.  rc-service refuses.  id says what
+# FAKE_UID says, so the monitor can be made to think it is not root.
+mkdir -p "$WORK/bin"
+REAL_ID=$(command -v id)
+: > "$WORK/calls"
+echo "$PID_RUNNING" > "$WORK/running.pid"
+cat > "$WORK/bin/restart-box" <<EOF
+#!/bin/sh
+# restart-box <box>: stop the daemon in $WORK/<box>.pid and start another
+old=\$(cat "$WORK/\$1.pid" 2>/dev/null)
+if [ -n "\$old" ]; then
+    kill "\$old" 2>/dev/null
+    n=0; while kill -0 "\$old" 2>/dev/null && [ \$n -lt 50 ]; do sleep 0.1; n=\$((n + 1)); done
+fi
+"$LAUNCHER" "$WORK/\$1/config" >> "$WORK/\$1.log" 2>&1 < /dev/null &
+echo \$! > "$WORK/\$1.pid"
+EOF
+cat > "$WORK/bin/systemctl" <<EOF
+#!/bin/sh
+echo "systemctl \$*" >> "$WORK/calls"
+[ "\$*" = "--user restart rmail-running.service" ] && exec "$WORK/bin/restart-box" running
+exit 1
+EOF
+cat > "$WORK/bin/sv" <<EOF
+#!/bin/sh
+echo "sv \$*" >> "$WORK/calls"
+[ "\$*" = "restart $WORK/root/var/service/rmail-stopped" ] && exec "$WORK/bin/restart-box" stopped
+exit 1
+EOF
+cat > "$WORK/bin/rc-service" <<EOF
+#!/bin/sh
+echo "rc-service \$*" >> "$WORK/calls"
+echo " * rc-service: service \$1 does not exist" >&2
+exit 1
+EOF
+cat > "$WORK/bin/sudo" <<EOF
+#!/bin/sh
+echo "sudo \$*" >> "$WORK/calls"
+exec "\$@"
+EOF
+cat > "$WORK/bin/id" <<EOF
+#!/bin/sh
+if [ "\$1" = "-u" ] && [ -n "\$FAKE_UID" ]; then echo "\$FAKE_UID"; exit 0; fi
+exec "$REAL_ID" "\$@"
+EOF
+chmod +x "$WORK/bin/"*
+restart() {
+    PATH="$WORK/bin:$PATH" RMAIL_MONITOR_RESTART_WAIT=20 monitor restart "$@"
+}
+# }}}
+
+monitor > "$WORK/help2.out" 2>&1
+grep -q "I can restart a mailbox" "$WORK/help2.out" && grep -q "rmail-monitor.lua restart MAILBOX" "$WORK/help2.out" \
+    && ! grep -q "cannot do yet.*restart a mailbox" "$WORK/help2.out" \
+    && ok "it says it can restart a mailbox, and no longer that it cannot" \
+    || note_fail "the monitor's own description: $(grep -i restart "$WORK/help2.out" | tr '\n' ' ')"
+
+restart "$WORK/byhand" > "$WORK/r-byhand.out" 2>&1
+[ $? -eq 1 ] && grep -q "started by hand (pid $PID_BYHAND)" "$WORK/r-byhand.out" && [ ! -s "$WORK/calls" ] \
+    && kill -0 "$PID_BYHAND" 2>/dev/null \
+    && ok "a mailbox started by hand is not restarted, and is left running" \
+    || note_fail "restart byhand: $(cat "$WORK/r-byhand.out" "$WORK/calls" | tr '\n' ' ')"
+
+restart rmail-running --dry-run > "$WORK/r-dry.out" 2>&1
+[ $? -eq 0 ] && grep -q "^  systemctl --user restart rmail-running.service$" "$WORK/r-dry.out" \
+    && [ ! -s "$WORK/calls" ] && kill -0 "$PID_RUNNING" 2>/dev/null \
+    && ok "--dry-run says the command and runs nothing" \
+    || note_fail "restart --dry-run: $(cat "$WORK/r-dry.out" "$WORK/calls" | tr '\n' ' ')"
+
+restart rmail-stopped > "$WORK/r-noenable.out" 2>&1
+[ $? -eq 1 ] && grep -q "not enabled (nothing at $WORK/root/var/service/rmail-stopped)" "$WORK/r-noenable.out" \
+    && grep -q "ln -s $WORK/root/etc/sv/rmail-stopped $WORK/root/var/service/" "$WORK/r-noenable.out" \
+    && [ ! -s "$WORK/calls" ] \
+    && ok "a runit service that is not enabled is named, with the command that enables it" \
+    || note_fail "restart a runit service not enabled: $(cat "$WORK/r-noenable.out" | tr '\n' ' ')"
+
+# running last ran 0.0.5 (set above): --behind restarts it and only it
+restart --behind > "$WORK/r-behind.out" 2>&1
+status=$?
+NEW_RUNNING=$(cat "$WORK/running.pid")
+[ $status -eq 0 ] && [ "$(cat "$WORK/calls")" = "systemctl --user restart rmail-running.service" ] \
+    && ok "--behind restarts the running mailbox that last ran an older version, and no other" \
+    || note_fail "restart --behind ($status): $(cat "$WORK/r-behind.out" "$WORK/calls" | tr '\n' ' ')"
+[ "$NEW_RUNNING" != "$PID_RUNNING" ] && kill -0 "$NEW_RUNNING" 2>/dev/null && ! kill -0 "$PID_RUNNING" 2>/dev/null \
+    && grep -q "running again (pid $NEW_RUNNING), version $VERSION" "$WORK/r-behind.out" \
+    && [ "$(cat "$WORK/running/.state/version")" = "$VERSION" ] \
+    && ok "it waits for the new pid and says the version it runs now" \
+    || note_fail "after --behind: old $PID_RUNNING new $NEW_RUNNING: $(cat "$WORK/r-behind.out" | tr '\n' ' ')"
+
+mkdir -p "$WORK/root/var/service"
+ln -s "$WORK/root/etc/sv/rmail-stopped" "$WORK/root/var/service/rmail-stopped"
+: > "$WORK/calls"
+FAKE_UID=1000 restart "$WORK/stopped" > "$WORK/r-runit.out" 2>&1
+status=$?
+[ $status -eq 0 ] && grep -q "^sudo sv restart $WORK/root/var/service/rmail-stopped$" "$WORK/calls" \
+    && grep -q "running again (pid $(cat "$WORK/stopped.pid" 2>/dev/null)), version $VERSION" "$WORK/r-runit.out" \
+    && ok "not root, a runit service is restarted through sudo, and a stopped one is started" \
+    || note_fail "restart runit ($status): $(cat "$WORK/r-runit.out" "$WORK/calls" | tr '\n' ' ')"
+
+: > "$WORK/calls"
+restart rmail-openrc > "$WORK/r-openrc.out" 2>&1
+[ $? -eq 1 ] && grep -q "^rc-service rmail-openrc restart$" "$WORK/calls" \
+    && grep -q "refused the restart" "$WORK/r-openrc.out" \
+    && ok "a restart the service manager refuses is said, and fails" \
+    || note_fail "restart openrc: $(cat "$WORK/r-openrc.out" "$WORK/calls" | tr '\n' ' ')"
+
+: > "$WORK/calls"
+restart --behind > "$WORK/r-none.out" 2>&1
+[ $? -eq 0 ] && grep -q "nothing to restart" "$WORK/r-none.out" && [ ! -s "$WORK/calls" ] \
+    && ok "with nothing behind, --behind says so and runs nothing" \
+    || note_fail "restart --behind again: $(cat "$WORK/r-none.out" "$WORK/calls" | tr '\n' ' ')"
 
 stop_all
 PIDS=""

@@ -148,6 +148,14 @@ whose config says `monitor = no` is left out. `lua rmail.lua --version` says
 which rmail a checkout holds, and `scripts/rmail-monitor.lua story` tells what
 changed between two versions, from the chapters in `transitions/`.
 
+After a `git pull`, `lua scripts/rmail-monitor.lua restart --behind` restarts
+every running mailbox whose program on disk is newer than the one it runs,
+through the service that starts it, and waits to see each running again;
+`restart MAILBOX` restarts one (named by its folder, its config or its
+service), and `--dry-run` only says the command. Through `sudo` when a
+system service needs root. A mailbox started by hand is left alone, since
+the monitor cannot start it again the way you did.
+
 ## Configuration
 
 ### Config file
@@ -455,6 +463,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-06 →** The monitor can restart mailboxes (#713): `rmail-monitor.lua restart --behind` restarts every running mailbox that is behind the program on disk, and `restart MAILBOX` one of them, through its service, then waits to see it running the new version.
 
 - **2026-11-05 →** rmail has a version number, 0.1.0, which `rmail.lua --version` prints and a running mailbox logs and keeps in `.state/version`. The new monitor, `scripts/rmail-monitor.lua`, lists the mailboxes on a machine with their ports, whether each is running and the version it runs, says when one needs a restart to run the program now on disk, and points at the story of what changed when a mailbox moves to a newer version (#713).
 

@@ -18,6 +18,11 @@
 --                   the chapters of transitions/ between two versions:
 --                   what changed, why, and how
 --   version         which rmail this checkout holds
+--   restart MAILBOX | --behind [--dry-run]
+--                   restart one mailbox through the service that starts
+--                   it, or every running one whose program on disk is
+--                   newer than what it last ran, and wait to see it
+--                   running again
 --
 -- `list --plain` prints one tab-separated line per mailbox and nothing
 -- else, for other programs: the monitor is meant to be something other
@@ -47,8 +52,18 @@
 -- that changes mail would be a surprise, and the changes between
 -- versions so far have needed no migration.
 --
+-- Restarting.  A mailbox is restarted the way its service manager
+-- restarts it, with the commands scripts/.templates/restart-mailboxes.sh
+-- (#622) uses: `systemctl --user restart` for a user service, and through
+-- sudo when not root, `systemctl restart`, `sv restart` on the folder in
+-- SVDIR (/var/service) and `rc-service ... restart` for the rest.  Then
+-- it waits, up to RESTART_WAIT seconds, for the mailbox to be running
+-- under a new pid, and says which version it runs now.  A mailbox started
+-- by hand is not restarted: the monitor did not start it and does not
+-- know how it was started, so stopping it would only stop it.
+--
 -- For the tests, RMAIL_MONITOR_ROOT is put in front of every /etc path
--- and RMAIL_MONITOR_PROC replaces /proc.
+-- (and the default SVDIR) and RMAIL_MONITOR_PROC replaces /proc.
 
 local ROOT_PREFIX = os.getenv("RMAIL_MONITOR_ROOT") or ""
 local PROC = os.getenv("RMAIL_MONITOR_PROC") or "/proc"
@@ -58,6 +73,8 @@ local CHECKOUT = SCRIPT_DIR .. "/.."
 local TRANSITIONS = CHECKOUT .. "/transitions"
 local CACHE_DIR = (os.getenv("XDG_STATE_HOME") or (HOME .. "/.local/state")) .. "/rmail"
 local CACHE = CACHE_DIR .. "/monitor-versions"
+local SVDIR = os.getenv("SVDIR") or (ROOT_PREFIX .. "/var/service")
+local RESTART_WAIT = tonumber(os.getenv("RMAIL_MONITOR_RESTART_WAIT")) or 20
 
 -- {{{ small helpers
 local function read_file(path)
@@ -337,10 +354,11 @@ local abilities = {
       "story [FROM [TO]]" },
     { "version", "I can tell you which rmail this checkout holds",
       "version" },
+    { "restart", "I can restart a mailbox through the service that starts it, or every one behind its program",
+      "restart MAILBOX | --behind [--dry-run]" },
 }
 
 local cannot_yet = {
-    "restart a mailbox",
     "run a script against a mailbox's hooks",
     "relay a message between mailboxes",
 }
@@ -438,29 +456,36 @@ function commands.list(args)
     return 0
 end
 
+-- the mailbox a word names: its folder, its config, or its service
+local function named(want, list)
+    local abs = want:sub(1, 1) == "/" and want or ((os.getenv("PWD") or ".") .. "/" .. want)
+    abs = normalize(abs)
+    for _, m in ipairs(list or mailboxes()) do
+        if m.mailbox == abs or m.config == abs or m.service == want then return m end
+    end
+    return nil
+end
+
 function commands.tell(args)
     local want = args[1]
     if not want then
         io.stderr:write("tell which mailbox?  rmail-monitor.lua tell MAILBOX\n")
         return 2
     end
-    local abs = want:sub(1, 1) == "/" and want or ((os.getenv("PWD") or ".") .. "/" .. want)
-    abs = normalize(abs)
-    for _, m in ipairs(mailboxes()) do
-        if m.mailbox == abs or m.config == abs or m.service == want then
-            print(m.mailbox)
-            print("  config:        " .. m.config)
-            print("  status:        " .. status_words(m))
-            print("  name:          " .. (m.name or "?"))
-            print("  port:          " .. (m.port or "?"))
-            print("  last ran:      " .. (m.ran_version or "never, as far as .state/version says"))
-            print("  program:       " .. (m.program or "?") .. " (" .. (m.program_version or "no version") .. ")")
-            print("  service:       " .. service_words(m))
-            if m.service_file then print("  service file:  " .. m.service_file) end
-            local pending = pending_words(m)
-            if pending then print("  note:          " .. pending) end
-            return 0
-        end
+    local m = named(want)
+    if m then
+        print(m.mailbox)
+        print("  config:        " .. m.config)
+        print("  status:        " .. status_words(m))
+        print("  name:          " .. (m.name or "?"))
+        print("  port:          " .. (m.port or "?"))
+        print("  last ran:      " .. (m.ran_version or "never, as far as .state/version says"))
+        print("  program:       " .. (m.program or "?") .. " (" .. (m.program_version or "no version") .. ")")
+        print("  service:       " .. service_words(m))
+        if m.service_file then print("  service file:  " .. m.service_file) end
+        local pending = pending_words(m)
+        if pending then print("  note:          " .. pending) end
+        return 0
     end
     io.stderr:write("no mailbox " .. want .. " on this machine")
     io.stderr:write(" (or it asked not to be listed)\n")
@@ -483,6 +508,135 @@ function commands.story(args)
     end
     return 0
 end
+
+-- {{{ restarting
+local function running_as_root()
+    local p = io.popen("id -u 2>/dev/null")
+    local uid = p and p:read("*l")
+    if p then p:close() end
+    return uid == "0"
+end
+
+-- the command that restarts a mailbox's service, as words, or nil and why not
+local function restart_words(m)
+    if not m.service then
+        if #m.pids > 0 then
+            return nil, "it was started by hand (pid " .. table.concat(m.pids, ", ") .. "), not by a service, " ..
+                "so I do not know how to start it again; stop it and start it the way you did"
+        end
+        return nil, "no service starts it"
+    end
+    local name, root = m.service, running_as_root()
+    local function as_root(words)
+        if not root then table.insert(words, 1, "sudo") end
+        return words
+    end
+    local kind = m.service_kind
+    if kind == "systemd user" then
+        return { "systemctl", "--user", "restart", name .. ".service" }
+    elseif kind == "systemd" or kind == "nixos" then
+        return as_root({ "systemctl", "restart", name .. ".service" })
+    elseif kind == "runit" then
+        local dir = SVDIR .. "/" .. name
+        if not read_file(dir .. "/run") and #list_dir(dir) == 0 then
+            return nil, "its runit service is not enabled (nothing at " .. dir .. "); enable it with " ..
+                "ln -s " .. dirname(m.service_file) .. " " .. SVDIR .. "/"
+        end
+        return as_root({ "sv", "restart", dir })
+    elseif kind == "openrc" then
+        return as_root({ "rc-service", name, "restart" })
+    end
+    return nil, "I do not know how to restart a " .. tostring(kind) .. " service"
+end
+
+local function quoted(words)
+    local out = {}
+    for i, w in ipairs(words) do
+        out[i] = w:match("^[%w%./_%-]+$") and w or shell_quote(w)
+    end
+    return table.concat(out, " ")
+end
+
+-- running again under a pid it did not have before, and the version it
+-- runs once its daemon has written it; nil when the wait runs out
+local function wait_restarted(m)
+    local old = {}
+    for _, pid in ipairs(m.pids) do old[pid] = true end
+    local tries = math.max(1, math.floor(RESTART_WAIT * 2))
+    for _ = 1, tries do
+        local now = named(m.config)
+        if now and #now.pids > 0 then
+            local fresh = true
+            for _, pid in ipairs(now.pids) do if old[pid] then fresh = false end end
+            local caught_up = not now.program_version or now.ran_version == now.program_version
+            if fresh and caught_up then return now end
+        end
+        os.execute("sleep 0.5")
+    end
+    return nil
+end
+
+local function restart_one(m, dry)
+    local words, why = restart_words(m)
+    print(m.mailbox .. ":")
+    if not words then
+        print("  not restarted: " .. why)
+        return false
+    end
+    print("  " .. quoted(words))
+    if dry then return true end
+    local ok = os.execute(quoted(words))
+    if ok ~= true and ok ~= 0 then
+        print("  the service manager refused the restart (see above); nothing changed that I can tell")
+        return false
+    end
+    local now = wait_restarted(m)
+    if not now then
+        print("  the restart was taken, but the mailbox is not running again under a new pid after "
+            .. RESTART_WAIT .. " seconds; its log says why")
+        return false
+    end
+    print("  running again (pid " .. table.concat(now.pids, ", ") .. "), version " .. (now.version or "unknown"))
+    return true
+end
+
+function commands.restart(args)
+    local dry, want, behind = false, nil, false
+    for _, a in ipairs(args) do
+        if a == "--dry-run" then dry = true
+        elseif a == "--behind" then behind = true
+        else want = a end
+    end
+    if not want and not behind then
+        io.stderr:write("restart which mailbox?  rmail-monitor.lua restart MAILBOX, or --behind for every one\n" ..
+            "running an older version than its program\n")
+        return 2
+    end
+    local chosen = {}
+    if want then
+        local m = named(want)
+        if not m then
+            io.stderr:write("no mailbox " .. want .. " on this machine (or it asked not to be listed)\n")
+            return 1
+        end
+        chosen[1] = m
+    else
+        for _, m in ipairs(mailboxes()) do
+            if #m.pids > 0 and pending_words(m) then chosen[#chosen + 1] = m end
+        end
+        if #chosen == 0 then
+            print("Every running mailbox runs the program on disk; nothing to restart.")
+            return 0
+        end
+    end
+    local failed = 0
+    for i, m in ipairs(chosen) do
+        if i > 1 then print("") end
+        if not restart_one(m, dry) then failed = failed + 1 end
+    end
+    return failed == 0 and 0 or 1
+end
+-- }}}
 
 local name = arg and arg[1] or "help"
 local command = commands[name]

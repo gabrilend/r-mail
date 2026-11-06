@@ -84,9 +84,30 @@ command line.
   mailbox, run a script against its hooks, relay between mailboxes.
 - `transitions/0.1.0.md` is the first chapter.
 
-Not built: restart, running scripts against hooks, relaying, the monitor
-as a hook consumer or producer, a web UI, and transition chapters that
-carry migrations.
+Second slice built 2026-11-06 (branch `claude/713-monitor-restarts`,
+stacked on `claude/713-monitor`): "I can restart an instance".
+
+- `restart MAILBOX` restarts one mailbox, named as `tell` names it;
+  `restart --behind` restarts every running mailbox whose program on
+  disk carries a newer version than the one it last ran (the mailboxes
+  `list` already tells "restart it to run ..."); `--dry-run` says the
+  command and runs nothing.
+- The command is the service manager's, as `restart-mailboxes.sh` (#622)
+  runs it: `systemctl --user restart` for a user service, and through
+  `sudo` when not root, `systemctl restart` (systemd, NixOS), `sv restart`
+  on the folder in `SVDIR` (`/var/service`) and `rc-service NAME restart`.
+- It then waits up to 20 seconds for the mailbox to run under a pid it
+  did not have before, at the version on disk, and says which.  A
+  refusal from the service manager, or no new daemon in time, is said and
+  the command fails.
+- The help lists restarting among what it can do.
+- Test: `scripts/test-monitor.sh`, section "restarting", with stand-ins
+  for `systemctl`, `sv`, `rc-service`, `sudo` and `id` that restart the
+  test's own daemons.
+
+Not built: running scripts against hooks, relaying, the monitor as a
+hook consumer or producer, a web UI, and transition chapters that carry
+migrations.
 
 ## Decisions (2026-11-05)
 
@@ -139,6 +160,37 @@ carry migrations.
   A web UI is left for later; the `--plain` output is what one would
   read.
 - Test: `scripts/test-monitor.sh`.
+
+## Decisions (2026-11-06)
+
+Made while building the restart, to be overturned by the owner's word:
+
+- **A mailbox started by hand is not restarted.**  The monitor knows its
+  pid and its command line, but not its terminal, its environment or
+  whether it was meant to keep running; stopping it and starting a copy
+  in the background would be a guess, and stopping it alone would only
+  stop it.  It says so and names the pid.
+- **The service manager's own restart, with #622's commands.**  The
+  installer already settled how each manager restarts a mailbox
+  (`scripts/.templates/restart-mailboxes.sh`); the monitor uses the same
+  commands, so the two never disagree about a service.  Unlike that
+  script it needs no list kept by hand: the services it restarts are the
+  ones it finds.
+- **sudo only when not root, and only for system services.**  A systemd
+  user service never needs it.  sudo asks for its password on the
+  terminal as it would anywhere.
+- **`--behind` restarts only running mailboxes.**  A stopped one runs the
+  program on disk when it is next started, which `list` already says;
+  starting it would undo the owner's having stopped it.  Naming a
+  stopped mailbox to `restart` does start it, as the service managers'
+  own restart does.
+- **A restart counts once the mailbox runs under a new pid at the
+  version on disk**, read from the `.state/version` its daemon writes at
+  start, and not when the service manager returns: a service manager can
+  accept a restart whose daemon then fails to start.  The wait is 20
+  seconds (`RMAIL_MONITOR_RESTART_WAIT` for the tests).
+- **No version raise.**  0.1.0 stays: the version is raised for a change
+  worth a chapter in `transitions/`, and the monitor is not the daemon.
 
 ## Witness material
 
