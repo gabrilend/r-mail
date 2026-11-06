@@ -184,7 +184,7 @@ The generated config file contains a comment above most keys explaining what it 
 - `public_http_port` — the port that serves `to: url` links to browsers (default: none, so nothing listens and a `to: url` file is marked `NO PUBLIC PORT`). It needs forwarding on your router like `port`, and must differ from it.
 - `public_url_words` — how many words a new link's code has (default: `6`, no upper limit). More words make a link harder to guess; links already made keep theirs.
 - `website` — a folder to send, zipped, to a contact who asks for it with a message called `website` (default: none). A relative path is taken from the config's folder. See [attachments](docs/.templates/attachments.md#your-website-sent-to-contacts-who-ask-715a).
-- `website_access` — who may ask: `private` (contacts only, the default). `public` is not built yet, and the daemon will not start with it.
+- `website_access` — who may ask: `private` (contacts only, the default) or `public` (anyone, with `run-rmail.sh <their config> --website=<host>:<port>`; the site is sealed with a key the two agree, and its six words are in your log for the asker to compare). See [attachments](docs/.templates/attachments.md#a-public-website-for-anyone-who-asks-715b).
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
@@ -469,6 +469,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-06 →** `website_access = public` lets anyone fetch your website, not only contacts (#715b): `run-rmail.sh <their config> --website=<host>:<port>`. The answer is sealed with a key the two agree for the visit; their mailbox remembers your website's key and refuses the site if it ever changes, and both sides show six words from it to compare in person. One address may fetch twice the site a day.
 
 - **2026-11-05 →** A contact's website that reaches you is kept at `attachments/websites/<contact>/`, one per contact; the copy it replaces moves into RAM until the machine restarts (#715a). Beside each file in it that is not part of a page, an `.info.html` page gives its size, checksum and a link to open it.
 

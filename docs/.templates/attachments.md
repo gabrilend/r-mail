@@ -372,6 +372,42 @@ part of a page (a video, a zip, a program) the daemon writes
 to open it, so a link can point at the page rather than open the file
 unannounced.  The site's own pages are left exactly as they came.
 
-`website_access = private` (the default) is the only setting built so
-far; `public`, for strangers, waits for #715b, and the daemon will not
-start with it.
+`website_access = private` (the default) lets only contacts ask.
+
+### A public website, for anyone who asks (#715b)
+
+`website_access = public` lets someone who is not your contact fetch the
+website too, with nothing set up beforehand.  They run rmail once against
+their own mailbox's config:
+
+    run-rmail.sh ~/mail/config --website=203.0.113.7:51234
+
+It asks your mailbox with a plain web request on its port.  The two agree
+a key for that visit (X25519), using a key your mailbox keeps for its
+website (`.state/website-key`, made on the first start in public mode),
+and everything your mailbox answers is sealed with it.  Before anything is
+fetched, their terminal shows:
+
+- six words made from your website key.  Your daemon writes the same six
+  words in its log when it starts.  Compare them in person or by phone:
+  different words mean someone is between you;
+- the size, zipped and unpacked, said both ways round, and a yes-or-no
+  question (`--yes` answers yes without asking).
+
+Their mailbox remembers your key for that address
+(`.state/website-keys.json`).  If it is ever different, the fetch is
+refused, with the words from then and now, until they remove that entry by
+hand.  That is all a first visit can rest on: no arithmetic can tell
+someone in the middle apart on a first visit, so the words are the check.
+
+The site arrives in pieces, each sealed and named, and is checked whole,
+then filed like a contact's: `attachments/websites/<name>-at-<host>-<port>/`,
+with information pages, the copy before it moved to RAM.
+
+The guard: one address may fetch at most twice the zipped site a day (so a
+failed download can be tried again), and the log says once when an
+address reaches it.  The zip is made once per version of the folder and
+kept while the daemon runs.  A stranger sends no note: the public link's
+notes (#714) are the place for that.  Keep `.state/website-key` as you keep
+your contacts file.  If it is lost, a new one is made, and everyone who has
+visited is told the key changed.
