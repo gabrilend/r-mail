@@ -15,6 +15,9 @@ jump around.
 - [ ] Daemon starts cleanly and logs "outbox inotify watcher active"
 - [ ] Lua 5.4 `os.execute` return value handled correctly (#103)
 - [ ] Service logs write to `/tmp/rmail.log`, not to disk (#117)
+- [x] With no compiled Lua, `run-rmail.sh` passes over a Lua 5.1 (it has no `goto`) and says rmail needs 5.2 or later or LuaJIT, naming OpenWrt's packages; it starts the first that can read the file (harness: `scripts/test-run-rmail-interpreters.sh`, #905)
+- [x] The whole suite passes on stock Lua 5.3 with the C modules built against its headers, as on 5.4 (run by hand 2026-11-06, #905)
+- [ ] On an OpenWrt router with `lua5.3`, `luasocket5.3` and `libopenssl`, and the C modules built with OpenWrt's toolchain, a mailbox on a USB drive sends and receives (#905)
 
 ## 2. Daemon config and hooks
 

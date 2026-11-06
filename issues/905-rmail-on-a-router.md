@@ -74,6 +74,81 @@ Good. OpenWrt packages everything the daemon needs:
   encrypted, but unauthenticated connection handling becomes the attack
   surface rather than a router's firewall.
 
+## Findings (2026-11-06)
+
+Checked on an x86-64 Linux machine, not on a router: what can be checked
+without one.  No router was run, and nothing below is a router result.
+
+1. **Lua 5.1 cannot run rmail.** `rmail.lua` uses `goto` (eight places on
+   main, for example `goto continue_batch` in the batch sender), and Lua
+   5.1 has no `goto`: stock Lua 5.1.5 refuses the file at once,
+   `rmail.lua:3230: '=' expected near 'continue_batch'`.  So the 200-local
+   question above is not the first obstacle on 5.1; the file never gets
+   that far.  The libraries in `libs/` compile on 5.1; only `rmail.lua` does
+   not.  LuaJIT has `goto` and reads the file (checked).  The
+   "Feasibility" and "Constraints" sections above, which name `lua5.1` as
+   the target, are wrong on this point.
+2. **OpenWrt's Lua for rmail is 5.3.**  From OpenWrt's package
+   definitions, read 2026-11-06:
+   - `lua5.3`: 5.3.5, in the core tree's `package/utils/lua5.3`, read in
+     a staging copy.
+   - `luasocket5.3`: luasocket 3.1.0 built for Lua 5.3, in the packages
+     feed's `openwrt-24.10` branch.  That Makefile defines two variants,
+     `luasocket` (for Lua 5.1) and `luasocket5.3`.
+   - `lua5.4`: 5.4.7, in the packages feed for 24.10, but no luasocket
+     variant is built for it.
+   - OpenWrt's plain `lua` is 5.1, kept for its web interface.
+
+   So a router would run rmail on `lua5.3` with `luasocket5.3` and
+   `libopenssl`; `rmail_crypto.c` and `rmail_inotify.c` would be compiled
+   against Lua 5.3's headers.
+3. **rmail runs on stock Lua 5.3.**  On Ubuntu's Lua 5.3.6, with Ubuntu's
+   luasocket for 5.3 and the two C modules compiled here against the 5.3
+   headers (`cc -shared -fPIC -I/usr/include/lua5.3`), main's whole test
+   suite was run with Lua 5.3 as the daemon's interpreter: LUA53_RESULT.
+   The five that fail are the five that fail on Lua 5.4 in this container
+   as well (they need a browser, a real home network or a service
+   manager).  The 200-local limit is the same in 5.3 as in 5.4 (both
+   compile the main chunk).
+4. **Memory.**  One daemon with one contact it cannot reach, 20 seconds
+   after starting, on x86-64: 8.1 MB resident on Lua 5.3, 8.0 MB on Lua
+   5.4 (`VmRSS`, equal to `VmHWM`).  A MIPS or ARM router will differ, and
+   attachments add their buffers; the figure only says the order of size
+   (the "~13MB" above) holds.
+5. **`run-rmail.sh` now passes over a Lua that cannot read a `goto`.**
+   With no compiled Lua it used to start the first interpreter on the
+   PATH, so on a router with only OpenWrt's `lua` (5.1) the daemon died on
+   the syntax error above, which names a line of rmail.lua and not the
+   cause.  It now tries each one with a one-line `goto`, starts the first
+   that reads it, and otherwise says that rmail needs Lua 5.2 or later or
+   LuaJIT, naming the packages to add on OpenWrt.
+   `scripts/test-run-rmail-interpreters.sh` checks it (7 cases; 6 of 6
+   mutants caught).
+
+## Decisions (2026-11-06)
+
+- **The router target is Lua 5.3, not 5.1.**  Rewriting the eight
+  `goto`s would make 5.1 possible, but OpenWrt carries 5.3 and a
+  luasocket for it, so nothing is gained by holding the daemon to 5.1.
+- **A mailbox on a router is still the installation (#102), on the USB
+  drive.**  The drive holds the mailbox; the router is its host.  That is
+  the shape #616/#619 already give a drive, and it keeps the mailbox off
+  the router's flash (step 2).
+
+## What is left for the owner, or for a router
+
+- Every step above needs a router or an OpenWrt build tree: compiling the
+  C modules with OpenWrt's toolchain (musl, not glibc; the generator of
+  #617/#619 builds against glibc and would need an OpenWrt target),
+  inotify on the router's USB filesystem, packaging, and refusing a
+  mailbox on internal flash.
+- Reading the public address from the WAN interface instead of asking a
+  service (#410) is a daemon change that only makes sense on a router; it
+  waits for a router to test on.
+- The security question above (a daemon on the WAN interface with no NAT
+  in front) is the owner's.
+
 ## Status
 
-Open. Feasibility assessed 2026-09-22; no implementation.
+Open.  Feasibility assessed 2026-09-22; findings and the interpreter
+check 2026-11-06; nothing built for a router itself.
