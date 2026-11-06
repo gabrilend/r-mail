@@ -38,6 +38,9 @@
 --
 -- It stops when <folder>/stop appears.  A file <folder>/hold holding a
 -- number makes it wait that many seconds before its next answer (once).
+-- A file <folder>/hold-each holding a number makes it wait that long
+-- before every answer, adding a line to <folder>/held (the request's type)
+-- as each wait begins.
 -- A file <folder>/owe makes it answer every piece ok but keep it owed.
 
 local DIR, PORT, TOKEN, FOLDER = arg[1], tonumber(arg[2]), arg[3], arg[4]
@@ -195,6 +198,19 @@ local function serve(conn)
             write(FOLDER .. "/holding", "")
             socket.sleep(seconds)
             os.remove(FOLDER .. "/hold")
+        end
+        -- <folder>/hold-each holding a number: the same wait before every
+        -- answer, with a line naming the request's type added to
+        -- <folder>/held as each wait begins -- so a test can catch the
+        -- daemon waiting on a given request in a pass after the first
+        local each = io.open(FOLDER .. "/hold-each")
+        if each then
+            local seconds = tonumber(each:read("*a")) or 0
+            each:close()
+            local held = assert(io.open(FOLDER .. "/held", "a"))
+            held:write(body:match('"type"%s*:%s*"([^"]+)"') or path or "", "\n")
+            held:close()
+            socket.sleep(seconds)
         end
         local status, answer = handle(method, path, body)
         local out = json.encode(answer)

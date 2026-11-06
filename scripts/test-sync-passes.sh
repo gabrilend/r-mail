@@ -12,7 +12,7 @@
 # and a pass that plans exactly what the one before it planned stops the
 # sync.
 #
-# Six throwaway mailboxes in RAM, each a real daemon, one case each.  The
+# Eight throwaway mailboxes in RAM, each a real daemon, one case each.  The
 # recipients are stand-ins (scripts/lib/fake-recipient.lua), and the test
 # speaks for them through scripts/lib/fake-contact.lua.
 #
@@ -36,6 +36,11 @@
 #   ticker     the scripting tutorial's periodic: an on_update hook that
 #              rewrites its own outbox file every time it runs starts no
 #              sync of its own, so syncs never run back to back
+#   saver      a file saved by someone else while the last pass of a sync
+#              waits (it stops on a repeated plan): the next sync starts
+#              when this one ends, and delivers it (#119)
+#   marker     a mark the sync writes in an outbox file in its last pass is
+#              its own, and starts no sync
 #
 # Usage:
 #   scripts/test-sync-passes.sh          # use the enclosing checkout
@@ -70,6 +75,8 @@ wait_until() {
     return 1
 }
 secs() { printf '%d.%d' $(($1 / 10)) $(($1 % 10)); }
+# clock HH:MM:SS — seconds since midnight (a log line's time)
+clock() { echo "$1" | awk -F: '{ print $1 * 3600 + $2 * 60 + $3 }'; }
 # }}}
 
 # {{{ make_mailbox
@@ -398,6 +405,100 @@ if [ "$ticks" -ge 1 ] && [ "$ticks" -le 3 ]; then
 else
     note_fail "$ticks updates in 10 s (syncs back to back give hundreds; none means the hook never ran)"
 fi
+if grep -q "saved during" "$WORK/ticker.log"; then
+    note_fail "the hook's rewrite was taken for someone else's save: $(grep -m1 'saved during' "$WORK/ticker.log")"
+else
+    ok "the hook's rewrite was taken for the sync's own"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "a file saved in an editor during a sync's last pass (#119)"
+make_mailbox saver 59583
+add_contact saver dawdler 59584
+printf 'stands in for a compressed copy\n' > "$WORK/saver/files/copy.zip"
+cat > "$WORK/saver/.state/chunks-outgoing.json" <<EOF
+{
+  "att-owed": {
+    "filename": "picture.jpg",
+    "original_path": "$WORK/saver/files/copy.zip",
+    "compressed_path": "$WORK/saver/files/copy.zip",
+    "status": "sending",
+    "total_chunks": 1,
+    "missing": [0],
+    "total_checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+    "expected_size": 31,
+    "message_id": "msg-owed",
+    "to": "dawdler",
+    "outbox_file": "letter"
+  }
+}
+EOF
+# dawdler keeps asking for the same piece, so the sync stops after its
+# second pass, and takes 2 s over every answer, so that second pass --
+# the last -- waits on it long enough to save a file meanwhile.  A pass
+# sends a one-piece file at most three times (the pieces step's limit:
+# its batches, plus two), so the fourth piece is the second pass's.
+mkdir -p "$WORK/dawdler"; : > "$WORK/dawdler/owe"; printf '2\n' > "$WORK/dawdler/hold-each"
+recipient dawdler 59584
+start saver
+if wait_until 30 '[ "$(cat "$WORK/dawdler/held" 2>/dev/null | grep -c attachment_chunk)" -ge 4 ]'; then
+    printf 'to: saver\n\nsaved in an editor\n' > "$WORK/saver/outbox/late"
+    # the sync ends some 6 s later, when dawdler has answered its last
+    # piece; the file must go in the sync that starts then, not when
+    # dawdler's timer comes due (30 s, give or take 30)
+    if wait_until 15 '[ -f "$WORK/saver/inbox/late" ]'; then
+        stopped=$(grep -m1 "sync stopped" "$WORK/saver.log" | cut -c12-19)
+        delivered=$(grep -m1 "self-delivered: late" "$WORK/saver.log" | cut -c12-19)
+        gap=$(( $(clock "$delivered") - $(clock "$stopped") ))
+        if [ "$gap" -ge 0 ] && [ "$gap" -le 1 ]; then
+            ok "it went in the sync that started as that one ended ($stopped, then $delivered)"
+        else
+            note_fail "it went ${gap}s after that sync ended ($stopped, then $delivered): a timer's wait"
+        fi
+    else
+        note_fail "the file saved during the last pass did not arrive within 15 s"
+    fi
+    line=$(grep -m1 "saved during" "$WORK/saver.log")
+    case "$line" in
+        *"outbox: late saved during the sync's last pass; syncing again"*) ok "the log says why ($line)" ;;
+        *) note_fail "the log says: $line" ;;
+    esac
+    if grep -q "sync stopped" "$WORK/saver.log"; then
+        ok "the sync it was saved in was the one that stopped on its repeated plan"
+    else
+        note_fail "no sync stopped on its repeated plan"
+    fi
+else
+    note_fail "dawdler was never asked in a second pass"
+fi
+sleep 6
+stop saver
+again=$(count saver "syncing again")
+if [ "$again" -eq 1 ]; then
+    ok "one save, one sync started for it"
+else
+    note_fail "$again syncs started for saves"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "a mark the sync writes in an outbox file itself (#119)"
+make_mailbox marker 59585
+start marker
+sleep 2
+printf 'to: stranger\n\nfor nobody we know\n' > "$WORK/marker/outbox/to-stranger"
+if wait_until 10 'grep -q "UNKNOWN CONTACT: stranger" "$WORK/marker/outbox/to-stranger"'; then
+    sleep 2
+    if grep -q "saved during" "$WORK/marker.log"; then
+        note_fail "its own mark was taken for someone else's save: $(grep -m1 'saved during' "$WORK/marker.log")"
+    else
+        ok "the mark written in the last pass started no sync"
+    fi
+else
+    note_fail "no unknown-contact mark was written: $(cat "$WORK/marker/outbox/to-stranger")"
+fi
+stop marker
 
 for d in "$WORK"/*/; do touch "$d/stop"; done
 sleep 1
