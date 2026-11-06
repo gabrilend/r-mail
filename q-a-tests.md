@@ -620,6 +620,11 @@ These have no test cases yet. Listed here so they aren't forgotten.
 - [ ] Emoji and CJK text in a message line up: nothing overlaps or is cut in half at the right edge (#711)
 - [ ] On macOS (Terminal.app and iTerm2), `clients/macos/view.sh` draws, takes arrow keys, and gives the terminal back on quit (#711)
 - [ ] Opening a picture or other binary file in the viewer describes it rather than filling the screen with bytes (#711)
+- [x] Edit mode against a pretend terminal: typing, the arrows, a line cut and pasted, undo, a new message saved under a name not taken, a file changed on disk saved only on a second Ctrl-S (harness: scripts/test-thin-client-editor.sh) (#711, 2026-11-06)
+- [ ] In a real terminal: `n`, write a message to a contact, Ctrl-S and a name; the daemon sends it, and the viewer shows it in the outbox (#711)
+- [ ] Ctrl-S and Ctrl-Z reach the viewer (not the terminal's flow control or job control) in st, xterm, Terminal.app and over ssh (#711)
+- [ ] Typing quickly, and pasting a paragraph with the terminal's own paste, keeps every character in order (#711)
+- [ ] An emoji or CJK character typed or pasted keeps the cursor in the right column (#711)
 
 ### Attachment pipeline audit (#307) — implemented 2026-09-22
 

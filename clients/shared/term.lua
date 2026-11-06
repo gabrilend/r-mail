@@ -44,6 +44,9 @@ function T.parse(read_byte)
     if not b then return nil end
     if b ~= "\27" then
         if NAMES[b] then return NAMES[b] end
+        -- any other control character is ctrl- and its letter (Ctrl-S is
+        -- byte 19, "ctrl-s"); raw mode passes them all, flow control too
+        if b:byte() >= 1 and b:byte() <= 26 then return "ctrl-" .. string.char(b:byte() + 96) end
         -- a multi-byte character arrives a byte at a time
         local n = b:byte()
         local len = (n >= 0xF0) and 4 or (n >= 0xE0) and 3 or (n >= 0xC0) and 2 or 1

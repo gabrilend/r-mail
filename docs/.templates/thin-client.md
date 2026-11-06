@@ -159,7 +159,8 @@ cat ~/mail-remote/inbox/hello-from-alice.txt
 
 Or read them in the terminal with the viewer, which lists the inbox and
 outbox newest first and opens a message wrapped to the window (Linux and
-macOS; it changes nothing, so writing is still your own editor's job):
+macOS).  It can also write: `n` starts a new message in the outbox and `e`
+edits an outbox file; reading changes nothing:
 ```sh
 clients/linux/view.sh                      # the one mirror under ~/mail-remote
 clients/linux/view.sh ~/mail-remote/mailbox-1
@@ -167,6 +168,11 @@ clients/linux/view.sh ~/mail-remote/mailbox-1
 Arrow keys or `j`/`k` move, Enter opens, Tab switches between inbox and
 outbox, `q` goes back and then quits.  Mail that syncs in while it is open
 shows at the next key.  It also reads a daemon's own mailbox folder.
+
+While writing, Ctrl-S saves (a new message asks for its name), Ctrl-X
+leaves (twice to leave without saving), Ctrl-K cuts a line, Ctrl-U pastes
+it, Ctrl-Z undoes.  A file the mailbox changed while you had it open is
+saved over only on a second Ctrl-S.
 
 ### Send a message
 

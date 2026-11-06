@@ -30,7 +30,7 @@ end
 local dir = arg[1]
 if dir == "-h" or dir == "--help" then
     print("usage: rmail-view.lua [MAILBOX-FOLDER]")
-    print("  reads a mailbox's inbox/ and outbox/; changes nothing")
+    print("  reads a mailbox's inbox/ and outbox/; n writes a new outbox message, e edits one")
     os.exit(0)
 end
 if not dir then
