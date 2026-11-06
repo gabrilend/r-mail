@@ -24,8 +24,9 @@ main { max-width: 42rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .box { border: 2px solid var(--line); padding: 1rem 1.25rem; margin: 1rem 0; }
 #body { white-space: pre-wrap; overflow-wrap: anywhere; }
 h1 { font-size: 1.1rem; border-bottom: 2px solid var(--line); padding-bottom: .4rem; }
-input[type=text] { width: 100%; box-sizing: border-box; font: inherit; padding: .4rem;
+input[type=text], textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .4rem;
   border: 2px solid var(--line); background: transparent; color: var(--text); }
+textarea { min-height: 5rem; resize: vertical; }
 button { font: inherit; color: var(--text); background: transparent; border: 2px solid var(--line);
   padding: .3rem .8rem; margin-top: .5rem; cursor: pointer; }
 .file { border-top: 1px solid var(--line); padding: .6rem 0; }
@@ -33,6 +34,12 @@ button { font: inherit; color: var(--text); background: transparent; border: 2px
 .file img, .file video { max-width: 100%; display: block; margin: .5rem 0; border: 1px solid var(--line); }
 .file audio { width: 100%; margin: .5rem 0; }
 .note { font-size: .9rem; opacity: .85; }
+h2 { font-size: 1rem; margin: 0 0 .5rem; }
+.said { border-top: 1px solid var(--line); padding: .6rem 0; }
+.said:first-child { border-top: 0; }
+.said .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.said.author { border-left: 4px solid var(--line); padding-left: .75rem; }
+#say { border-top: 2px solid var(--line); margin-top: .75rem; padding-top: .75rem; }
 a { color: var(--text); }
 [hidden] { display: none !important; }
 </style>
@@ -53,8 +60,20 @@ is loaded from anywhere else.</div></noscript>
 <p id="status" class="note"></p>
 <div id="message" class="box" hidden><div id="body"></div></div>
 <div id="files" class="box" hidden></div>
+<div id="talk" class="box" hidden>
+  <h2>Replies</h2>
+  <div id="entries"></div>
+  <form id="say" hidden>
+    <label for="who">Your name (optional, shown to everyone who has the link):</label>
+    <input id="who" type="text" maxlength="40" autocomplete="off">
+    <label for="words">A note to the sender:</label>
+    <textarea id="words" maxlength="8192"></textarea>
+    <button type="submit">Send</button>
+    <p id="sent" class="note"></p>
+  </form>
+</div>
 <p class="note">The code after <code>#</code> in the link is the key: your browser keeps it and never sends
-it.  This page can be saved and opened from your own disk next time, with the whole link pasted in.</p>
+it.  Notes left here are locked with it too, and anyone who has the link can read them.  This page can be saved and opened from your own disk next time, with the whole link pasted in.</p>
 </main>
 <script>
 "use strict";
@@ -62,8 +81,10 @@ it.  This page can be saved and opened from your own disk next time, with the wh
 // key from the words, fetches the sealed message, and opens it here.
 // Plain http gives a page neither the browser's own cryptography nor its
 // private file storage, so the cipher is written out below (AES-256-GCM,
-// decryption only, with lookup tables for speed) and the pieces of a file
-// wait in IndexedDB until all of them have arrived.
+// with lookup tables for speed) and the pieces of a file wait in
+// IndexedDB until all of them have arrived.  A reader's note is sealed
+// here, under a key of its own made from the same words, and posted to
+// the server the page came from.
 var RmailLink = (function () {
 
   // ---- SHA-256 --------------------------------------------------------
@@ -291,6 +312,37 @@ var RmailLink = (function () {
     return diff === 0 ? out : null;
   }
 
+  // ---- AES-256-GCM encryption, for a reader's note ---------------------
+  // nonce is 12 bytes; returns nonce | ciphertext | tag.  Notes are short,
+  // so this goes a byte at a time where open() goes a word at a time.
+  function seal(key, nonce, plain) {
+    var rk = expandKey(key), blk = new Int32Array(4);
+    encryptBlock(rk, 0, 0, 0, 0, blk);
+    var T = ghashTable(blk);
+    var n0 = (nonce[0] << 24) | (nonce[1] << 16) | (nonce[2] << 8) | nonce[3];
+    var n1 = (nonce[4] << 24) | (nonce[5] << 16) | (nonce[6] << 8) | nonce[7];
+    var n2 = (nonce[8] << 24) | (nonce[9] << 16) | (nonce[10] << 8) | nonce[11];
+    var len = plain.length, out = new Uint8Array(12 + len + 16), x = new Int32Array(4);
+    var ks = new Int32Array(4), counter = 2, i;
+    out.set(nonce.subarray(0, 12), 0);
+    for (var o = 0; o < len; o += 16) {
+      var n = Math.min(16, len - o), c = new Uint8Array(16);
+      encryptBlock(rk, n0, n1, n2, counter, ks); counter = (counter + 1) >>> 0;
+      for (i = 0; i < n; i++) c[i] = plain[o + i] ^ ((ks[i >> 2] >>> ((3 - (i & 3)) * 8)) & 255);
+      out.set(c.subarray(0, n), 12 + o);
+      x[0] ^= (c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3];
+      x[1] ^= (c[4] << 24) | (c[5] << 16) | (c[6] << 8) | c[7];
+      x[2] ^= (c[8] << 24) | (c[9] << 16) | (c[10] << 8) | c[11];
+      x[3] ^= (c[12] << 24) | (c[13] << 16) | (c[14] << 8) | c[15];
+      gmult(x, T);
+    }
+    var bits = len * 8;
+    x[2] ^= Math.floor(bits / 4294967296); x[3] ^= bits >>> 0; gmult(x, T);
+    encryptBlock(rk, n0, n1, n2, 1, ks);
+    for (i = 0; i < 16; i++) out[12 + len + i] = ((x[i >> 2] ^ ks[i >> 2]) >>> ((3 - (i & 3)) * 8)) & 255;
+    return out;
+  }
+
   // ---- the code, the address and the key -------------------------------
   function utf8(s) { return new TextEncoder().encode(s); }
   function hex(bytes) {
@@ -304,7 +356,8 @@ var RmailLink = (function () {
   function derive(words) {
     var w = normalize(words);
     return { words: w, address: hex(sha256(utf8("rmail public link address\0" + w))),
-             key: sha256(utf8("rmail public link key\0" + w)) };
+             key: sha256(utf8("rmail public link key\0" + w)),
+             noteKey: sha256(utf8("rmail public link note\0" + w)) };
   }
 
   // a typed code, or a whole link: the server it names and the words
@@ -329,8 +382,13 @@ var RmailLink = (function () {
     return plain.subarray(nl + 1);
   }
 
-  return { sha256: sha256, open: open, derive: derive, normalize: normalize,
-           readInput: readInput, pieceBytes: pieceBytes, hex: hex };
+  // a reader's note, sealed for the server: {v, name, body}
+  function sealNote(noteKey, nonce, name, body) {
+    return seal(noteKey, nonce, utf8(JSON.stringify({ v: 1, name: name, body: body })));
+  }
+
+  return { sha256: sha256, open: open, seal: seal, sealNote: sealNote, derive: derive,
+           normalize: normalize, readInput: readInput, pieceBytes: pieceBytes, hex: hex };
 })();
 
 if (typeof module !== "undefined") module.exports = RmailLink;
@@ -418,11 +476,14 @@ if (typeof document !== "undefined") (function () {
     });
   }
 
-  function showFiles() {
-    var box = $("files"); box.textContent = "";
-    if (!message.files || !message.files.length) { box.hidden = true; return; }
-    box.hidden = false;
-    message.files.forEach(function (f, n) {
+  // the files of one part (0 the message, n the n-th answer) into box;
+  // i is a file's place in the whole list, which is how its pieces are asked for
+  function showFiles(box, part) {
+    box.textContent = "";
+    var count = 0;
+    (message.files || []).forEach(function (f, n) {
+      if ((f.part || 0) !== part) return;
+      count++;
       var i = n + 1, row = document.createElement("div"); row.className = "file";
       var title = document.createElement("div"); title.textContent = f.name;
       row.appendChild(title);
@@ -458,22 +519,114 @@ if (typeof document !== "undefined") (function () {
       // pictures up to 16 MB show at once
       if (kind.indexOf("image/") === 0 && f.size <= 16777216) fetchIt();
     });
+    return count;
   }
+
+  // ---- the replies: the sender's answers and the readers' notes ---------
+  var shown = { body: null, files: null, talk: null }, timer = null;
+
+  function when(seconds) {
+    var d = new Date(seconds * 1000);
+    return isNaN(d) ? "" : d.toLocaleString();
+  }
+
+  function showTalk() {
+    var talk = message.talk || [], box = $("entries");
+    var key = JSON.stringify(talk);
+    if (key !== shown.talk) {
+      shown.talk = key;
+      box.textContent = "";
+      talk.forEach(function (t) {
+        var row = document.createElement("div");
+        row.className = "said" + (t.who === "author" ? " author" : "");
+        var who = document.createElement("div"); who.className = "note";
+        who.textContent = (t.who === "author" ? "The sender" : (t.name || "A reader")) + ", " + when(t.time);
+        var text = document.createElement("div"); text.className = "text"; text.textContent = t.body;
+        row.appendChild(who); row.appendChild(text);
+        if (t.who === "author") {
+          var files = document.createElement("div");
+          if (showFiles(files, t.part)) row.appendChild(files);
+        }
+        box.appendChild(row);
+      });
+      if (!talk.length) {
+        var none = document.createElement("p"); none.className = "note";
+        none.textContent = message.notes ? "No replies yet." : "No replies.";
+        box.appendChild(none);
+      }
+    }
+    $("say").hidden = !message.notes;
+    $("talk").hidden = !(talk.length || message.notes);
+  }
+
+  function show() {
+    if (message.body !== shown.body) { shown.body = message.body; $("body").textContent = message.body; }
+    $("message").hidden = false;
+    var files = JSON.stringify(message.files || []);
+    if (files !== shown.files) {
+      // a file list that changed is drawn again; one that did not keeps
+      // what has already been fetched
+      shown.files = files; shown.talk = null;
+      $("files").hidden = !showFiles($("files"), 0);
+    }
+    showTalk();
+  }
+
+  function fetchMessage() {
+    return fetchSealed("/m/" + link.address).then(function (sealed) {
+      var plain = L.open(link.key, sealed);
+      if (!plain) throw new Error("This message did not unlock.  The code may be mistyped, or the page was changed on the way.");
+      return JSON.parse(new TextDecoder().decode(plain));
+    });
+  }
+
+  // asked again each sync period while the page is open
+  function poll() {
+    clearTimeout(timer);
+    var every = Math.max(10, Number(message.every) || 30) * 1000;
+    timer = setTimeout(function () {
+      fetchMessage().then(function (m) { message = m; show(); poll(); })
+        .catch(function (e) {
+          if (e.message === "gone") { status("The sender has taken this message down."); return; }
+          poll();
+        });
+    }, every);
+  }
+
+  $("say").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var body = $("words").value, name = $("who").value.trim();
+    if (!body.trim()) return;
+    var nonce = new Uint8Array(12); crypto.getRandomValues(nonce);
+    var sealed = L.sealNote(link.noteKey, nonce, name, body);
+    var button = $("say").querySelector("button");
+    button.disabled = true; $("sent").textContent = "Sending…";
+    fetch(link.base + "/m/" + link.address + "/notes", { method: "POST", body: sealed,
+        cache: "no-store", referrerPolicy: "no-referrer" })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          if (!r.ok) throw new Error(r.status === 404 ? "The sender has taken this message down." : t.trim() || ("the server answered " + r.status));
+        });
+      })
+      .then(function () {
+        $("words").value = ""; $("sent").textContent = "Sent.";
+        return fetchMessage().then(function (m) { message = m; show(); poll(); });
+      })
+      .catch(function (e) { $("sent").textContent = "Not sent: " + e.message; })
+      .then(function () { button.disabled = false; });
+  });
 
   function unlock(text) {
     var input = L.readInput(text, here);
     if (!input.base) { status("Paste the whole link: this saved copy does not know which server to ask."); $("ask").hidden = false; return; }
     if (!L.normalize(input.words)) { $("ask").hidden = false; return; }
     var d = L.derive(input.words);
-    link = { base: input.base, address: d.address, key: d.key };
+    link = { base: input.base, address: d.address, key: d.key, noteKey: d.noteKey };
     status("Unlocking…");
-    fetchSealed("/m/" + d.address).then(function (sealed) {
-      var plain = L.open(d.key, sealed);
-      if (!plain) throw new Error("This message did not unlock.  The code may be mistyped, or the page was changed on the way.");
-      message = JSON.parse(new TextDecoder().decode(plain));
-      $("body").textContent = message.body;
-      $("message").hidden = false; $("ask").hidden = true; status("");
-      return openDb().then(function (d) { db = d; showFiles(); });
+    fetchMessage().then(function (m) {
+      message = m;
+      $("ask").hidden = true; status("");
+      return openDb().then(function (d) { db = d; show(); poll(); });
     }).catch(function (e) {
       $("ask").hidden = false;
       status(e.message === "gone" ? "Nothing is published under that code, or it has been taken down." : e.message);

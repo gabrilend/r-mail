@@ -117,7 +117,24 @@ Hand that link to the person it is for. The words after `#` are the key: a brows
 
 The page is read from the outbox file at every visit: an edit shows at the next one, and taking out the `to: url` line, or deleting the file, takes the page down. Contacts on the same file never see the `URL:` line. Folders are listed but not published yet.
 
-Anyone who has the link can read the message, so treat it like the message itself. Over plain http someone who can *change* your traffic (not only watch it) could hand the reader a different page; a reader who saves the page and opens the saved copy next time, pasting the whole link, is safe from that. See [issue #714](issues/714-public-capability-url-web-server.md).
+#### Replies
+
+Whoever has the link can leave a note on the page, under any name they like. A note arrives in your inbox like a message, in a folder named after the published file: notes on `party` go in `inbox/party-notes/`, each under the name its reader gave. The page shows the notes whose files are still there, as they read now, so delete a note's file to take it off the page, or edit it to correct it; readers can do neither. The page asks for new notes every 30 seconds while it is open.
+
+To answer, write a new outbox file with `to: url` and the same `URL:` line, copied from the first file:
+
+```
+to: url
+attach: /path/to/map.png
+
+Thanks, see you there.
+
+URL: http://203.0.113.1:8028/#yahan-firmans-bowls-quai-fig-bien
+```
+
+The page shows it as yours, below the notes that came before it, with its files. Answers are kept, edited and taken down like the message itself. The oldest file under a link is the message; the rest are answers. A note is at most 8 KiB, and a link takes at most 500 notes (delete some to make room). Set `public_url_notes = no` to take no notes on any link.
+
+Anyone who has the link can read the message, and the notes, so treat it like the message itself. Over plain http someone who can *change* your traffic (not only watch it) could hand the reader a different page; a reader who saves the page and opens the saved copy next time, pasting the whole link, is safe from that. See [issue #714](issues/714-public-capability-url-web-server.md).
 
 ## Dependencies
 
@@ -183,6 +200,7 @@ The generated config file contains a comment above most keys explaining what it 
 - `wake_gap` — seconds the daemon's wait may overrun by the clock before it takes it that the machine slept (default: `60`). On waking it checks its address, announces itself to every contact, and tries every contact at once, so mail held for it while it slept comes in on their next pass.
 - `public_http_port` — the port that serves `to: url` links to browsers (default: none, so nothing listens and a `to: url` file is marked `NO PUBLIC PORT`). It needs forwarding on your router like `port`, and must differ from it.
 - `public_url_words` — how many words a new link's code has (default: `6`, no upper limit). More words make a link harder to guess; links already made keep theirs.
+- `public_url_notes` — whether a link's readers may leave notes on its page (default: `yes`; `no` refuses them and hides the box).
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
 
@@ -467,6 +485,8 @@ that phase's work, with what came out and how long it took.
 ## Change log
 
 Newest first. Each entry is the date, then what changed, in plain words.
+
+- **2026-11-06 →** A link made with `to: url` takes replies (#714). Its readers can leave notes on the page, which arrive in `inbox/<file>-notes/`; you answer with another `to: url` file carrying the same `URL:` line. `public_url_notes = no` turns notes off.
 
 - **2026-11-05 →** `to: url` publishes a message as a link someone with only a browser can open (#714). Set `public_http_port` to turn it on. The words after `#` in the link are the key; the page opens the message in the browser, and files arrive in checked pieces that survive a reload.
 

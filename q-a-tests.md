@@ -367,6 +367,18 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] A private window: the message opens even if pieces cannot be kept
 - [ ] Time to open a 100 MB video on a phone and on a desktop (target about 2 s on a desktop; 38 MiB/s measured in Node on the build machine)
 
+### Replies on a link (#714) — 2026-11-06
+
+- [x] A note sealed by the page's own program is filed in `inbox/<file>-notes/` under the reader's name, made safe (harness: scripts/test-public-link-notes.sh)
+- [x] The page's sealing is AES-256-GCM that Node's own opens; a note under the wrong key, with a field more, empty or over 8 KiB is refused, and nothing reaches the inbox (harness)
+- [x] An outbox file with `to: url` and the same URL line is shown as the author's answer, with its files; an edit to the message keeps it first (harness)
+- [x] Deleting or editing a note's file in the inbox is what the page shows next; a link with 500 notes takes no more; `public_url_notes = no` refuses notes (harness)
+- [ ] In Firefox, Chrome and Safari: leave a note from the page over plain http from another machine; it shows on the page and arrives in the inbox
+- [ ] Two browsers open on the same link: a note left in one shows in the other within about 30 seconds
+- [ ] A saved copy of the page opened from disk can leave a note (a POST from `file://`)
+- [ ] An answer with a picture: it shows under the answer, and the message's own files are unchanged
+- [ ] A name with accents, emoji or a slash: shown on the page as typed (the slash as a space), and the inbox file name is readable
+
 ## 7. Android — connection and sync
 
 ### Sync behavior

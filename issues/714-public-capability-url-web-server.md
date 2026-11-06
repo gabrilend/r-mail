@@ -4,8 +4,10 @@
 
 *Built in part, 2026-11-05 (see Status):* `to: url` publishes a message
 as a link, served sealed on `public_http_port` and opened in the browser
-by the page `data/public-link-page.html`.  Not built: the replies
-("essentially a chatroom") and publishing folders.
+by the page `data/public-link-page.html`.  *Built 2026-11-06:* the
+replies ("essentially a chatroom"): readers' notes, filed in the inbox,
+and the author's answers, written as more `to: url` files under the same
+link.  Not built: publishing folders.
 
 
 > Renumbered from #615 on 2026-09-21: #615 was taken by
@@ -489,6 +491,10 @@ public_url_words = 5
   "should be hidden from the user. It is part of the 'to: url'
   pipeline": rmail makes and removes it itself, kept in its own state,
   never written into the contacts file.
+  *Built 2026-11-06* (Status; Decisions (2026-11-06)): notes filed in the
+  inbox from a sender made of the link's address, answers as more
+  `to: url` files under the same URL line, the page asking again every
+  sync period.
 - **Tampering is critical** (the owner, 2026-10-09: "This is a critical
   concern, we need to make sure it works correctly"), replacing the
   2026-10-04 "I guess we gotta note that limitation".  Over plain http a
@@ -600,8 +606,91 @@ Built:
 - Test: `scripts/test-public-link.sh` (loopback; the page's own program
   run in Node against what the daemon served).
 
-Not built: the replies; folders; a check, for a reader, that the page is
-the real one (see Decisions (2026-11-05)).
+Second slice built 2026-11-06 (branch `claude/714-link-replies`, stacked
+on `claude/714-public-link`): the replies.
+
+- `POST /m/<address>/notes` on the public port takes a reader's note,
+  sealed by the page under `SHA-256("rmail public link note\0" .. words)`
+  as `{v, name, body}`.  The daemon files it with `handle_deliver_message`
+  as a message from `url-<first 12 of the address>`, a sender no contacts
+  file names, under the subject `<file>-notes/<name>` (#214's folders),
+  after the listen-only gate of #420.  `inbox.json` records the name and
+  when it came.  A note is at most 8 KiB; a request at most 32 KiB, read
+  only after its Content-Length says so; a link holds at most 500 notes.
+- `GET /m/<address>` gains `talk` (the author's answers and the readers'
+  notes, oldest first, each `{who, name or part, body, time}`), `notes`
+  (whether notes are taken) and `every` (the sync period, 30 s), and each
+  file gains `part` (0 the message, n the n-th answer).  Files are
+  numbered as one list, the message's first, so a piece is still asked
+  for by one number.
+- An answer is any outbox file with `to: url` and the same URL line.  The
+  oldest of a link's files, by the first cycle that saw it (`since` in the
+  outbox record), is the message.
+- The page: a Replies box with the notes and answers, a form for a name
+  and a note, sealing in plain JavaScript (the AES-256-GCM it already had,
+  run the other way), and a fresh look every `every` seconds while open.
+- `public_url_notes = no` refuses notes and hides the form.
+- Test: `scripts/test-public-link-notes.sh` (loopback; the notes sealed
+  by the page's own program in Node, the conversation opened by it).
+
+Not built: folders; a check, for a reader, that the page is the real one
+(see Decisions (2026-11-05)).
+
+## Decisions (2026-11-06)
+
+Made while building the replies, to be overturned by the owner's word:
+
+- **The inbox is where notes are kept, not a sealed file of the
+  conversation.**  The 2026-10-09 proposal kept the conversation "on the
+  server locked with the link's key".  The daemon holds the words in the
+  outbox file's URL line anyway, so a locked copy beside it would lock
+  nothing from someone who can read the mailbox; and the owner reads notes
+  in the inbox, where #420's door already files a stranger's message.  So
+  a note is a message in the inbox and nothing else, and the page shows
+  the files that are still there.  Deleting a note's file takes it off the
+  page and editing it corrects it, which is the owner's "only the original
+  sender can delete or edit"; readers have no way to do either.  What
+  travels is sealed both ways, so the network still sees nothing.
+- **The hidden listen-only contact is a sender name, not a contact.**  The
+  owner asked for a listen-only contact "hidden from the user ... part of
+  the `to: url` pipeline", never in the contacts file.  The notes need
+  only what such a contact gives: a sender the inbox files them under,
+  nothing ever sent back, and #420's rule that a door may send a plain
+  message and nothing else.  `url-<12 hex>` is that sender, made from the
+  link's address, so it survives renaming the file and no state file has
+  to remember it.  The note's own key (a third label beside the address
+  and the message key) is what only link holders have.
+- **The author answers with another `to: url` file under the same URL
+  line.**  Of the ways an author could answer (a reply to the note in the
+  inbox, a header naming the file, a line added to the message), this is
+  the one that needs no new syntax: copying the URL line under `to: url`
+  already published a file under the same link.  Each answer is its own
+  file, so it is edited, given files and taken down exactly like the
+  message, and only the author can write one.  The oldest is the message,
+  by when a cycle first saw it, so editing the message does not move it.
+- **The notes go in `inbox/<file>-notes/`, each under the reader's name.**
+  A chatroom's notes in the top of the inbox would bury the owner's mail.
+  The name is the reader's own, made one line, without `/`, `\` or leading
+  dots, and at most 40 bytes cut at a character's edge; with none,
+  `a reader`.  A name already used gets #206's suffix.
+- **The note's time is when it arrived.**  A time from the page would let a
+  reader place a note anywhere in the conversation.
+- **Limits:** a note is at most 8 KiB (a chatroom line, well under #420's
+  64 KiB), a link holds at most 500 notes, beyond which a note is refused
+  with 403 and the log says so once.  Without a limit, anyone with the
+  link could fill the disk.  No limit on how often a reader may post:
+  500 is the bound, and the owner clears it.
+- **Notes are on by default** (`public_url_notes = yes`), since replies are
+  what the owner asked for; `no` refuses them for every link.  Per-link
+  switching is left until it is asked for.
+- **A note is posted without a Content-Type,** so a browser sends it as a
+  simple request with no preflight, which also lets a copy of the page
+  saved to disk post from `file://` under the `Access-Control-Allow-Origin:
+  *` the slice already sends.
+- **The page asks again every sync period** (`ctimer.FLOOR`, 30 s), the
+  owner's "after a refresh period. A sync cycle haha", sent as `every` so
+  the page follows the daemon if the period changes.  The page redraws only
+  what changed, so a file already fetched stays shown.
 
 ## Decisions (2026-11-05)
 
