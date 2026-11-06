@@ -162,6 +162,7 @@ The generated config file contains a comment above most keys explaining what it 
 - `log_file` — where the daemon's own log goes (default: `/tmp/rmail-progress/log-<mailbox path>`, in RAM, 5 MB plus one older copy).
 - `hostname` — a DNS name for this mailbox, announced to contacts as its first address.
 - `cannot_reach_notice_after` — seconds a contact may go unreached, with mail waiting for them, before the daemon leaves a notice in the outbox, `CANNOT-REACH-<name>`, for you (default: `86400`, a day). It is not mail and goes to nobody; the daemon removes it once that contact is reached.
+- `source_url` — where the source of the rmail this mailbox runs can be fetched (default: the project, `https://github.com/gabrilend/r-mail`). Your contacts' daemons can ask yours for it, with the revision and digest of what it runs (`GET /source`, #615). If you run a changed rmail, point it at your changed copy: see [License](#license).
 - `wake_gap` — seconds the daemon's wait may overrun by the clock before it takes it that the machine slept (default: `60`). On waking it checks its address, announces itself to every contact, and tries every contact at once, so mail held for it while it slept comes in on their next pass.
 
 A leading `~` is only understood for hook paths and `log_file`, and quotes around a value only for `log_file` (for a hook, `""` turns it off); elsewhere both are taken literally.
@@ -448,6 +449,8 @@ that phase's work, with what came out and how long it took.
 
 Newest first. Each entry is the date, then what changed, in plain words.
 
+- **2026-11-06 →** Your contacts can ask your daemon what it is running, and you theirs (#615). `GET /source` answers with the revision your program was stamped from, the digest of the files it actually runs, whether the two agree, the licence, and a new `source_url` setting naming where its source can be had. `scripts/install.sh` and the drive generator write the stamp; a drive's program edited after it was made shows as changed.
+
 - **2026-11-05 →** One USB drive can carry rmail for more than one kind of machine (#619). `make-mailbox-drive.sh` takes `--payload` once per kind, x86_64 and aarch64 so far; what every kind shares goes on the drive once, and each kind's compiled part goes in its own folder. The launchers ask the machine what it is and run the matching program, or name the kinds the drive holds and stop. The drive's README says which kinds it runs on.
 
 - **2026-11-05 →** A folder in the outbox named after a contact sends what you put in it to that contact, folders and all, without a `to:` line (#214). The receiver keeps the folders, and refuses any path that would land outside its inbox.
@@ -461,7 +464,11 @@ Newest first. Each entry is the date, then what changed, in plain words.
 GNU Affero General Public License, version 3 or (at your option) any later
 version — see [LICENSE](LICENSE).  If you run a modified r-mail that other
 people interact with over a network, section 13 requires you to offer them
-its source.
+its source.  Every rmail answers its contacts' question "what are you
+running?" with the revision and digest of its program and the `source_url`
+setting from its config; set that to where your changed version can be
+had.  When the daemon sees its program differ from the stamp install.sh
+wrote and `source_url` still naming the project, it says so in its log.
 
 One additional permission (under section 7): hook scripts are yours.
 r-mail launches them as separate processes, so a hook script may be

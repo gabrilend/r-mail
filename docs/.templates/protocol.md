@@ -138,6 +138,30 @@ sets (a configured `hostname` first).
 dependency list, one dependency, and the installer, for a contact building
 rmail.
 
+**`GET /source`** — what source this daemon runs, and where to get it
+(#615).  Every daemon answers, changed or not:
+
+```json
+{"revision": "a1b2c3d4e5f6", "stamped_digest": "…", "digest": "…",
+ "state": "as stamped", "stamped_by": "install.sh",
+ "source_url": "https://github.com/gabrilend/r-mail",
+ "license": "AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception",
+ "covers": ["rmail.lua", "libs/dkjson.lua", "…"]}
+```
+
+`revision` and `stamped_digest` come from the `build-stamp` file beside
+rmail.lua (written by `scripts/build-stamp.sh`, which install.sh and the
+drive generator run) and are a claim.  `digest` is worked out by the daemon
+as it starts, over the files in `covers` — rmail's own Lua, which runs as
+it is read; not the compiled libraries and not hook scripts.  `state` is
+`as stamped` when the two digests agree, `changed since stamped` when they
+do not, and `no stamp` when there is none; `revision` is then absent.  The
+digest is sha-256 over one line per file, `<sha-256>  <path>\n`, in the
+order of `covers`, a missing file hashed as the word `absent`, so anyone
+can recompute it from a checkout with `scripts/build-stamp.sh --digest`.
+It is not in the plaintext health check, which still says only that
+something is listening.
+
 ### Listen-only contacts (`listen = true`)
 
 A contact marked `listen = true` — a website's, whose token is in every
@@ -146,7 +170,7 @@ holds only `type` (= `"message"`), `subject`, `body` (text, at most 64
 KiB), `message_id` and `mtime` (a number).  Every other request from it,
 bare or inside a web POST, is answered `403` with the reason, logged, and
 changes nothing; that includes `/delete`, `/update-address`, the `/deps`
-family, an `update`, a message with `attachments` or `auto_body`, and the
+family, `/source`, an `update`, a message with `attachments` or `auto_body`, and the
 sealed `GET /`.  The daemon never sends anything to such a contact.
 
 ### Own-device only (contacts with `own = true`)

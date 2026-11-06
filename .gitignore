@@ -32,6 +32,10 @@ config
 # Its list of mailbox services belongs to this machine alone.
 /scripts/restart-mailboxes.sh
 
+# The build stamp, written by scripts/build-stamp.sh from install.sh (#615):
+# it names this checkout's revision, so it is this machine's, not the tree's.
+/build-stamp
+
 # Build temp files
 .build-tmp/
 

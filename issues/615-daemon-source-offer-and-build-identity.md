@@ -213,6 +213,101 @@ normal?" rather than as a license notice.
    warn loudly, or quietly mark the contact?  Refusing turns a license
    feature into a denial-of-service against people with unusual builds.
 
+## Decisions (2026-11-06)
+
+Taken while building steps 1-3, so the work could go ahead; each can be
+reversed.  Not legal advice: the licence readings below are the plain
+reading of section 13, and the owner may want a lawyer's.
+
+1. **Which channel: the authenticated one only.**  The premise of the
+   question is out of date: the plaintext health check no longer names
+   the mailbox.  #106 (completed 2026-10-04) dropped the name, on the
+   owner's words "We shouldn't enable that", and it now answers
+   `{"ok":true}` and nothing else.  Putting a revision or digest there
+   would hand a scanner what #106 took away, and more: a digest pins the
+   exact build, so a scanner could pick out unpatched ones.  So
+   `GET /source` is a sealed request, open to every contact and to the
+   owner's own devices; the health check is unchanged, and the test
+   checks it stays so.
+2. **A peer that only gets the health check is not a user interacting
+   with the program.**  It can learn that something listens, and nothing
+   else: it cannot send or receive mail.  Everyone who can exchange mail
+   with the daemon holds a key, and every key holder can ask.  Listen-only
+   contacts (#420, a website's door) stay refused, as for every request
+   but a plain message; the website's own pages are where such a visitor
+   would be offered the source, and that is not built (see below).
+3. **The corresponding source is the whole repository**, which is what
+   `source_url` points at.  The *digest* is narrower: rmail's own Lua
+   (`rmail.lua`, `libs/dkjson.lua`, `libs/zip-*.lua`), the code that runs
+   as it is read.  The compiled libraries are not in it: their bytes
+   differ by compiler and machine, so a digest over them could never be
+   compared with the published source.  The C sources are not in it
+   either, because a drive's launcher runs from a copy that does not
+   carry them; a `.so` rebuilt from changed C is therefore not detected,
+   and would need reproducible builds to be.  The clients are not in it:
+   a peer talks to the daemon, not to the owner's phone.
+4. **A URL, not the bytes.**  `source_url` in the config, the project by
+   default.  Serving the tree would need an allowlist and an answer to
+   the size of a frame; nothing asked for it yet.
+5. **Hook scripts are not in the digest.**  Confirmed: the list is fixed
+   and names only rmail's own files.
+6. **Every daemon answers**, changed or not, so answering is no signal
+   and silence no refuge.
+7. **The stamp without git.**  `scripts/build-stamp.sh` writes
+   `build-stamp` beside `rmail.lua`: the revision (`git describe --always
+   --dirty`, only when the folder is a checkout's own top, so a drive kept
+   inside some other repository is not stamped with its commit), the
+   digest of the files at that moment, and what stamped it.  install.sh
+   stamps the checkout on every run, before it restarts the mailboxes;
+   `generate-portable-mailbox.sh` stamps a payload with the revision of
+   the checkout it copied from.  What stops a stamp being carried onto a
+   changed tree: it records the digest, and the daemon compares.  A tree
+   edited after stamping answers "changed since stamped"; re-stamping
+   such a tree with no git writes "unknown, changed since <revision>"
+   rather than keeping the old claim.  No time is in the stamp, so two
+   kinds of machine built from one checkout carry the same one (#619's
+   drive maker refuses payloads that differ outside their compiled
+   parts).
+8. **When the check fails, mark quietly; never refuse.**  For the step 4
+   that is not built yet: a contact whose answer is "changed since
+   stamped", "no stamp", or nothing is shown as such, and mail goes on.
+   Refusing would turn a licence feature into a way to cut off people
+   with their own builds.  The daemon itself logs the one case it can
+   tell is a changed program with `source_url` still naming the project,
+   since that is the operator the licence speaks to.
+
+## What was built (2026-11-06)
+
+Steps 1-3, on top of #617 and #619 (the drive generator and the drive
+layout the stamp has to travel through):
+
+- `scripts/build-stamp.sh` — writes the stamp, or prints a tree's digest
+  with `--digest`.
+- `rmail.lua` — the `identity` table: the digest worked out once at
+  start, the stamp read, a log line saying which source this is, and
+  `GET /source`.
+- The `source_url` setting; install.sh writes it into a new config, with
+  a comment saying what the licence asks of a changed program.
+- `install.sh` stamps the checkout; `generate-portable-mailbox.sh` stamps
+  each payload; the drive's launchers copy the stamp into the copy they
+  run from.
+- `scripts/test-build-identity.sh`; `scripts/test-portable-payload.sh`
+  checks the payload's stamp and that a drive carries it.
+
+Once #713 (the version number) is in, the answer could also carry
+`RMAIL_VERSION`; it is a hand-raised label, not a name for the exact
+source, so nothing here waits on it.
+
+## Left
+
+- Step 4: a daemon asking each contact's `/source` and keeping the
+  answer where the clients can show it, and the clients (Linux, the
+  #711 viewer, Android) showing it per contact, marked as decision 8
+  says.
+- An offer of the source on a website's pages (#714/#715), for visitors
+  who reach a mailbox only through one.
+- The owner's view on decisions 1-3, which read the licence.
+
 ## Status
 
-Open.  No code written.
+In progress: steps 1-3 built (2026-11-06); step 4 left.
