@@ -3,9 +3,10 @@
 -- The thin client keeps a home mailbox mirrored in a folder, and the
 -- point of rmail is that any tool reads it.  This is one more such tool,
 -- for a terminal: the screen clients/editor-design.md lays out, with its
--- list and read modes.  Its edit and contacts modes are not built; the
--- viewer changes nothing in the mailbox, so a file is still written with
--- the editor the user already has.
+-- list, read and edit modes.  Its contacts mode is not built.  Reading
+-- changes nothing; edit mode writes one outbox file, when told to save,
+-- and nothing else: `n` starts a new message in the outbox and `e` opens
+-- an outbox file.  The inbox is what arrived and is only read.
 --
 --   +------------------------------------------------+
 --   | mailbox-1   inbox 12  outbox 3   synced 2m ago | status bar
@@ -22,6 +23,7 @@
 
 local Renderer = require("renderer")
 local wrap = require("wrap")
+local EditBuf = require("editbuf")
 
 local V = {}
 V.__index = V
@@ -117,6 +119,11 @@ function V:open_file(path, name)
     end
     self.body = body
     self.body_name = name
+    -- an outbox file that is text can be opened for editing from here
+    self.body_path = nil
+    if path:sub(1, #self.dir + 8) == self.dir .. "/outbox/" and body == read_file(path) then
+        self.body_path = path
+    end
     self.scroll = 1
     self.mode = "read"
 end
@@ -184,7 +191,10 @@ function V:draw()
         local e = self.entries[self.selected]
         self.selected_name = e and e.name
         hint = " enter open  tab " .. (self.box == "inbox" and "outbox" or "inbox")
-            .. (#self.path > 0 and "  left up" or "") .. "  q quit"
+            .. (#self.path > 0 and "  left up" or "") .. "  n new"
+            .. (self.box == "outbox" and e and not e.dir and "  e edit" or "") .. "  q quit"
+    elseif self.mode == "edit" then
+        hint = self:draw_edit()
     else
         local lines = self:read_lines()
         local h = self:height()
@@ -200,7 +210,7 @@ function V:draw()
         end
         local last = math.min(#lines, self.scroll + h - 1)
         hint = " " .. self.body_name .. "  " .. self.scroll .. "-" .. last .. " of " .. #lines
-            .. "   space down  b up  q back"
+            .. "   space down  b up" .. (self.body_path and "  e edit" or "") .. "  q back"
     end
     s:line(rows, hint, HINT_STYLE, { hint = true })
 end
@@ -208,6 +218,7 @@ end
 
 -- {{{ V:handle(key) -> "quit" or nil
 function V:handle(key)
+    if self.mode == "edit" then return self:handle_edit(key) end
     if key == "ctrl-c" or key == "ctrl-d" then return "quit" end
     if key == "ctrl-l" then self.screen.full = true; return end
     local h = self:height()
@@ -232,6 +243,17 @@ function V:handle(key)
             else
                 self:open_file(self:folder() .. "/" .. e.name, e.name)
             end
+            return
+        elseif key == "n" then
+            -- a new message goes in the outbox: in the folder shown when
+            -- the list is the outbox's (a contact's folder, #214), and at
+            -- its top otherwise
+            local folder = self.box == "outbox" and self:folder() or (self.dir .. "/outbox")
+            self:start_edit(folder, nil)
+            return
+        elseif key == "e" then
+            local e = self.entries and self.entries[self.selected]
+            if self.box == "outbox" and e and not e.dir then self:start_edit(self:folder(), e.name) end
             return
         elseif key == "left" or key == "h" or key == "backspace" then
             if #self.path > 0 then
@@ -259,10 +281,225 @@ function V:handle(key)
         elseif key == "pagedown" or key == " " then self.scroll = self.scroll + h
         elseif key == "home" or key == "g" then self.scroll = 1
         elseif key == "end" or key == "G" then self.scroll = #self:read_lines()
+        elseif key == "e" and self.body_path then
+            self:start_edit(self.body_path:match("^(.*)/[^/]*$"), self.body_name)
         elseif key == "q" or key == "escape" or key == "left" or key == "h" or key == "backspace" then
             self.mode, self.body = "list", nil
         end
     end
+end
+-- }}}
+
+-- ---- edit mode -------------------------------------------------------
+--
+-- One outbox file at a time, in a buffer (editbuf.lua).  Nothing is
+-- written until Ctrl-S, and then the whole file at once: written beside
+-- it under a hidden name and moved over it, so the daemon, which skips
+-- hidden files, never reads half a message.  A file that changed on disk
+-- since it was opened (the daemon marks a file it cannot send, and adds
+-- a link's URL line) is not saved over without a second Ctrl-S, and a new
+-- message never takes a name already in its folder.
+
+local NEW_MESSAGE = "to: \n\n"
+
+local function write_file(path, text)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    local ok = f:write(text)
+    f:close()
+    return ok and true or false
+end
+
+local function is_text_key(key)
+    local b = key:byte(1)
+    if #key == 1 then return b >= 32 and b ~= 127 end
+    return b >= 0xC0   -- a UTF-8 character; key names are plain ASCII words
+end
+
+-- {{{ V:start_edit(folder, name) -- name nil for a new message
+function V:start_edit(folder, name)
+    local text = NEW_MESSAGE
+    if name then
+        text = read_file(folder .. "/" .. name)
+        if not text then return end
+        if text:sub(1, 4096):find("\0", 1, true) then return end
+    end
+    local buf = EditBuf.new(text)
+    -- a new message starts with the cursor where the recipient goes
+    buf:move_to(name and 0 or 4)
+    buf.undo = {}
+    self.edit = { buf = buf, folder = folder, name = name, loaded = name and text or nil,
+                  saved = text, top = 1, yank = "" }
+    self.mode = "edit"
+end
+-- }}}
+
+-- {{{ V:save_edit(name) -> true when written
+function V:save_edit(name)
+    local ed = self.edit
+    local path = ed.folder .. "/" .. name
+    local text = ed.buf:text()
+    if ed.name then
+        local now = read_file(path)
+        if now ~= ed.loaded and not ed.overwrite then
+            ed.overwrite = true
+            ed.message = name .. " changed on disk since you opened it; ^S again saves over it"
+            return false
+        end
+    end
+    local tmp = ed.folder .. "/." .. name .. ".rmail-view"
+    if not write_file(tmp, text) or not os.rename(tmp, path) then
+        os.remove(tmp)
+        ed.message = "could not write " .. path
+        return false
+    end
+    ed.name, ed.loaded, ed.saved, ed.overwrite = name, text, text, nil
+    ed.message = "saved " .. name
+    self.selected_name = name
+    return true
+end
+-- }}}
+
+-- {{{ V:handle_prompt(key) -- typing the name of a new message
+function V:handle_prompt(key)
+    local ed = self.edit
+    local p = ed.prompt
+    if key == "escape" or key == "ctrl-c" then
+        ed.prompt, ed.message = nil, "not saved"
+    elseif key == "enter" then
+        local name = p.text:gsub("^%s+", ""):gsub("%s+$", "")
+        if name == "" then
+            ed.message = "a message needs a name"
+        elseif name:find("/", 1, true) or name:sub(1, 1) == "." then
+            ed.message = "a name has no / and does not start with a dot"
+        elseif read_file(ed.folder .. "/" .. name) or is_dir(ed.folder .. "/" .. name) then
+            ed.message = name .. " is taken; choose another name"
+        else
+            ed.prompt = nil
+            self:save_edit(name)
+        end
+    elseif key == "backspace" then
+        local chars = {}
+        for ch in wrap.chars(p.text) do chars[#chars + 1] = ch end
+        chars[#chars] = nil
+        p.text = table.concat(chars)
+    elseif is_text_key(key) then
+        p.text = p.text .. key
+        ed.message = nil
+    end
+end
+-- }}}
+
+-- {{{ V:handle_edit(key)
+function V:handle_edit(key)
+    local ed = self.edit
+    if ed.prompt then return self:handle_prompt(key) end
+    local buf = ed.buf
+    local dirty = buf:text() ~= ed.saved
+    -- a warning holds for the very next key only
+    local leaving, overwrite = ed.leaving, ed.overwrite
+    ed.leaving, ed.overwrite, ed.message = nil, nil, nil
+    if key ~= "up" and key ~= "down" and key ~= "pageup" and key ~= "pagedown" then ed.goal = nil end
+    if key ~= "ctrl-k" then ed.cutting = false end
+
+    if key == "ctrl-x" then
+        if dirty and not leaving then
+            ed.leaving = true
+            ed.message = "not saved: ^S saves, ^X again leaves without saving"
+            return
+        end
+        -- back to the list, with the file selected, whether it was opened
+        -- from the list or while reading it
+        self.mode, self.body, self.edit = "list", nil, nil
+        return
+    elseif key == "ctrl-s" then
+        if not ed.name then
+            ed.prompt = { text = "" }
+            return
+        end
+        ed.overwrite = overwrite
+        self:save_edit(ed.name)
+        return
+    elseif key == "ctrl-l" then
+        self.screen.full = true
+        return
+    elseif key == "ctrl-z" then
+        if not buf:undo_last() then ed.message = "nothing to undo" end
+        return
+    elseif key == "ctrl-k" then
+        local cut = buf:cut_line()
+        ed.yank = ed.cutting and (ed.yank .. cut) or cut
+        ed.cutting = true
+        return
+    elseif key == "ctrl-u" then
+        if ed.yank ~= "" then buf:insert(ed.yank) end
+        return
+    end
+
+    local rows = buf:rows(self.screen.cols)
+    local r, col = buf:locate(rows)
+    local h = self:height()
+    if key == "enter" then buf:insert("\n")
+    elseif key == "tab" then buf:insert("    ")
+    elseif key == "backspace" then buf:backspace()
+    elseif key == "delete" then buf:delete()
+    elseif key == "left" then buf:left()
+    elseif key == "right" then buf:right()
+    elseif key == "home" then buf:line_start()
+    elseif key == "end" then buf:line_end()
+    elseif key == "up" or key == "down" or key == "pageup" or key == "pagedown" then
+        ed.goal = ed.goal or col
+        local step = (key == "up" and -1) or (key == "down" and 1) or (key == "pageup" and -h) or h
+        buf:to_row(rows, r + step, ed.goal)
+    elseif is_text_key(key) then
+        buf:insert(key)
+    end
+end
+-- }}}
+
+-- {{{ V:draw_edit() -> the hint bar's text
+function V:draw_edit()
+    local s, ed = self.screen, self.edit
+    local buf = ed.buf
+    local rows = buf:rows(s.cols)
+    local r = buf:locate(rows)
+    local h = self:height()
+    if r < ed.top then ed.top = r end
+    if r > ed.top + h - 1 then ed.top = r - h + 1 end
+    ed.top = math.max(1, math.min(ed.top, math.max(1, #rows - h + 1)))
+    for row = 2, s.rows - 1 do
+        local i = ed.top + row - 2
+        local span = rows[i]
+        if span then
+            local out = {}
+            for k = span.first, span.last do
+                local ch = buf:at(k)
+                if ch == "\t" then out[#out + 1] = "    "
+                elseif ch ~= "\n" then out[#out + 1] = ch end
+            end
+            s:line(row, table.concat(out), "", { ["edit-line"] = i })
+        else
+            s:line(row, "")
+        end
+    end
+    if ed.prompt then return " save as: " .. ed.prompt.text .. (ed.message and ("   " .. ed.message) or "") end
+    if ed.message then return " " .. ed.message end
+    local dirty = buf:text() ~= ed.saved
+    return " " .. (ed.name or "new message") .. (dirty and " *" or "")
+        .. "   ^S save  ^X exit  ^K cut  ^U paste  ^Z undo"
+end
+-- }}}
+
+-- {{{ V:cursor() -> row, column for the terminal's cursor, or nil to hide it
+function V:cursor()
+    if self.mode ~= "edit" then return nil end
+    local ed, s = self.edit, self.screen
+    if ed.prompt then
+        return s.rows, math.min(s.cols, 1 + wrap.text_width(" save as: " .. ed.prompt.text))
+    end
+    local rows = ed.buf:rows(s.cols)
+    local r, col = ed.buf:locate(rows)
+    return r - ed.top + 2, math.min(col, s.cols)
 end
 -- }}}
 
@@ -276,7 +513,8 @@ function V:run(term)
             self.screen:resize(rows, cols)
         end
         self:draw()
-        term.write(self.screen:flush())
+        local row, col = self:cursor()
+        term.write(self.screen:flush() .. (row and ("\27[" .. row .. ";" .. col .. "H\27[?25h") or "\27[?25l"))
         local key = term.read_key()
         if not key or self:handle(key) == "quit" then return end
     end

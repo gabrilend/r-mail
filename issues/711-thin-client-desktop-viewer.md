@@ -117,9 +117,61 @@ read-only half of `clients/editor-design.md`.
   the design (status bar, main area, hint bar) with its list and read
   modes; `clients/linux/view.sh` and `clients/macos/view.sh`.
 
-Not built: edit mode (the gap buffer, the vim and arrow keybinds for
-editing, the clipboard, undo), contacts mode, mouse, the snippet drawer,
-Windows, and the web client.
+Second slice built 2026-11-06 (branch `claude/711-edit-mode`, stacked on
+`claude/711-terminal-viewer`): edit mode, with the arrow-key keybinds.
+
+- `clients/shared/editbuf.lua` — the gap buffer of the design (the
+  characters before the cursor and the ones after it, nearest last, so
+  typing and deleting at the cursor is one push or pop), its screen rows
+  worked out from the width at hand and never stored, the cursor's row
+  and column, moving between rows at a kept column, a line cut with its
+  newline, and undo by snapshots, a run of typing or deleting as one step.
+- `clients/shared/viewer.lua` — `n` starts a new message in the outbox
+  (in the contact folder shown, #214, or at its top), `e` opens an
+  outbox file from the list or while reading it.  Keys: typing, Enter,
+  Tab (four spaces), Backspace, Delete, the arrows, Home/End (the
+  writer's line), Page Up/Down, Ctrl-S save, Ctrl-X exit, Ctrl-K cut a
+  line (repeated cuts gather), Ctrl-U paste, Ctrl-Z undo.  The terminal's
+  cursor is shown where the text's is, and hidden outside edit mode.
+- `clients/shared/term.lua` — every control key comes out as `ctrl-` and
+  its letter.
+- Test: `scripts/test-thin-client-editor.sh` (a pretend terminal, as the
+  viewer's own test).
+
+Not built: the vim keybinds, Ctrl-F search, the system clipboard (an
+internal yank buffer stands in, which the design allows), contacts mode,
+mouse, the snippet drawer, Windows, and the web client.
+
+## Decisions (2026-11-06)
+
+Made while building edit mode, to be overturned by the owner's word:
+
+- **Only outbox files are edited.**  The inbox holds what arrived; an
+  edit there would look like the sender's words.  `e` does nothing in
+  the inbox, and a new message always goes in the outbox.
+- **A save writes the whole file at once**, beside it under a hidden name
+  and then moved over it.  The daemon skips hidden files and reads a
+  message when it changes, so it never reads half of one.
+- **A file that changed on disk since it was opened is not saved over
+  without a second Ctrl-S.**  The daemon writes to outbox files (a mark
+  such as `CANNOT REACH`, a link's `URL:` line), and saving over such a
+  change silently would drop it.
+- **A new message never takes a name already in its folder**, nor one
+  with `/` or a leading dot: the first would write over another message,
+  the others would put it somewhere else or hide it from the daemon.
+- **A new message starts as `to: ` and a blank line**, the cursor where
+  the recipient goes, since every outbox file needs a recipient.
+- **Arrow keys first; vim later.**  The design names arrows the default
+  scheme; the vim scheme needs a mode line and its own tests, and is the
+  next slice.
+- **Undo by snapshots of the text**, not by replaying edits: a message is
+  small, a copy per step costs little, and a snapshot cannot be replayed
+  wrongly.  At most 200 steps.
+- **Tab inserts four spaces**, as `wrap.lua` already shows a tab, so what
+  is written is what was seen.
+- **An internal yank buffer**, the design's own fallback, rather than
+  `xclip`/`pbcopy`: it needs nothing installed and behaves the same on
+  every machine; the system clipboard is left for when it is asked for.
 
 ## Decisions (2026-11-05)
 
