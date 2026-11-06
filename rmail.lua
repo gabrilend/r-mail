@@ -191,6 +191,11 @@ local cfg = {
     -- #714: words in a new link's code, and so in its key.  6 unless the
     -- owner asks for more; there is no upper limit (owner, 2026-10-09)
     public_url_words  = math.max(1, tonumber(config.public_url_words) or 6),
+    -- #714: whether a link's readers may leave notes on its page.  On
+    -- unless the owner says no: replies are what the owner asked for
+    -- (2026-10-09, "essentially a chatroom")
+    public_url_notes  = not ({no = true, ["false"] = true, off = true})
+                            [tostring(config.public_url_notes or "yes"):lower():match("^%s*(.-)%s*$")],
     -- Where to mirror the log.  stderr always goes to whoever started the
     -- daemon -- journald under systemd, a terminal when run by hand -- and
     -- that copy is not optional.  This is the *second* copy, a plain file
@@ -4541,7 +4546,10 @@ function publink.note(name, state, contacts)
             log("a contact named 'url' is never sent to: `to: url` publishes a link (#714)")
         end
     end
-    state[name].recipients.url = state[name].recipients.url or { public = true }
+    -- `since` orders a link's files: the oldest is the message and the
+    -- later ones are the author's answers.  It is the first cycle that saw
+    -- the file, so an edit does not move a file down the conversation.
+    state[name].recipients.url = state[name].recipients.url or { public = true, since = os.time() }
     if not cfg.public_http_port then
         mark_recipient_problem(path, "url", "NO PUBLIC PORT",
             "set public_http_port in this mailbox's config to publish a link")
@@ -4563,26 +4571,44 @@ function publink.note(name, state, contacts)
 end
 -- }}}
 
--- {{{ publink.find(address) -> path, entry, body, words
--- The outbox file published under this address, if any.  Every published
--- file is looked at, so nothing is kept between requests and nothing
--- goes stale.
-function publink.find(address)
+-- {{{ publink.gather(address) -> the conversation published under it, or nil
+-- Every outbox file whose URL line carries the same words and which still
+-- has `to: url` belongs to one link.  The oldest is the message; the
+-- later ones are the author's answers, written by putting the same URL
+-- line under `to: url` in a new outbox file.  Oldest is the first cycle
+-- that saw the file (`since` in the outbox record), or the file's own
+-- time before a cycle has seen it.  Nothing is kept between requests.
+--
+--   { words, parts = { {name, path, entry, body, since}, ... } }
+function publink.gather(address)
+    local record = load_state("outbox.json")
+    local words, parts = nil, {}
     for _, name in ipairs(list_files(OUTBOX)) do
         local path = OUTBOX .. "/" .. name
         local text = read_file(path)
         if text and text:find("URL:", 1, true) then
-            local words = publink.words_in(text)
-            if words and publink.address(words) == address then
+            local w = publink.words_in(text)
+            if w and publink.address(w) == address then
                 local entries, body = parse_outbox_file(path)
                 for _, e in ipairs(entries or {}) do
-                    if publink.is_keyword(e.name) then return path, e, body, words end
+                    if publink.is_keyword(e.name) then
+                        local r = record[name] and record[name].recipients
+                        local since = r and r.url and tonumber(r.url.since) or file_mtime(path) or 0
+                        parts[#parts + 1] = { name = name, path = path, entry = e,
+                                              body = body or "", since = since }
+                        words = w
+                        break
+                    end
                 end
-                return nil
             end
         end
     end
-    return nil
+    if #parts == 0 then return nil end
+    table.sort(parts, function(a, b)
+        if a.since ~= b.since then return a.since < b.since end
+        return a.name < b.name
+    end)
+    return { words = words, parts = parts }
 end
 -- }}}
 
@@ -4631,6 +4657,152 @@ local function seal(key, plaintext)
     return nonce .. crypto.aes_gcm_encrypt(key, nonce, plaintext)
 end
 
+-- ---- Notes from the link's readers --------------------------------------
+--
+-- Anyone holding the link may leave a note on the page (the owner,
+-- 2026-10-09: replies should be many, "essentially a chatroom").  The page
+-- seals the note under a key of its own made from the words, and posts it
+-- to the same port that served the page.  The daemon files it in the inbox
+-- as a message from the link's own sender, `url-` and the start of the
+-- link's address: a sender that is in no contacts file, so nothing is ever
+-- sent to it, and the inbox's rules for a stranger's door (#420: a plain
+-- message, nothing else) apply.  The notes of a link go in one folder in
+-- the inbox, `<published file>-notes/`, each under the name the reader
+-- gave.  The inbox is where they are kept: the page shows the notes whose
+-- files are still there, as they are now, so the owner removes a note by
+-- deleting its file and corrects one by editing it.  Readers can do
+-- neither (the owner: "only the original 'to: url' sender can delete or
+-- edit messages.  Also, only they can send attachments").
+
+publink.NOTE_LIMIT = 8192        -- bytes of a note's text
+publink.NAME_LIMIT = 40          -- bytes of the name a reader signs with
+publink.NOTES_PER_LINK = 500     -- notes a link holds before it takes no more
+publink.POST_LIMIT = 32768       -- bytes of a sealed note request
+
+function publink.note_key(words)
+    return crypto.sha256("rmail public link note\0" .. publink.normalize(words))
+end
+
+-- the sender a link's notes come from: a name no contacts file gives out
+function publink.sender(address)
+    return "url-" .. address:sub(1, 12)
+end
+
+-- {{{ publink.notes(address) -> { {file, name, body, time}, ... } oldest first
+-- The notes whose files are still in the inbox, as they read now.
+function publink.notes(address)
+    local sender, notes = publink.sender(address), {}
+    for file, meta in pairs(load_state("inbox.json")) do
+        if type(meta) == "table" and meta["from"] == sender then
+            local body = read_file(INBOX .. "/" .. file)
+            if body then
+                notes[#notes + 1] = { file = file, name = meta.name, body = body,
+                    time = tonumber(meta.time) or file_mtime(INBOX .. "/" .. file) or 0 }
+            end
+        end
+    end
+    table.sort(notes, function(a, b)
+        if a.time ~= b.time then return a.time < b.time end
+        return a.file < b.file
+    end)
+    return notes
+end
+-- }}}
+
+-- {{{ publink.reader_name(text) -> the name a note is signed with, or ""
+-- One line, no folder separators, no leading dots, at most NAME_LIMIT
+-- bytes cut at a character's edge.
+function publink.reader_name(text)
+    if type(text) ~= "string" then return "" end
+    local name = text:gsub("[%c/\\]", " "):gsub("%s+", " "):gsub("^[%s%.]+", ""):gsub("%s+$", "")
+    if #name > publink.NAME_LIMIT then
+        name = name:sub(1, publink.NAME_LIMIT)
+        -- drop a character cut in two
+        name = name:gsub("[\192-\255][\128-\191]*$", "")
+        name = name:gsub("%s+$", "")
+    end
+    return name
+end
+-- }}}
+
+-- {{{ publink.take_note(address, sealed) -> status, answer text
+function publink.take_note(address, sealed)
+    local conv = publink.gather(address)
+    if not conv then return 404, "not found\n" end
+    if not cfg.public_url_notes then
+        return 403, "this mailbox takes no notes on its links\n"
+    end
+    if #sealed < 29 then return 400, "not a sealed note\n" end
+    local plain = crypto.aes_gcm_decrypt(publink.note_key(conv.words), sealed:sub(1, 12), sealed:sub(13))
+    if not plain then return 400, "the note did not open\n" end
+    local ok, data = pcall(json.decode, plain)
+    if not ok or type(data) ~= "table" or type(data.body) ~= "string" then
+        return 400, "a note is a text body and a name\n"
+    end
+    for field in pairs(data) do
+        if field ~= "v" and field ~= "body" and field ~= "name" then
+            return 400, "a note is a text body and a name\n"
+        end
+    end
+    local body = data.body:gsub("\r\n?", "\n")
+    if not body:find("%S") then return 400, "the note is empty\n" end
+    if #body > publink.NOTE_LIMIT then
+        return 413, "a note is at most " .. publink.NOTE_LIMIT .. " bytes\n"
+    end
+    local head = conv.parts[1]
+    if #publink.notes(address) >= publink.NOTES_PER_LINK then
+        publink._full = publink._full or {}
+        if not publink._full[address] then
+            publink._full[address] = true
+            log("the link for %s holds %d notes and takes no more; delete some from its notes folder",
+                head.name, publink.NOTES_PER_LINK)
+        end
+        return 403, "this conversation is full\n"
+    end
+    publink._full = publink._full or {}
+    publink._full[address] = nil
+    local name = publink.reader_name(data.name)
+    local sender = publink.sender(address)
+    local message = { type = "message", message_id = uuid(), body = body,
+        subject = sanitize_filename(head.name) .. "-notes/" .. (name ~= "" and name or "a reader") }
+    -- the inbox's own rule for a door shared by strangers (#420)
+    local refusal = contactfile.listen_refusal("POST", "/deliver", json.encode(message))
+    if refusal then
+        log("a note on the link for %s refused: %s", head.name, refusal)
+        return 400, "the note was refused\n"
+    end
+    local status = handle_deliver_message(message, sender)
+    if status ~= 200 then return 500, "the note could not be kept\n" end
+    -- when it came, and who it says it is from, for the page
+    local inbox_state = load_state("inbox.json")
+    for _, meta in pairs(inbox_state) do
+        if type(meta) == "table" and meta.message_id == message.message_id and meta["from"] == sender then
+            meta.name = name ~= "" and name or nil
+            meta.time = os.time()
+        end
+    end
+    save_state("inbox.json", inbox_state)
+    log("a reader left a note on the link for %s", head.name)
+    return 200, "kept\n"
+end
+-- }}}
+
+-- {{{ publink.all_files(conv) -> the files of every part, numbered as one list
+-- The message's files first, then each answer's; `part` says whose
+-- (0 the message, n the n-th answer).  A piece is asked for by its place
+-- in this list.
+function publink.all_files(conv)
+    local all = {}
+    for k, part in ipairs(conv.parts) do
+        for _, f in ipairs(publink.files(part.entry)) do
+            f.part = k - 1
+            all[#all + 1] = f
+        end
+    end
+    return all
+end
+-- }}}
+
 -- {{{ publink.answer(path) -> status, content type, body
 -- What the public port says to one GET.
 function publink.answer(path)
@@ -4642,19 +4814,38 @@ function publink.answer(path)
     end
     local address, rest = path:match("^/m/(%x+)(.*)$")
     if not address or #address ~= 64 then return 404, "text/plain", "not found\n" end
-    local _, entry, body, words = publink.find(address:lower())
-    if not entry then return 404, "text/plain", "not found\n" end
-    local key = publink.key(words)
-    local files = publink.files(entry)
+    address = address:lower()
+    local conv = publink.gather(address)
+    if not conv then return 404, "text/plain", "not found\n" end
+    local key = publink.key(conv.words)
+    local files = publink.all_files(conv)
     if rest == "" then
         local listed = {}
         for i, f in ipairs(files) do
-            listed[i] = { name = f.name, size = f.size, mtime = f.mtime,
+            listed[i] = { name = f.name, size = f.size, mtime = f.mtime, part = f.part,
                           pieces = f.pieces, missing = f.missing }
         end
-        -- the body comes from parse_outbox_file, without its URL line
-        local message = json.encode({ v = 1, body = body or "",
-                                      piece_size = publink.PIECE, files = listed })
+        -- the conversation: the author's answers and the readers' notes,
+        -- by when each came
+        local talk = {}
+        for k = 2, #conv.parts do
+            local part = conv.parts[k]
+            talk[#talk + 1] = { who = "author", part = k - 1, body = part.body, time = part.since }
+        end
+        for _, n in ipairs(publink.notes(address)) do
+            talk[#talk + 1] = { who = "reader", name = n.name, body = n.body, time = n.time }
+        end
+        for i, t in ipairs(talk) do t.order = i end
+        table.sort(talk, function(a, b)
+            if a.time ~= b.time then return a.time < b.time end
+            return a.order < b.order
+        end)
+        for _, t in ipairs(talk) do t.order = nil end
+        -- the bodies come from parse_outbox_file, without their URL lines
+        local message = json.encode({ v = 1, body = conv.parts[1].body,
+                                      piece_size = publink.PIECE, files = listed,
+                                      talk = talk, notes = cfg.public_url_notes,
+                                      every = ctimer.FLOOR })
         return 200, "application/octet-stream", seal(key, message)
     end
     local i, p = rest:match("^/(%d+)/(%d+)$")
@@ -4675,11 +4866,14 @@ end
 -- }}}
 
 local REASONS = { [200] = "OK", [404] = "Not Found", [405] = "Method Not Allowed",
-                  [400] = "Bad Request", [500] = "Internal Server Error" }
+                  [400] = "Bad Request", [403] = "Forbidden", [413] = "Payload Too Large",
+                  [500] = "Internal Server Error" }
 
 -- {{{ publink.handle(rt, client)
 -- One connection on the public port: one request, one answer, closed.
--- Only GET; nothing a browser sends is written anywhere.
+-- GET for the page and what it unlocks; POST only for a reader's note,
+-- which publink.take_note files in the inbox.  Nothing else a browser
+-- sends is written anywhere.
 function publink.handle(rt, client)
     local head = ""
     while #head <= publink.HEAD_LIMIT do
@@ -4695,8 +4889,31 @@ function publink.handle(rt, client)
     local status, ctype, body
     if not method then
         status, ctype, body = 400, "text/plain", "bad request\n"
+    elseif method == "POST" then
+        local address = target:match("^/m/(%x+)/notes$")
+        local length = tonumber(head:lower():match("\ncontent%-length:%s*(%d+)"))
+        ctype = "text/plain"
+        if not address or #address ~= 64 then
+            status, body = 405, "only GET, and POST of a note\n"
+        elseif not length then
+            status, body = 400, "a note needs a Content-Length\n"
+        elseif length > publink.POST_LIMIT then
+            status, body = 413, "a note is at most " .. publink.NOTE_LIMIT .. " bytes\n"
+        else
+            local sealed = length > 0 and client:receive(length) or ""
+            if not sealed or #sealed ~= length then
+                log("public port: a note not finished")
+                return
+            end
+            local ok, s, b = pcall(publink.take_note, address:lower(), sealed)
+            if ok then status, body = s, b
+            else
+                log("public port: %s", tostring(s))
+                status, body = 500, "error\n"
+            end
+        end
     elseif method ~= "GET" then
-        status, ctype, body = 405, "text/plain", "only GET\n"
+        status, ctype, body = 405, "text/plain", "only GET, and POST of a note\n"
     else
         local ok, s, c, b = pcall(publink.answer, target)
         if ok then status, ctype, body = s, c, b
