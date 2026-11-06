@@ -295,8 +295,9 @@ echo "restarting"
 # {{{ stand-ins for the service managers
 # Each records the command it was given in $WORK/calls.  The systemd and
 # runit ones restart the test's daemon the way the real ones would: stop
-# the old process, start a new one.  rc-service refuses.  id says what
-# FAKE_UID says, so the monitor can be made to think it is not root.
+# the old process, start a new one (systemctl a second after it answers).
+# rc-service refuses.  id says what FAKE_UID says, so the monitor can be
+# made to think it is not root.
 mkdir -p "$WORK/bin"
 REAL_ID=$(command -v id)
 : > "$WORK/calls"
@@ -315,7 +316,12 @@ EOF
 cat > "$WORK/bin/systemctl" <<EOF
 #!/bin/sh
 echo "systemctl \$*" >> "$WORK/calls"
-[ "\$*" = "--user restart rmail-running.service" ] && exec "$WORK/bin/restart-box" running
+# it answers before the old process has gone, so the monitor has to wait
+# for the new pid rather than take the first one it sees
+if [ "\$*" = "--user restart rmail-running.service" ]; then
+    (sleep 1; "$WORK/bin/restart-box" running) > /dev/null 2>&1 &
+    exit 0
+fi
 exit 1
 EOF
 cat > "$WORK/bin/sv" <<EOF
