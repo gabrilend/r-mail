@@ -18,6 +18,17 @@ its recipient's timer either.  Test: the hook case of
 a sync; it is delivered in the next pass of that sync, 0.0 s after the
 first).
 
+**The last pass, built 2026-11-06.**  A file someone else saves during
+the last pass of a sync no longer waits for a timer.  While a sync runs,
+the outbox notices are sorted by when they arrive: those waiting just
+before rmail writes an outbox file, or runs a hook and waits for it, are
+someone else's and are kept; those waiting just after are the sync's own
+and are dropped.  What is kept when the sync ends starts the next sync at
+once, with a log line naming the files.  The periodic's own rewrite is
+made inside its hook, so it is still dropped.  Tests: the saver and
+marker cases of `scripts/test-sync-passes.sh`, and a new line in the
+ticker case.  See the decisions below.
+
 ## Current Behavior
 
 - The daemon learns about file changes from kernel file-change notices
@@ -68,3 +79,33 @@ If yes:
 - #121 (a sync runs in planned passes — where this is built)
 - #115 (per-contact sync timers; no-contact timer follow-up)
 - #408 (contacts tidy-up after the drain)
+
+## Decisions (2026-11-06, the owner can overturn any of these)
+
+1. **The last pass's notices are sorted by when they come, not by
+   comparing the folder before and after.**  rmail writes its outbox files
+   through `write_file` and runs its waited-for hooks through `run_hook`,
+   so wrapping those two marks every change the sync makes itself, with no
+   list of paths to keep and no snapshots of the folder.  The suggested
+   before-and-after comparison cannot tell the periodic's rewrite from an
+   editor's save; this can.
+2. **A file saved at the very moment rmail writes one, or while a hook
+   runs, is still taken for the sync's own** and waits for a timer, as
+   every file saved during a sync once did.  The window is a write's
+   length, or a hook's.
+3. **A hook that runs in the background (`on_receive`, `on_package`) is
+   someone else.**  rmail does not wait for it, so its writes are kept
+   and start the next sync, like an editor's.
+4. **Once in a row.**  A sync that such a save started does not start
+   another for the same reason; it logs what was saved and leaves it to
+   the timer.  Something that writes the outbox every time a sync runs
+   gets one more sync, not a loop.
+5. **A file removed, or a hidden file, starts nothing.**  rmail removes
+   outbox files itself without the wrapping, and the outbox does not read
+   hidden files (an editor's swap file).  A removal waits for the timer,
+   as it did.  On kqueue (macOS, the BSDs), whose notices name no file and
+   share one mask, every notice counts.  That path was not run here: this
+   machine is Linux.
+6. **Only while a sync runs.**  Outside one, the main loop reads the
+   notices itself, as before.
+

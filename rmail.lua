@@ -299,10 +299,13 @@ local function read_file(path)
 end
 
 local function write_file(path, content)
+    -- #119: a sync's own outbox writes are told apart from anyone else's
+    local own = cfg.own_writes.begin(path)
     local f = io.open(path, "w")
-    if not f then return false end
+    if not f then cfg.own_writes.finish(own); return false end
     f:write(content)
     f:close()
+    cfg.own_writes.finish(own)
     return true
 end
 
@@ -315,10 +318,12 @@ local function read_file_binary(path)
 end
 
 local function write_file_binary(path, content)
+    local own = cfg.own_writes.begin(path)
     local f = io.open(path, "wb")
-    if not f then return false end
+    if not f then cfg.own_writes.finish(own); return false end
     f:write(content)
     f:close()
+    cfg.own_writes.finish(own)
     return true
 end
 
@@ -366,6 +371,86 @@ do
         end
     end
 end
+
+-- {{{ cfg.own_writes
+-- #119: the outbox's change notices while a sync runs, sorted into the
+-- sync's own and everyone else's.
+--
+-- A sync writes to the outbox itself (problem markers, reports), and the
+-- hooks it waits for may too: the tutorial's periodic rewrites its own
+-- outbox file every time it runs.  Those changes must not start another
+-- sync, or a periodic would run syncs back to back.  A file the owner
+-- saves in an editor meanwhile, or one a background hook writes, must:
+-- otherwise it waits for a timer, which can be two hours.
+--
+-- The kernel does not say who wrote a file, so the sorting goes by when.
+-- Just before rmail writes an outbox file, or runs a hook and waits for
+-- it, every notice already waiting is someone else's and is kept
+-- (collect); just after, every notice waiting is its own and is dropped
+-- (drop).  Each check sees the disk as it is, so the notices kept are
+-- forgotten before every check (ctimer.drain_notices); what is left when
+-- the sync ends was saved after the last check, and starts the next sync
+-- (finish_cycle).  A file someone saves in the very moment rmail is
+-- writing one, or while a hook runs, is still taken for the sync's own
+-- and waits for a timer, as every file saved during a sync once did.
+--
+-- Only while a sync runs: outside one, the main loop reads the notices
+-- itself.  Kept in cfg because the main chunk is at Lua's limit of 200
+-- locals, and write_file, above the watcher, needs it.
+cfg.own_writes = {fd = nil, prefix = nil, saved = {}}
+
+-- True for a notice that names a change a check would act on: a file
+-- written, made or moved in.  A file gone is left to the timer (rmail
+-- removes outbox files itself, unwatched), as is a hidden file, which the
+-- outbox does not read (an editor's swap file).  kqueue names no file and
+-- uses one mask for every kind of change, so each of its notices counts.
+function cfg.own_writes.counts(ev)
+    local name = ev.name or ""
+    if name:sub(1, 1) == "." then return false end
+    if WATCHER_KIND ~= "inotify" or name == "" then return true end
+    local function has(flag) return math.floor(ev.mask / flag) % 2 == 1 end
+    return has(inotify.IN_CLOSE_WRITE) or has(inotify.IN_CREATE) or has(inotify.IN_MOVED_TO)
+end
+
+function cfg.own_writes.read(keep)
+    local w = cfg.own_writes
+    if not w.fd then return end
+    while true do
+        local evs = inotify.read(w.fd)
+        if not evs or #evs == 0 then return end
+        if keep then
+            for _, ev in ipairs(evs) do
+                if w.counts(ev) then w.saved[ev.name ~= "" and ev.name or "(a file)"] = true end
+            end
+        end
+    end
+end
+
+-- begin([path]): about to write path (or, with none, run a hook).  True
+-- when it is the outbox's and a sync runs; hand that to finish.
+function cfg.own_writes.begin(path)
+    local w = cfg.own_writes
+    if not w.fd then return false end
+    if path and path:sub(1, #w.prefix) ~= w.prefix then return false end
+    w.read(true)
+    return true
+end
+
+function cfg.own_writes.finish(own)
+    if own then cfg.own_writes.read(false) end
+end
+
+-- a sync starts (fd: the outbox watcher's) or ends (nil); the files
+-- someone else saved since the last check, sorted
+function cfg.own_writes.watch(fd, folder)
+    local w = cfg.own_writes
+    local names = {}
+    for name in pairs(w.saved) do names[#names + 1] = name end
+    table.sort(names)
+    w.fd, w.prefix, w.saved = fd, folder and (folder .. "/"), {}
+    return names
+end
+-- }}}
 
 local function inotify_wrap(fd)
     return setmetatable({}, {
@@ -488,10 +573,14 @@ local function run_hook(script, data, ...)
     for _, extra in ipairs({...}) do
         args = args .. " " .. shell_quote(extra)
     end
+    -- #119: what the hook writes to the outbox while rmail waits for it
+    -- is the sync's own doing, like rmail's own writes
+    local own = cfg.own_writes.begin()
     local handle = io.popen(script .. " " .. args)
-    if not handle then return nil end
+    if not handle then cfg.own_writes.finish(own); return nil end
     local output = handle:read("*a")
     handle:close()
+    cfg.own_writes.finish(own)
     return output
 end
 
@@ -8428,15 +8517,16 @@ end
 -- it at once.  A change to the contacts file is tidied here, as it was
 -- after the sync before (#408).
 --
--- The notices that arrive during the last pass are dropped too, when the
--- sync ends: that pass's check runs hooks, and the periodic pattern in the
--- scripting tutorial has its on_update hook rewrite its own outbox file
--- every time.  Honoured, that notice would start the next sync at once,
--- and that sync's check would fire the hook again: a loop with no wait.
--- So a file saved by someone else in the last pass's few milliseconds
--- waits for a timer, as every file saved during a sync used to; the
--- phone's saves are flagged separately (ctimer.outbox_written) and still
--- start the next sync at once.
+-- The notices that arrive during the last pass are read when the sync
+-- ends, but only someone else's are kept (cfg.own_writes): that pass's
+-- check runs hooks, and the periodic pattern in the scripting tutorial
+-- has its on_update hook rewrite its own outbox file every time.
+-- Honoured, that notice would start the next sync at once, and that
+-- sync's check would fire the hook again: a loop with no wait.  So the
+-- sync's own writes and its hooks' are dropped as they happen, and a file
+-- someone else saved in the last pass starts the next sync when this one
+-- ends (finish_cycle).  The phone's saves are flagged separately
+-- (ctimer.outbox_written) and start the next sync too.
 function ctimer.drain(fd)
     local any = false
     if not fd then return any end
@@ -8448,7 +8538,14 @@ function ctimer.drain(fd)
 end
 
 function ctimer.drain_notices(rt, at_end)
-    ctimer.drain(rt.outbox_inotify_fd)
+    if at_end then
+        -- kept, not dropped: the sync's own were dropped as it made them
+        -- (cfg.own_writes), so what is left came from someone else
+        cfg.own_writes.read(true)
+    else
+        ctimer.drain(rt.outbox_inotify_fd)
+        cfg.own_writes.saved = {}
+    end
     -- the phone's own writes are flagged as well as noticed; at the end of
     -- the sync a flag still set means one came during the last pass
     if not at_end then ctimer.outbox_written = false end
@@ -9292,6 +9389,28 @@ local function main()
             ctimer.outbox_written = false
             rt.sync_again = true
         end
+        -- #119: a file someone else saved after the last check (an
+        -- editor, a background hook) starts the next sync at once, as a
+        -- notice would have outside a sync.  Once: a sync that such a
+        -- file started does not start another for the same reason, so
+        -- something that writes the outbox every time a sync runs gets
+        -- one more sync, not a loop; what it wrote waits for a timer.
+        local saved = {}
+        for _, name in ipairs(cfg.own_writes.watch(nil)) do
+            if name == "(a file)" or file_exists(OUTBOX .. "/" .. name) then
+                saved[#saved + 1] = name
+            end
+        end
+        if #saved > 0 then
+            if cycle.for_saved then
+                log("outbox: %s saved again during a sync that a save started; "
+                    .. "it waits for the next timer", table.concat(saved, ", "))
+            else
+                log("outbox: %s saved during the sync's last pass; syncing again",
+                    table.concat(saved, ", "))
+                rt.sync_again, rt.sync_for_saved = true, true
+            end
+        end
     end
     -- }}}
 
@@ -9328,7 +9447,12 @@ local function main()
         ctimer.cycle = {
             co = coroutine.create(function() run_sync_cycle(rt) end),
             started = socket.gettime(),
+            for_saved = rt.sync_for_saved,
         }
+        rt.sync_for_saved = false
+        -- #119: from here to the cycle's end, outbox notices are sorted
+        -- into its own and everyone else's (cfg.own_writes)
+        cfg.own_writes.watch(rt.outbox_inotify_fd, OUTBOX)
         step_cycle()
     end
     -- }}}

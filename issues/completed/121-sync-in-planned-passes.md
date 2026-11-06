@@ -431,6 +431,9 @@ ok, keep it owed) and a `piece` event.
     milliseconds unless a hook is slow) waits for a timer, as any file
     saved during a sync used to.  The phone's saves are flagged
     separately and still start the next sync at once.
+    *(2026-11-06: the end-of-sync drain now keeps someone else's notices
+    and drops only the sync's own; a file saved during the last pass
+    starts the next sync.  See #119.)*
 11. **The `on_send` hook is not run for a recipient the gate will hold
     back**, since each pass's check builds the requests again.
 12. **One `sync done` line per sync that sent anything**; an idle sync is
