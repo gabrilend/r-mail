@@ -18,7 +18,9 @@
 # scripts/lib/fake-contact.lua) to one throwaway mailbox:
 #
 #   required checksums  a resume without piece checksums, and one without
-#                       the whole-file checksum: refused
+#                       the whole-file checksum: refused, and logged; the
+#                       second (the phone app from before #311c) is logged
+#                       and answered as "update the app"
 #   honest upload       a wrong piece is refused and not stored; the right
 #                       pieces are taken and the file is filed byte for byte
 #   two files           a zip holding two files: refused, nothing filed
@@ -111,8 +113,21 @@ local one = fc.read_file(WORK .. "/one.zip")
 print("section required checksums")
 local s, a = resume("photo.jpg", pieces_of(one), one, "chunk_checksums")
 print(s == 400 and "ok a resume without piece checksums is refused" or ("-- it answered " .. s))
+print(a.update_app == nil and "ok and it does not blame the app's age" or "-- and it says to update the app")
 s, a = resume("photo.jpg", pieces_of(one), one, "total_checksum")
 print(s == 400 and "ok a resume without the whole-file checksum is refused" or ("-- it answered " .. s))
+print(a.update_app == true and "ok and the answer says the app must be updated" or
+      ("-- and the answer does not say to update the app: " .. json.encode(a)))
+do
+    -- a whole-file checksum that is there but malformed is a damaged request,
+    -- not an old app
+    local sums = {}
+    for i, p in ipairs(pieces_of(one)) do sums[tostring(i - 1)] = phone:sha256_hex(p) end
+    s, a = phone:post_json("/api/upload/resume", {filename = "photo.jpg", num_chunks = #pieces_of(one),
+                                                   chunk_checksums = sums, total_checksum = "not-hex"})
+    print(s == 400 and a.update_app == nil and "ok a malformed whole-file checksum is refused, not blamed on the app" or
+          ("-- it answered " .. s .. " " .. json.encode(a)))
+end
 
 print("section honest upload")
 local pieces = pieces_of(one)
@@ -151,6 +166,21 @@ print(id_s == 500 and tostring(ans.error):find("not a zip") and "ok an upload th
       ("-- it answered " .. tostring(id_s) .. " " .. json.encode(ans)))
 LUA
 stop_receiver
+
+echo ""
+echo "what the mailbox logged"
+# The phone shows only its usual failure; the mailbox's log is where the
+# owner can see why, and that an old app is the cause (#311c).
+if grep -q "phone upload refused: photo.jpg: chunk_checksums is required$" "$WORK/daemon.log"; then
+    ok "a refusal for missing piece checksums is logged, without blaming the app's age"
+else
+    note_fail "no plain log line for the refusal without piece checksums"
+fi
+if grep -q "phone upload refused: photo.jpg: total_checksum is required.*phone app is older than this mailbox.*must be updated" "$WORK/daemon.log"; then
+    ok "a refusal for a missing whole-file checksum is logged, saying the phone app must be updated"
+else
+    note_fail "no log line saying the phone app must be updated"
+fi
 
 ATT="$BOX/attachments"
 echo ""

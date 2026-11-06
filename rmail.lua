@@ -7605,6 +7605,22 @@ function upload.checksums_from(data, num_chunks)
 end
 -- }}}
 
+-- {{{ upload.refused_checksums
+-- A start or resume refused by checksums_from, logged so the owner can see
+-- why the phone's upload failed (the phone only shows its usual failure).
+-- A request with every piece checksum but no whole-file checksum is the
+-- phone app from before 2026-09-29 (#311c): the log line says to update
+-- it.  Returns the 400 answer.
+function upload.refused_checksums(data, filename, reason)
+    local old_app = type(data.chunk_checksums) == "table" and data.total_checksum == nil
+        and reason:find("total_checksum", 1, true) ~= nil
+    log("phone upload refused: %s: %s%s", filename, reason,
+        old_app and " -- the phone app is older than this mailbox (#311c, 2026-09-29) "
+                    .. "and must be updated before it can send files" or "")
+    return 400, {error = reason, update_app = old_app or nil}
+end
+-- }}}
+
 -- POST /api/upload/start — register a new phone-to-server attachment upload.
 -- The phone uses resume instead; start takes the same checksums.
 function upload.start(data)
@@ -7615,7 +7631,7 @@ function upload.start(data)
         return 400, {error = "invalid num_chunks"}
     end
     local pieces, total = upload.checksums_from(data, num_chunks)
-    if not pieces then return 400, {error = total} end
+    if not pieces then return upload.refused_checksums(data, filename, total) end
     local upload_id  = uuid()
     local upload_dir = paths.uploads .. "/" .. upload_id
     os.execute("mkdir -p " .. shell_quote(upload_dir))
@@ -7683,7 +7699,7 @@ function upload.resume(data)
         return 400, {error = "invalid num_chunks"}
     end
     local pieces, total = upload.checksums_from(data, num_chunks)
-    if not pieces then return 400, {error = total} end
+    if not pieces then return upload.refused_checksums(data, filename, total) end
 
     local uploads = load_state("uploads.json")
     local upload_id, u
