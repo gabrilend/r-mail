@@ -10,12 +10,20 @@
  *   crypto.random_bytes(n)                     -> n random bytes
  *   crypto.aes_gcm_encrypt(key32, nonce12, pt) -> ciphertext..tag (len+16 bytes)
  *   crypto.aes_gcm_decrypt(key32, nonce12, ct) -> plaintext or nil (auth failure)
+ *   crypto.x25519_public(priv32)               -> the 32-byte public key (#715b)
+ *   crypto.x25519(priv32, peer_pub32)          -> 32-byte shared secret, or nil
  *
  * Packet format used by rmail:
  *   [4-byte big-endian length] [12-byte nonce] [ciphertext] [16-byte GCM tag]
  *
  * The framing and trial-decryption loop live in rmail.lua; this file is
  * purely the cryptographic primitives.
+ *
+ * X25519 (#715b) is for one thing: a stranger asking for a public website
+ * shares no token with the mailbox, so the two agree a key instead.  A
+ * private key is 32 random bytes (crypto.random_bytes(32)); its public
+ * key is computed here, and either side's private key with the other's
+ * public key gives both the same secret.
  */
 
 #include <stdlib.h>
@@ -158,6 +166,67 @@ static int l_aes_gcm_decrypt(lua_State *L)
     return 1;
 }
 
+/* x25519_public(priv32) -> the 32-byte public key for that private key */
+static int l_x25519_public(lua_State *L)
+{
+    size_t priv_len;
+    const unsigned char *priv = (const unsigned char *)luaL_checklstring(L, 1, &priv_len);
+    if (priv_len != 32)
+        return luaL_error(L, "x25519_public: the private key must be 32 bytes");
+
+    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, priv, 32);
+    unsigned char pub[32];
+    size_t pub_len = 32;
+    int ok = key && EVP_PKEY_get_raw_public_key(key, pub, &pub_len) == 1 && pub_len == 32;
+    EVP_PKEY_free(key);
+    if (!ok)
+        return luaL_error(L, "x25519_public: OpenSSL could not compute the key");
+    lua_pushlstring(L, (char *)pub, 32);
+    return 1;
+}
+
+/*
+ * x25519(priv32, peer_pub32) -> 32-byte shared secret, or nil
+ *
+ * nil for a peer key of the wrong length, or one that gives an all-zero
+ * secret (a low-order point: whoever sent it would know the "secret").
+ */
+static int l_x25519(lua_State *L)
+{
+    size_t priv_len, peer_len;
+    const unsigned char *priv = (const unsigned char *)luaL_checklstring(L, 1, &priv_len);
+    const unsigned char *peer = (const unsigned char *)luaL_checklstring(L, 2, &peer_len);
+    if (priv_len != 32)
+        return luaL_error(L, "x25519: the private key must be 32 bytes");
+    if (peer_len != 32) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, priv, 32);
+    EVP_PKEY *theirs = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer, 32);
+    EVP_PKEY_CTX *ctx = mine ? EVP_PKEY_CTX_new(mine, NULL) : NULL;
+    unsigned char secret[32];
+    size_t secret_len = 32;
+    int ok = mine && theirs && ctx
+        && EVP_PKEY_derive_init(ctx) == 1
+        && EVP_PKEY_derive_set_peer(ctx, theirs) == 1
+        && EVP_PKEY_derive(ctx, secret, &secret_len) == 1
+        && secret_len == 32;
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(theirs);
+    EVP_PKEY_free(mine);
+
+    unsigned char any = 0;
+    for (int i = 0; ok && i < 32; i++) any |= secret[i];
+    if (!ok || any == 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, (char *)secret, 32);
+    return 1;
+}
+
 int luaopen_rmail_crypto(lua_State *L)
 {
     lua_newtable(L);
@@ -165,5 +234,7 @@ int luaopen_rmail_crypto(lua_State *L)
     lua_pushcfunction(L, l_random_bytes);    lua_setfield(L, -2, "random_bytes");
     lua_pushcfunction(L, l_aes_gcm_encrypt); lua_setfield(L, -2, "aes_gcm_encrypt");
     lua_pushcfunction(L, l_aes_gcm_decrypt); lua_setfield(L, -2, "aes_gcm_decrypt");
+    lua_pushcfunction(L, l_x25519_public);   lua_setfield(L, -2, "x25519_public");
+    lua_pushcfunction(L, l_x25519);          lua_setfield(L, -2, "x25519");
     return 1;
 }

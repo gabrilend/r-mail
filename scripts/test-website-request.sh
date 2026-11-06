@@ -25,8 +25,8 @@
 #                  new offer under a new name, and the old offer goes
 #   listen-only    door's request keeps its note and makes no offer
 #   start-up       a website that is not a folder, `website_access =
-#                  public` (not built yet) and an unknown access value
-#                  each stop the daemon with the reason
+#                  public` with no website (#715b) and an unknown access
+#                  value each stop the daemon with the reason
 #   no website     with no `website` key a message called `website` is
 #                  an ordinary message
 #
@@ -219,7 +219,7 @@ refuses() {
 printf 'not a folder\n' > "$BOX/a-file"
 refuses "a website that is a file stops the daemon" "which is not a folder" "website = a-file"
 refuses "a website that is not there stops the daemon" "which is not a folder" "website = no-such-folder"
-refuses "website_access = public stops it: not built yet" "not built yet (#715b)" "website = site" "website_access = public"
+refuses "website_access = public with no website stops it (#715b)" "needs 'website', a folder to publish" "website_access = public"
 refuses "an unknown website_access stops it" "must be private or public" "website = site" "website_access = friends"
 # }}}
 

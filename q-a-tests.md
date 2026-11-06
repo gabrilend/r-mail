@@ -362,6 +362,15 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] An information page in Firefox, Chrome and a phone browser: the boxes look like ads, each opens its Wikipedia article, "Open this file" opens the file
 - [ ] A site of several GB: the offer's size matches the consent form's, and asking again while it transfers makes no second offer
 
+### A public website, for anyone who asks (#715b) — 2026-11-06
+
+- [x] A stranger's mailbox fetches the site with --website=<host>:<port>, byte for byte, filed with information pages; the words shown match the owner's log; the key is remembered (harness: scripts/test-public-website.sh)
+- [x] A changed key, or someone in the middle at a remembered address, is refused; a first visit through someone in the middle shows other words; a piece answered in another's place is caught (harness)
+- [x] Twice the site a day per address; GET, bad keys, wrong pieces and an old version refused; private mode unchanged (harness)
+- [ ] Two machines over the internet (not loopback): a stranger fetches the site through the owner's port forward, and the two compare the six words by phone
+- [ ] A site of several GB fetched by a stranger: time taken, and the daemon still answers contacts while the first ask packs the zip (the packing blocks; see #715b decision 7)
+- [ ] scripts/install.sh on a machine with an old libs/rmail_crypto.so: public mode refuses to start until install.sh --force rebuilds it
+
 ### A message published as a link: `to: url` (#714) — 2026-11-05
 
 - [x] The URL line is added once, at the bottom after a blank line, with 6 hand-alternating words (harness: scripts/test-public-link.sh)

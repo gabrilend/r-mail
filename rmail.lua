@@ -59,7 +59,9 @@ do
     local function usage(problem)
         if problem then io.stderr:write("error: " .. problem .. "\n") end
         io.stderr:write("usage: rmail.lua <config-file> [--once[=SECONDS]]\n")
+        io.stderr:write("       rmail.lua <config-file> --website=<host>:<port> [--yes]\n")
         io.stderr:write("  --once  announce, sync, stay reachable SECONDS (default 60), exit\n")
+        io.stderr:write("  --website  fetch the public website of the mailbox at host:port, then exit\n")
         io.stderr:write("  e.g. lua rmail.lua ~/mail/config\n")
         io.stderr:write("  the mailbox served is the directory that file sits in\n")
         os.exit(1)
@@ -167,6 +169,20 @@ local cfg = {
             local v = tostring(arg[i]):match("^%-%-once=?(%d*)$")
             if v then return tonumber(v) or 60 end
         end
+    end)(),
+    -- #715b: --website=<host>:<port> fetches someone's public website,
+    -- once, and exits; --yes takes it without asking on the terminal
+    fetch_website     = (function()
+        for i = 2, #(arg or {}) do
+            local v = tostring(arg[i]):match("^%-%-website=(.+)$")
+            if v then return v end
+        end
+    end)(),
+    fetch_yes         = (function()
+        for i = 2, #(arg or {}) do
+            if arg[i] == "--yes" then return true end
+        end
+        return false
     end)(),
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
     -- #317: a single file this size or larger is sent from where it lies,
@@ -3623,14 +3639,17 @@ do
                 return disregard(first4, "a capital letter, but not a web method")
             end
             local rest, budget = read_line(sock, WEB_HEAD_LIMIT - 4)
-            local method = rest and (first4 .. rest):match("^(%u+) %S+ HTTP/%d")
-            if not method then
+            local method, path = (first4 .. (rest or "")):match("^(%u+) (%S+) HTTP/%d")
+            if not rest or not method then
                 return disregard(first4, "no web request line within " .. WEB_HEAD_LIMIT .. " bytes")
             end
             local declared = skip_headers(sock, budget)
             if not declared then
                 return disregard(first4, "the web headers did not end within " .. WEB_HEAD_LIMIT .. " bytes")
             end
+            -- #715b: a public website's own two paths; in private mode,
+            -- and for every other path, nothing changes
+            if website.public_web(sock, method, path, declared, answer_plain) then return end
             local answer = by_method[method] or refuse_method
             return answer(sock, declared, method)
         end,
@@ -5011,11 +5030,12 @@ function website.configure()
     if access ~= nil and access ~= "" and access ~= "private" and access ~= "public" then
         return "'website_access' must be private or public, not '" .. tostring(access) .. "'"
     end
-    if access == "public" then
-        return "'website_access = public' is not built yet (#715b); only private is"
-    end
     local raw = config.website
-    if raw == nil or raw == "" then return nil end
+    if raw == nil or raw == "" then
+        -- public with nothing to publish is a mistake, not a quiet no
+        if access == "public" then return "'website_access = public' needs 'website', a folder to publish" end
+        return nil
+    end
     local dir = raw:gsub("^~", os.getenv("HOME") or "/tmp")
     if dir:sub(1, 1) ~= "/" then dir = CONFIG_DIR_PATH .. "/" .. dir:gsub("^%./", "") end
     dir = dir:gsub("/+$", "")
@@ -5023,6 +5043,15 @@ function website.configure()
     if not f then return "'website' names " .. dir .. ", which is not a folder" end
     f:close()
     website.folder = dir
+    -- #715b: anyone may ask, with a key of the mailbox's own to seal for them
+    if access == "public" then
+        if not crypto.x25519 then
+            return "'website_access = public' needs libs/rmail_crypto.so built from this " ..
+                "rmail_crypto.c (it gained X25519); run scripts/install.sh --force"
+        end
+        website.public = true
+        return website.load_key()
+    end
     return nil
 end
 -- }}}
@@ -6344,6 +6373,389 @@ function upload.file_received(zip_path, work_dir, filename, sender, expected_siz
                    shell_quote(message_name and (INBOX .. "/" .. message_name) or "") .. " &")
     end
     return target
+end
+-- }}}
+
+-- ---- A public website, for anyone who asks (#715b) -----------------------
+--
+-- With `website_access = public`, someone who is not a contact may fetch
+-- the website too.  They share no token with this mailbox, so the two
+-- agree one for the request (X25519): this mailbox keeps a key of its own
+-- for its website (.state/website-key), and the asker makes a new one
+-- for every visit.  Everything the mailbox answers is sealed with the key
+-- the two make together, so only the asker can open it, and only this
+-- mailbox's website key could have sealed it.
+--
+-- Nobody in the middle can be told apart on a first visit by any
+-- arithmetic (the 2026-10-13 assessment in the issue), so the asker
+-- remembers the key the first time (.state/website-keys.json, per
+-- address) and refuses loudly if it ever changes, as ssh does; and both
+-- sides show six words made from it, for the two people to compare some
+-- other way, as handheld-office's emoji pairing does.
+--
+-- The ask is a plain web request on the mailbox port, as the owner said
+-- (2026-10-13: "If the website is public, they just have to send a plain
+-- HTTP request"):
+--
+--   POST /website        {"key": the asker's public key, hex}
+--     -> 200: this mailbox's website public key (32 bytes), then the
+--        offer, sealed: name, size zipped and unzipped, SHA-256 of the
+--        zip, the site's fingerprint, the piece size and count
+--   POST /website/piece  {"key": the same, "n": a piece, "fingerprint": ...}
+--     -> 200: the piece, sealed, behind a line naming it and the version
+--     -> 409 when the site changed since the offer: ask again
+--     -> 429 when this address has had twice the site today
+--
+-- The asker's side is this program too, run once:
+--   rmail.lua <config> --website=<host>:<port> [--yes]
+-- It shows the words and the size both ways, asks yes or no on the
+-- terminal (the consent form, 2026-10-13: "they confirm its size as an
+-- attachment consent form"), then fetches, checks and unpacks the site
+-- into websites/<name>-at-<host>-<port>/ like a contact's (#715a).
+
+website.PIECE = 1048576
+website.BODY_LIMIT = 4096
+website.served, website.served_day = {}, nil
+
+-- {{{ website.hex, website.unhex
+function website.hex(s)
+    return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+-- 64 hex digits -> 32 bytes, or nil
+function website.unhex(h)
+    if type(h) ~= "string" or not h:match("^%x+$") or #h ~= 64 then return nil end
+    return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end))
+end
+-- }}}
+
+-- {{{ website.load_key() -> nil, or why the daemon cannot start
+-- Made on the first start in public mode, then kept: a changed key makes
+-- every asker who has visited before refuse the site, loudly.  A file
+-- that is there but unreadable is an error, not a reason for a new key.
+function website.load_key()
+    local path = STATE .. "/website-key"
+    local text = read_file(path)
+    if text == nil then
+        local priv = crypto.random_bytes(32)
+        os.execute("umask 077 && : > " .. shell_quote(path))
+        if not write_file(path, website.hex(priv) .. "\n") then return "cannot write " .. path end
+        os.execute("chmod 600 " .. shell_quote(path))
+        log("website: made this mailbox's website key, kept in %s", path)
+        text = website.hex(priv)
+    end
+    local priv = website.unhex(text:match("^%s*(%x+)%s*$"))
+    if not priv then
+        return path .. " is not a website key (64 hex digits); remove it to make a new one, " ..
+            "and everyone who has visited will be told the key changed"
+    end
+    website.priv, website.pub = priv, crypto.x25519_public(priv)
+    return nil
+end
+-- }}}
+
+-- {{{ website.words(pub) -> six words, for two people to compare
+-- The first from the right-hand list and the rest from the left (#714's
+-- lists), chosen by a hash of the key.
+function website.words(pub)
+    local right, left = publink.word_lists()
+    local h = crypto.sha256("rmail website words\0" .. pub)
+    local out = {}
+    for i = 1, 6 do
+        local b1, b2, b3 = h:byte(i * 3 - 2, i * 3)
+        local list = i == 1 and right or left
+        out[i] = list[((b1 * 256 + b2) * 256 + b3) % #list + 1]
+    end
+    return table.concat(out, " ")
+end
+-- }}}
+
+-- {{{ website.session(shared, asker_pub, owner_pub) -> the sealing key
+function website.session(shared, asker_pub, owner_pub)
+    return crypto.sha256("rmail public website\0" .. shared .. asker_pub .. owner_pub)
+end
+function website.seal(key, plaintext)
+    local nonce = crypto.random_bytes(12)
+    return nonce .. crypto.aes_gcm_encrypt(key, nonce, plaintext)
+end
+function website.open(key, sealed)
+    if type(sealed) ~= "string" or #sealed < 28 then return nil end
+    return crypto.aes_gcm_decrypt(key, sealed:sub(1, 12), sealed:sub(13))
+end
+-- }}}
+
+-- {{{ website.packed() -> the zipped site, or nil and why
+-- Packed once per version, into the pending folder, and kept while the
+-- daemon runs; a changed site is packed again on the next ask.  The
+-- fingerprint is looked at most every five seconds, so a download of
+-- many pieces does not list the folder for each.
+function website.packed()
+    local now = os.time()
+    local p = website.pack
+    if not (p and website.looked and now - website.looked < 5) then
+        website.looked = now
+        local fp = website.fingerprint()
+        if not fp then return nil, "the website folder could not be read" end
+        if not (p and p.fingerprint == fp) then
+            if p then os.remove(p.zip) end
+            website.pack = nil
+            local zip, sum, size, unpacked = compress_attachment(website.folder)
+            if not zip then return nil, "the website could not be packed (" .. tostring(sum) .. ")" end
+            p = {fingerprint = fp, zip = zip, sha256 = sum, size = size, unpacked = unpacked}
+            website.pack = p
+            log("website: packed for strangers, %s zipped", fmt_bytes(size))
+        end
+    end
+    if not file_exists(p.zip) then
+        website.pack, website.looked = nil, nil
+        return website.packed()
+    end
+    return p
+end
+-- }}}
+
+-- {{{ website.allow(address, bytes, size) -> whether to send them
+-- The guard (owner, 2026-10-13: "We need to add some sort of guard"):
+-- per address, at most twice the zipped site a day, so one retry of a
+-- whole download fits and a loop does not.  Kept in memory; one log
+-- line when an address reaches it.
+function website.allow(address, bytes, size)
+    local day = os.date("%Y-%m-%d")
+    if website.served_day ~= day then website.served, website.served_day = {}, day end
+    local s = website.served[address] or {bytes = 0}
+    website.served[address] = s
+    if s.bytes + bytes > 2 * size + website.PIECE then
+        if not s.said then
+            s.said = true
+            log("website: %s has fetched %s today, twice the site; nothing more until tomorrow",
+                address, fmt_bytes(s.bytes))
+        end
+        return false
+    end
+    s.bytes = s.bytes + bytes
+    return true
+end
+-- }}}
+
+-- {{{ website.public_web(sock, method, path, declared, answer) -> handled
+-- A web request on the mailbox port.  Only /website and /website/piece,
+-- and only in public mode; anything else, and everything in private
+-- mode, is answered as it always was.  `answer` sends a plain JSON
+-- answer: (sock, status line, extra headers, table).
+function website.public_web(sock, method, path, declared, answer)
+    if not website.public or (path ~= "/website" and path ~= "/website/piece") then
+        return false
+    end
+    if method ~= "POST" then
+        answer(sock, "405 Method Not Allowed", "Allow: POST\r\n", {error = "ask with POST"})
+        return true
+    end
+    if declared < 1 or declared > website.BODY_LIMIT then
+        answer(sock, "400 Bad Request", "", {error = "the body must be a short JSON object"})
+        return true
+    end
+    local body = sock:receive(declared)
+    local data = body and json.decode(body)
+    local theirs = type(data) == "table" and website.unhex(data.key)
+    local shared = theirs and crypto.x25519(website.priv, theirs)
+    if not shared then
+        answer(sock, "400 Bad Request", "", {error = "\"key\" must be a usable public key, in hex"})
+        return true
+    end
+    local key = website.session(shared, theirs, website.pub)
+    local address = (sock:getpeername()) or "?"
+    local pack, why = website.packed()
+    if not pack then
+        log("website: a stranger at %s asked, and %s", address, why)
+        answer(sock, "503 Service Unavailable", "", {error = why})
+        return true
+    end
+    local pieces = math.max(1, math.ceil(pack.size / website.PIECE))
+    local sealed
+    if path == "/website" then
+        log("website: asked for by a stranger at %s", address)
+        sealed = website.pub .. website.seal(key, json.encode({
+            v = 1, name = config.name, folder = website.folder:match("([^/]+)$"),
+            fingerprint = pack.fingerprint, size = pack.size, unpacked = pack.unpacked,
+            sha256 = pack.sha256, piece = website.PIECE, pieces = pieces,
+        }))
+    else
+        local n = tonumber(data.n)
+        if not n or n ~= math.floor(n) or n < 0 or n >= pieces then
+            answer(sock, "400 Bad Request", "", {error = "\"n\" must be a piece from 0 to " .. (pieces - 1)})
+            return true
+        end
+        if data.fingerprint ~= pack.fingerprint then
+            answer(sock, "409 Conflict", "", {error = "the website changed; ask for it again"})
+            return true
+        end
+        local f = io.open(pack.zip, "rb")
+        local bytes = f and f:seek("set", n * website.PIECE) and f:read(website.PIECE) or ""
+        if f then f:close() end
+        if not website.allow(address, #bytes, pack.size) then
+            answer(sock, "429 Too Many Requests", "", {error = "twice the website today already; try tomorrow"})
+            return true
+        end
+        sealed = website.seal(key, string.format("rmail website piece %d %s\n", n, pack.fingerprint) .. bytes)
+    end
+    send_all(sock, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" ..
+        "Content-Length: " .. #sealed .. "\r\nConnection: close\r\n\r\n" .. sealed)
+    return true
+end
+-- }}}
+
+-- {{{ website.post(host, port, path, tbl) -> status, body; or nil, why
+-- The asker's side of one request: a plain web POST, the whole answer read.
+function website.post(host, port, path, tbl)
+    local body = json.encode(tbl)
+    local c = tcp_for(host)
+    c:settimeout(60)
+    local ok, err = c:connect(host, port)
+    if not ok then c:close(); return nil, "cannot reach " .. host .. " port " .. port .. ": " .. tostring(err) end
+    c:send("POST " .. path .. " HTTP/1.1\r\nHost: " .. host .. "\r\nContent-Type: application/json\r\n" ..
+        "Content-Length: " .. #body .. "\r\nConnection: close\r\n\r\n" .. body)
+    local line = c:receive("*l")
+    local status = line and tonumber(line:match("^HTTP/%d[%.%d]* (%d%d%d)"))
+    if not status then c:close(); return nil, "no web answer from " .. host .. " port " .. port end
+    local length
+    while true do
+        local h = c:receive("*l")
+        if not h then c:close(); return nil, "the answer ended inside its headers" end
+        if h == "" then break end
+        length = tonumber(h:lower():match("^content%-length:%s*(%d+)")) or length
+    end
+    if not length or length > website.PIECE + 4096 then
+        c:close(); return nil, "the answer's length is missing or too large"
+    end
+    local data = length > 0 and c:receive(length) or ""
+    c:close()
+    if not data then return nil, "the answer ended early" end
+    return status, data
+end
+-- }}}
+
+-- {{{ website.fetch(target, yes) -> exit status
+-- The asker's side, run once: rmail.lua <config> --website=<host>:<port>.
+function website.fetch(target, yes)
+    local function say(fmt, ...) io.stdout:write(string.format(fmt, ...), "\n") end
+    local function refusal(status, data)
+        local d = json.decode(data or "")
+        return (type(d) == "table" and d.error) or ("answered " .. tostring(status))
+    end
+    local host, port = target:match("^%[(.+)%]:(%d+)$")
+    if not host then host, port = target:match("^([^:]+):(%d+)$") end
+    port = tonumber(port)
+    if not host or not port or port < 1 or port > 65535 then
+        say("--website needs <host>:<port>, such as 192.0.2.7:51234 or [2001:db8::7]:51234")
+        return 1
+    end
+    os.execute("mkdir -p " .. shell_quote(STATE) .. " " .. shell_quote(paths.pending) .. " " ..
+        shell_quote(paths.attachments))
+
+    local mine = crypto.random_bytes(32)
+    local my_pub = crypto.x25519_public(mine)
+    local status, data = website.post(host, port, "/website", {key = website.hex(my_pub)})
+    if not status then say("%s", data); return 1 end
+    if status ~= 200 then
+        say("%s:%d did not offer a website: %s", host, port, refusal(status, data))
+        return 1
+    end
+    local theirs = data:sub(1, 32)
+    local shared = #theirs == 32 and crypto.x25519(mine, theirs)
+    local key = shared and website.session(shared, my_pub, theirs)
+    local offer = key and json.decode(website.open(key, data:sub(33)) or "")
+    if type(offer) ~= "table" or type(offer.fingerprint) ~= "string" or not tonumber(offer.pieces)
+       or not tonumber(offer.size) or type(offer.sha256) ~= "string" then
+        say("%s:%d answered, but its offer did not open; nothing was fetched", host, port)
+        return 1
+    end
+
+    -- trust on first use: the key remembered per address, a change refused
+    local where = host .. ":" .. port
+    local words = website.words(theirs)
+    local pins = load_state("website-keys.json")
+    local pin = pins[where]
+    if pin and pin.key ~= website.hex(theirs) then
+        say("REFUSED: the mailbox at %s answers with a different key from the one it had on %s.", where, pin.since or "?")
+        say("  its words then: %s", pin.words or "?")
+        say("  its words now:  %s", words)
+        say("Someone may be between you and it, or its owner made a new key.  Ask them some other")
+        say("way (in person, by phone).  To take the new key, remove \"%s\" from %s/website-keys.json.", where, STATE)
+        log("website from %s refused: its key changed since %s", where, pin.since or "?")
+        return 1
+    end
+    local name = tostring(offer.name or "?")
+    say("%s's website, at %s.", name, where)
+    say("Its key's words: %s", words)
+    if pin then
+        say("The same key as on %s.", pin.since or "?")
+    else
+        say("First visit: this key is remembered now, and a different one will be refused.")
+        say("Compare the words with %s's own, in person or by phone: different words mean", name)
+        say("someone is in between.")
+        pins[where] = {key = website.hex(theirs), words = words, name = name, since = os.date("%Y-%m-%d")}
+        save_state("website-keys.json", pins)
+    end
+    local size = fmt_bytes(tonumber(offer.size))
+    say("")
+    say("It is %s zipped (%s unpacked).  Say yes and all of it arrives, to read", size,
+        fmt_bytes(tonumber(offer.unpacked) or 0))
+    say("whenever you like, even offline.")
+    say("Said the other way round: saying no costs you nothing and you can ask again later;")
+    say("saying yes costs %s of download and disk, but then it is yours and works without", size)
+    say("%s's computer being on.", name)
+    if not yes then
+        if not website.ran(os.execute("test -t 0")) then
+            say("No terminal to answer on: nothing fetched.  Add --yes to fetch without asking.")
+            return 1
+        end
+        io.stdout:write("Fetch it? [y/N] ")
+        io.stdout:flush()
+        local a = io.stdin:read("*l") or ""
+        if not a:match("^%s*[yY]") then say("Nothing fetched."); return 0 end
+    end
+
+    local work = paths.pending .. "/website-fetch-" .. uuid()
+    os.execute("mkdir -p " .. shell_quote(work))
+    local function give_up(fmt, ...)
+        say(fmt, ...)
+        os.execute("rm -rf " .. shell_quote(work))
+        return 1
+    end
+    local zip = work .. "/site.zip"
+    local out = io.open(zip, "wb")
+    if not out then return give_up("cannot write %s", zip) end
+    local pieces, shown = tonumber(offer.pieces), -1
+    for n = 0, pieces - 1 do
+        local st, d = website.post(host, port, "/website/piece",
+            {key = website.hex(my_pub), n = n, fingerprint = offer.fingerprint})
+        if not st then out:close(); return give_up("%s", d) end
+        if st ~= 200 then out:close(); return give_up("piece %d: %s", n, refusal(st, d)) end
+        local plain = website.open(key, d)
+        local head = string.format("rmail website piece %d %s\n", n, offer.fingerprint)
+        if not plain or plain:sub(1, #head) ~= head then
+            out:close(); return give_up("piece %d did not open as that piece; nothing was kept", n)
+        end
+        out:write(plain:sub(#head + 1))
+        local pct = math.floor((n + 1) * 100 / pieces)
+        if pct >= shown + 10 or n == pieces - 1 then shown = pct; say("  %d%%", pct) end
+    end
+    out:close()
+    if sha256_file(zip) ~= offer.sha256 or measure_size(zip) ~= tonumber(offer.size) then
+        return give_up("the whole did not match its checksum; nothing was kept")
+    end
+    local extract = work .. "/extract"
+    os.execute("mkdir -p " .. shell_quote(extract))
+    local ok, why, detail = upload.unpack_received(zip, extract, upload.size_limit(tonumber(offer.unpacked) or 0))
+    if not ok then return give_up("the zip was refused (%s): %s", tostring(why), tostring(detail)) end
+    local folder = sanitize_filename(tostring(offer.folder or ""))
+    if folder == "" or path_state(extract .. "/" .. folder .. "/.") == "absent" then
+        return give_up("the zip did not hold the website's folder; nothing was kept")
+    end
+    local dest = website.received(name .. "-at-" .. host .. "-" .. port, extract .. "/" .. folder)
+    os.execute("rm -rf " .. shell_quote(work))
+    if not dest then say("fetched, but it could not be filed; see the log"); return 1 end
+    say("Saved at %s", dest)
+    return 0
 end
 -- }}}
 
@@ -10090,7 +10502,12 @@ local function init_runtime()
         io.stderr:write("error: " .. website_problem .. " (in " .. CONFIG_PATH .. ")\n")
         os.exit(1)
     end
-    if website.folder then log("website: %s, for contacts who ask", website.folder) end
+    if website.public then
+        log("website: %s, for anyone who asks; its key's words, for askers to compare: %s",
+            website.folder, website.words(website.pub))
+    elseif website.folder then
+        log("website: %s, for contacts who ask", website.folder)
+    end
     -- zip and unzip are no longer needed: attachments are packed and read
     -- by the shared zip library in libs/ (#309).
     align_contacts()
@@ -10402,6 +10819,9 @@ end
 -- coroutine) to keep state management simple.
 
 local function main()
+    -- #715b: fetching someone's public website is a visit, not a daemon:
+    -- nothing is listened on, so it runs beside this mailbox's own daemon
+    if cfg.fetch_website then os.exit(website.fetch(cfg.fetch_website, cfg.fetch_yes)) end
     local rt = init_runtime()
 
     -- Active client coroutines: raw_socket -> {co, wait_type, wait_sock, last_activity}

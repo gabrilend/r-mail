@@ -4,8 +4,10 @@ Sub-issue of #715.  Needs #715a.
 
 ## Current Behavior
 
-Nothing is built, and the design is not settled.  Only contacts may ask
-for a website (#715a).
+*Built 2026-11-06* (see Status, and the decisions at the end):
+`website_access = public` lets anyone fetch the website with
+`run-rmail.sh <their config> --website=<host>:<port>`.  Before that, only
+contacts could ask (#715a).
 
 ## Intended Behavior
 
@@ -91,3 +93,79 @@ it fits strangers.
 1. Settle the open questions.
 2. Write the steps then; this issue is a design record until it is
    settled.
+
+## Status
+
+**Built 2026-11-06**, branch `claude/715b-public-website`, stacked on
+#715a's receiving side.  Waiting for the owner's checks in `q-a-tests.md`.
+
+- **The owner's side.** In public mode the mailbox keeps an X25519 key
+  for its website in `.state/website-key`, readable by the owner only.
+  It is made on the first start; a file that is there but is not a key
+  stops the daemon.  Its six words are logged at every start.  Two plain
+  web requests on the mailbox port are answered: `POST /website` gives
+  the key and the offer, and `POST /website/piece` gives one MiB at a
+  time.  Each request carries the asker's one-off public key, and both
+  answers are sealed with the key the two make from them.  Every other
+  path, and everything in private mode, is answered exactly as before.
+- **The asker's side.** `rmail.lua <config> --website=<host>:<port>
+  [--yes]` runs once and exits, beside the asker's own daemon:
+  1. It shows the words and the size both ways round, and asks yes or no
+     on the terminal.
+  2. It remembers the key per address (`.state/website-keys.json`), and
+     refuses a changed key loudly.
+  3. It checks each piece's line and the whole zip's SHA-256.
+  4. It unpacks the zip through #311's checks, and files the site like a
+     contact's (#715a).
+- `rmail_crypto.c` gains `x25519_public` and `x25519`, tested against
+  RFC 7748's vectors.
+- Test: `scripts/test-public-website.sh`, with
+  `scripts/lib/website-between.lua` playing someone in the middle.
+
+## Decisions (2026-11-06, the owner can overturn any of these)
+
+1. **Open question 1, the way in: (a) and (b) together.**
+   - (a) The asker's mailbox remembers the website's key the first time,
+     per address, and refuses the site loudly if the key changes, naming
+     the words from then and now.
+   - (b) Six words from the key are shown on the asker's terminal and in
+     the owner's log, for the two people to compare some other way.
+   - (c) The timing check is not built. Per the 2026-10-13 assessment
+     above, an attacker in the middle can prepare their own sealed file in
+     advance, so no extra delay appears. Networks also wobble by more than
+     the margin, so the check would mostly raise false alarms.
+2. **The owner's "encrypt the file with a random token" is met by the
+   agreed key.** Each visit's key comes from a new random key on the
+   asker's side and the mailbox's website key, so it is fresh every time.
+   Only the asker can open what is sealed with it, and only the
+   mailbox's key could have sealed it. A token sent in the clear would be
+   read by anyone on the path, and then the words would prove nothing.
+3. **Open question 2, what a stranger may send: no note.** A stranger's
+   request carries only a key. The inbox is for people the owner chose.
+   The public link's notes (#714) are the place where strangers write.
+4. **The asker's side is rmail itself, run once, not a Firefox plugin.**
+   The asker needs a mailbox anyway, to remember keys and to file the
+   site with its information pages. A plugin would be JavaScript, and
+   there is no Firefox on the build machine. The two requests are plain
+   enough for a plugin to make later.
+5. **The site is pulled, not pushed.** A contact's website is pushed to
+   their daemon (#715a). A stranger may be behind a router nobody opened,
+   so their side fetches it, piece by piece.
+6. **The guard: twice the zipped site per address per day.** This leaves
+   room for one retry of a whole download, and a loop stops at once. It is
+   counted in memory, so it is forgotten at a restart. The log says once
+   when an address reaches it.
+7. **The zip is made on the first ask after the folder changes**, and is
+   then kept in the pending folder while the daemon runs. Packing blocks
+   the daemon for as long as it takes, so a site of many GB stalls it
+   once per version. That is left for the owner's checks.
+8. **Filed as `websites/<name>-at-<host>-<port>/`.** The name comes from
+   the sealed offer, and the address keeps it apart from a contact's site
+   of the same name.
+9. **Public mode with no `website` stops the daemon**, as other config
+   mistakes do. A `libs/rmail_crypto.so` built before this change also
+   stops it, with the command that rebuilds it.
+10. **Contacts still ask as in #715a** in public mode, and a listen-only
+    contact is still offered nothing that way. It can fetch like anyone
+    else.
+

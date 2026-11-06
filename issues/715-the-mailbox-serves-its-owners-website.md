@@ -65,5 +65,6 @@ encrypted to only my peers."
 ## Status
 
 Open.  715a is built, both sides (2026-11-05), and its two open
-questions are answered there.  715b is still being designed (how a stranger's answer can be
-trusted); 715c is deferred by the owner.
+questions are answered there.  715b is built (2026-11-06): a stranger
+fetches a public website over a key the two agree, remembered on first
+use and shown as six words.  715c is deferred by the owner.
