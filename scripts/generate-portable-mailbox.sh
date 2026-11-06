@@ -382,6 +382,14 @@ cp "$RMAIL_OUT"/rmail_crypto.so "$RMAIL_OUT"/rmail_inotify.so "$PAYLOAD/libs/"
 # against; not luac or liblua.a, which nothing runs
 cp "$LUA_TOP/bin/lua" "$PAYLOAD/deps/lua/bin/lua"
 cp -R "$LUA_TOP/include" "$PAYLOAD/deps/lua/include"
+# what source this program is (#615): the revision of the checkout it was
+# copied from, and the digest of the copy, so a later edit on the drive
+# shows as a difference rather than inheriting the claim
+if ! sh "$SCRIPT_DIR/build-stamp.sh" --by generate-portable-mailbox.sh \
+        --revision-from "$ROOT" "$PAYLOAD" >/dev/null; then
+    err "could not write the build stamp into $PAYLOAD"
+    exit 1
+fi
 # each dependency's licence, kept from its own source tree
 if [ -d "$DEPS/licenses" ]; then cp -R "$DEPS/licenses/." "$PAYLOAD/licenses/"; fi
 for name in lua openssl luasocket; do

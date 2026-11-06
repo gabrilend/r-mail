@@ -943,6 +943,15 @@ on_consent     = ./hooks/on_consent.sh
 on_send        = ./hooks/on_send.sh
 on_delete      = ./hooks/on_delete.sh
 on_update      = ./hooks/on_update.sh
+
+# ---- source ----
+# Where the source of the rmail this mailbox runs can be fetched.  Your
+# contacts' daemons can ask yours for it, with what your program is.
+# rmail is under the AGPL: if you run a CHANGED rmail that other people
+# reach over the network, section 13 asks you to offer them the source of
+# your version -- so point this at where your changed copy can be had.
+# Unchanged, leave it as it is.
+source_url = https://github.com/gabrilend/r-mail
 CONFIG
     ok "created config: $CONFIG_FILE"
 else
@@ -1702,6 +1711,21 @@ fi
 if [ -d "$BUILD" ]; then
     info "Cleaning up build files..."
     rm -rf "$BUILD"
+fi
+
+# ============================================================
+# BUILD STAMP — name the source this checkout holds (#615)
+# ============================================================
+# A running daemon answers a contact's GET /source with the revision this
+# stamp claims and the digest of the files it actually read.  Written on
+# every run, before the mailboxes restart below, so a restarted daemon
+# finds a stamp describing what it now runs.  A failure is a warning: the
+# daemon still runs, and says it has no stamp.
+
+if STAMP_SAID=$(sh "$SCRIPT_DIR/build-stamp.sh" --by install.sh "$ROOT"); then
+    ok "build stamp: ${STAMP_SAID%% *}"
+else
+    warn "could not write $ROOT/build-stamp; the daemon will say it has no stamp"
 fi
 
 # ============================================================

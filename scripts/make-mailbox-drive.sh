@@ -625,6 +625,8 @@ main() {
     cp -R "\$SRC/rmail.lua" "\$SRC/run-rmail.sh" "\$SRC/libs" "\$RUN/" || return 1
     cp -R "\$SRC/\$ARCH/libs/." "\$RUN/libs/" || return 1
     cp -R "\$SRC/\$ARCH/deps" "\$RUN/" || return 1
+    # what source this is (#615); a drive made before stamps has none
+    if [ -f "\$SRC/build-stamp" ]; then cp "\$SRC/build-stamp" "\$RUN/" || return 1; fi
 
     # Anything that fails to load here is a mismatch between this drive's
     # \$ARCH program and this host: a 32-bit system on a 64-bit processor,

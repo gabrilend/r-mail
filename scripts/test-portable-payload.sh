@@ -21,7 +21,8 @@
 #   built       a payload laid out as a drive's source-code/: the program,
 #               libs/ with luasocket and the two rmail libraries, its own
 #               Lua, a licence for each dependency, BUILD-NOTES.txt naming
-#               the target and the flags; Lua made with `make linux` (never
+#               the target and the flags, a build stamp naming the
+#               checkout's revision and the payload's digest; Lua made with `make linux` (never
 #               linux-readline) and this compiler; OpenSSL configured
 #               static with what rmail does not use turned off; the
 #               generator's own check (the payload's Lua loads its
@@ -236,6 +237,19 @@ grep -q "for x86_64, with cc" "$P/BUILD-NOTES.txt" && grep -q "no-tls" "$P/BUILD
     || note_fail "BUILD-NOTES.txt does not say how it was built"
 [ "$(cat "$P/ARCH" 2>/dev/null)" = x86_64 ] && ok "ARCH names the target, for the drive maker (#619)" \
     || note_fail "no ARCH file naming x86_64: $(cat "$P/ARCH" 2>/dev/null)"
+# the build stamp (#615): the checkout's revision, the payload's own digest
+want_rev=unknown
+_top=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null) || _top=""
+if [ -n "$_top" ] && [ "$(cd "$_top" && pwd -P)" = "$(cd "$DIR" && pwd -P)" ]; then
+    want_rev=$(git -C "$DIR" describe --always --dirty --abbrev=12 2>/dev/null)
+fi
+if grep -q "^by = generate-portable-mailbox.sh$" "$P/build-stamp" 2>/dev/null \
+   && grep -q "^revision = $want_rev$" "$P/build-stamp" \
+   && grep -q "^digest = $(sh "$DIR/scripts/build-stamp.sh" --digest "$P")$" "$P/build-stamp"; then
+    ok "build-stamp names the checkout's revision and the payload's own digest (#615)"
+else
+    note_fail "the payload's build-stamp: $(tr '\n' ' ' < "$P/build-stamp" 2>/dev/null) (wanted revision $want_rev)"
+fi
 if LUA_PATH="$P/libs/?.lua;;" LUA_CPATH="$P/libs/?.so;;" "$P/deps/lua/bin/lua" \
      -e 'local c = require("rmail_crypto"); assert(c.aes_gcm_decrypt(string.rep("k",32), string.rep("n",12),
          c.aes_gcm_encrypt(string.rep("k",32), string.rep("n",12), "hi")) == "hi")' 2>/dev/null; then
@@ -323,8 +337,9 @@ SC="$DEST/mailbox-0/source-code"
 if cmp -s "$SC/x86_64/libs/rmail_crypto.so" "$P/libs/rmail_crypto.so" \
    && cmp -s "$SC/x86_64/deps/lua/bin/lua" "$P/deps/lua/bin/lua" \
    && cmp -s "$SC/rmail.lua" "$P/rmail.lua" \
-   && [ -s "$SC/licenses/openssl/LICENSE.txt" ] && cmp -s "$SC/x86_64/BUILD-NOTES.txt" "$P/BUILD-NOTES.txt"; then
-    ok "source-code/ is the payload, byte for byte, licences and build notes included"
+   && [ -s "$SC/licenses/openssl/LICENSE.txt" ] && cmp -s "$SC/x86_64/BUILD-NOTES.txt" "$P/BUILD-NOTES.txt" \
+   && cmp -s "$SC/build-stamp" "$P/build-stamp"; then
+    ok "source-code/ is the payload, byte for byte, licences, build notes and build stamp included"
 else
     note_fail "source-code/ is not the payload: $(ls "$SC" 2>/dev/null | tr '\n' ' ')"
 fi

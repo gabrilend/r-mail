@@ -2196,6 +2196,127 @@ local function hash_contact_name(name)
     return hex_sha256("rmail:contact:" .. name)
 end
 
+-- {{{ identity
+-- Which source this daemon is running, and where to get it (#615).
+--
+-- Two needs, one answer.  A contact trusts that the daemon on the other
+-- end behaves like the published one, and nothing let them check; and the
+-- licence (AGPL-3.0, section 13) asks a modified daemon that people reach
+-- over a network to offer them its source.  So every daemon, modified or
+-- not, answers a contact's GET /source with:
+--
+--   revision        what the stamp says the source is: `git describe` of
+--                   the checkout it was stamped from.  A claim.
+--   stamped_digest  the digest the stamp recorded when it was written
+--   digest          the digest of the files this daemon read as it
+--                   started.  Evidence: worked out here, not read anywhere.
+--   state           "as stamped" when the two digests agree, "changed
+--                   since stamped" when they do not, "no stamp" when there
+--                   is none
+--   source_url      where this daemon's source can be fetched (the
+--                   `source_url` setting; the project by default)
+--   license, covers the licence, and the files the digest is over
+--
+-- The stamp is the file `build-stamp` beside rmail.lua, written by
+-- scripts/build-stamp.sh: install.sh writes it into a checkout, and
+-- generate-portable-mailbox.sh into a drive's program.  It holds no time,
+-- so two kinds of machine built from one checkout carry the same one.
+--
+-- The digest is over rmail's own Lua: what the interpreter reads as it
+-- is, so its hash describes the code that runs.  The compiled libraries
+-- are not in it; their hash differs by compiler and machine and could
+-- never be compared with the published source.  Hook scripts are not in
+-- it either: they are the owner's own, under the licence's exception.
+-- The same list, in the same order, is in scripts/build-stamp.sh;
+-- scripts/test-build-identity.sh checks they agree, and reads this
+-- one-line list to do it.
+local identity = {
+    FILES = {"rmail.lua", "libs/dkjson.lua", "libs/zip-compat.lua", "libs/zip-inflate.lua", "libs/zip-reader.lua", "libs/zip-writer.lua"},
+    LICENSE  = "AGPL-3.0-or-later WITH AdditionRef-rmail-hook-exception",
+    UPSTREAM = "https://github.com/gabrilend/r-mail",
+    answer   = nil,   -- set by identity.start, served by GET /source
+}
+
+-- {{{ identity.manifest
+-- One line per file, "<sha-256>  <path>", in FILES order -- the shape
+-- sha256sum prints, so the shell side makes the same text.  A missing
+-- file is "absent" rather than skipped, so leaving one out shows.
+function identity.manifest(root)
+    local lines = {}
+    for _, f in ipairs(identity.FILES) do
+        local data = read_file_binary(root .. f)
+        lines[#lines + 1] = (data and hex_sha256(data) or "absent") .. "  " .. f .. "\n"
+    end
+    return table.concat(lines)
+end
+-- }}}
+
+-- {{{ identity.digest
+function identity.digest(root)
+    return hex_sha256(identity.manifest(root))
+end
+-- }}}
+
+-- {{{ identity.read_stamp
+-- `key = value` lines, as build-stamp.sh writes them; nil with no file.
+function identity.read_stamp(path)
+    local text = read_file(path)
+    if not text then return nil end
+    local stamp = {}
+    for line in text:gmatch("[^\n]+") do
+        local k, v = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+        if k and v ~= "" then stamp[k] = v end
+    end
+    return stamp
+end
+-- }}}
+
+-- {{{ identity.source_url
+-- The setting, or the project when it is unset or empty.
+function identity.source_url(v)
+    if type(v) ~= "string" or v == "" or v == '""' or v == "''" then
+        return identity.UPSTREAM
+    end
+    return v
+end
+-- }}}
+
+-- {{{ identity.start
+-- Worked out once, as the daemon starts: the files it has just read are
+-- the ones it runs.  A change on disk afterwards is a change for the next
+-- start, and the answer would be wrong to follow it.
+function identity.start(root, source_url)
+    local digest = identity.digest(root)
+    local stamp = identity.read_stamp(root .. "build-stamp") or {}
+    local state = (not stamp.digest and "no stamp")
+        or (stamp.digest == digest and "as stamped")
+        or "changed since stamped"
+    identity.answer = {
+        license        = identity.LICENSE,
+        source_url     = source_url,
+        revision       = stamp.revision,
+        stamped_by     = stamp.by,
+        stamped_digest = stamp.digest,
+        digest         = digest,
+        state          = state,
+        covers         = identity.FILES,
+    }
+    log("source: %s, digest %s (%s); offered at %s", stamp.revision or "no revision",
+        digest:sub(1, 12), state, source_url)
+    if state == "no stamp" then
+        log("  no build stamp beside rmail.lua: scripts/install.sh writes one")
+    elseif state == "changed since stamped" and source_url == identity.UPSTREAM then
+        -- The one case the daemon can tell is a modified program, and the
+        -- one the licence speaks to: say it where the operator looks.
+        log("  this program differs from its stamp, and source_url still names the project;")
+        log("  if you changed it, the licence (AGPL section 13) asks that source_url in")
+        log("  the config name where your version can be had")
+    end
+    return identity.answer
+end
+-- }}}
+-- }}}
+
 -- Reverse-migrate a state table whose keys were hashed contact names
 -- under #505 step 1 (now reverted).  Legacy 64-hex keys resolved back
 -- to the plaintext name via the current contacts; hashes whose contact
@@ -8999,6 +9120,10 @@ local function handle_request(rt, client, preread)
         local dep_name = path:match("^/deps/(.+)$")
         if DEPS_REGISTRY[dep_name] then send_response(resp, 200, DEPS_REGISTRY[dep_name])
         else send_response(resp, 404, {error = "unknown dependency: " .. dep_name}) end
+    elseif method == "GET" and path == "/source" then
+        -- which source this daemon runs and where to get it (#615)
+        send_response(resp, 200, identity.answer
+            or identity.start(script_dir, identity.source_url(config.source_url)))
     elseif method == "GET" and path == "/install-script" then
         local script_path = script_dir .. "scripts/install.sh"
         local f = io.open(script_path, "r")
@@ -9385,6 +9510,8 @@ local function init_runtime()
 
     log("rmail starting: name=%s port=%d", rt.my_name, rt.port)
     log("mail dir: %s", MAIL)
+    -- Which source this is and where to get it, worked out once (#615).
+    identity.start(script_dir, identity.source_url(config.source_url))
 
     -- Which of dkjson's two decoders this run is on (#104).  dkjson decides
     -- by itself, once, while loading: it tries to switch to its LPeg decoder

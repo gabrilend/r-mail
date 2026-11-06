@@ -577,6 +577,16 @@ The installer and migration rows are not — they need a real run.
 - [x] One drive from an x86_64 and an aarch64 payload: shared files once, each kind's compiled part in `source-code/<arch>/`; the launcher runs this machine's part; on another kind it names the kinds the drive holds; two payloads for one kind, payloads that differ outside their compiled parts, and a payload holding another kind's binary are refused (harness, #619)
 - [ ] A drive made with real x86_64 and aarch64 payloads runs on a laptop and on a Raspberry Pi 4 or 5 with a 64-bit system, unchanged (#619)
 - [ ] The same drive on a Raspberry Pi with a 32-bit system says its aarch64 program does not run there, naming 32-bit (#619)
+- [x] A payload carries `build-stamp` naming the checkout's revision and the payload's digest; the drive keeps it, the launcher's copy keeps it, and a drive daemon says "as stamped", or "changed since stamped" after `rmail.lua` is edited on the drive (harness, #615)
+
+### What a daemon runs, and where its source is (#615)
+Covered by `scripts/test-build-identity.sh`, except where marked.
+
+- [x] `GET /source` from a contact or the owner's phone gives the stamp's revision, both digests, whether they agree, the licence, the files covered and `source_url`; a listen-only contact is refused; the plaintext health check still says only `{"ok":true}` (harness)
+- [x] A daemon started on an edited `rmail.lua` says "changed since stamped", and with `source_url` still the project its log asks for it to be changed (harness)
+- [ ] After `scripts/install.sh` on a real checkout, `build-stamp` in the checkout names `git describe --dirty` and the daemon's log says "(as stamped)" after the restart
+- [ ] A fresh `install.sh` config has the `source_url` line and its comment; an existing config is not given one (the daemon uses the project)
+- [ ] Two mailboxes on two machines running the same commit report the same `digest` to each other
 
 ### Recipients the daemon cannot resolve
 Also covered by `scripts/test-mailbox-selection.sh`.
