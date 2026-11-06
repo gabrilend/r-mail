@@ -59,9 +59,10 @@ do
     local function usage(problem)
         if problem then io.stderr:write("error: " .. problem .. "\n") end
         io.stderr:write("usage: rmail.lua <config-file> [--once[=SECONDS]]\n")
-        io.stderr:write("       rmail.lua <config-file> --website=<host>:<port> [--yes]\n")
+        io.stderr:write("       rmail.lua <config-file> --website=<host>:<port> [--yes] [--browse[=PORT]]\n")
         io.stderr:write("  --once  announce, sync, stay reachable SECONDS (default 60), exit\n")
         io.stderr:write("  --website  fetch the public website of the mailbox at host:port, then exit\n")
+        io.stderr:write("  --browse   with --website: read it page by page at 127.0.0.1:PORT (8715)\n")
         io.stderr:write("  e.g. lua rmail.lua ~/mail/config\n")
         io.stderr:write("  the mailbox served is the directory that file sits in\n")
         os.exit(1)
@@ -183,6 +184,15 @@ local cfg = {
             if arg[i] == "--yes" then return true end
         end
         return false
+    end)(),
+    -- #715c: --browse[=PORT] with --website reads the site page by page,
+    -- served to this computer's own browser at 127.0.0.1:PORT (8715)
+    browse            = (function()
+        for i = 2, #(arg or {}) do
+            if arg[i] == "--browse" then return 8715 end
+            local v = tostring(arg[i]):match("^%-%-browse=(.*)$")
+            if v then return tonumber(v) or -1 end
+        end
     end)(),
     chunk_size        = tonumber(config.attachment_chunk_size) or 5242880,
     -- #317: a single file this size or larger is sent from where it lies,
@@ -5204,32 +5214,13 @@ function website.ran(r) return r == true or r == 0 end
 -- {{{ website.received(sender, path) -> where the site now is, or nil
 -- `path` is the folder just filed in the attachments folder.
 function website.received(sender, path)
-    local who = sanitize_filename(sender)
     local home = paths.attachments .. "/websites"
-    local dest = home .. "/" .. who
+    local dest = home .. "/" .. sanitize_filename(sender)
     os.execute("mkdir -p " .. shell_quote(home))
-    if path_state(dest) ~= "absent" then
-        local ram = TMPFS_PROGRESS_DIR .. "/old-websites"
-        os.execute("mkdir -p " .. shell_quote(ram))
-        local base = ram .. "/" .. MAIL:gsub("^/", ""):gsub("/", "-") .. "-" .. who .. "-" ..
-            os.date("%Y-%m-%d-%H-%M-%S")
-        local old, n = base, 2
-        while path_state(old) ~= "absent" do old = base .. "-" .. n; n = n + 1 end
-        -- RAM is small: a copy that does not fit is removed, not let
-        -- fill the machine's memory
-        local size, avail = measure_size(dest) or 0, check_disk_space(ram)
-        if avail and size >= avail then
-            os.execute("rm -rf " .. shell_quote(dest))
-            log("website from %s: the previous copy (%s) did not fit in RAM (%s free) and was removed",
-                sender, fmt_bytes(size), fmt_bytes(avail))
-        elseif website.ran(os.execute("mv " .. shell_quote(dest) .. " " .. shell_quote(old))) then
-            log("website from %s: the previous copy moved to %s, kept until the machine restarts",
-                sender, old)
-        else
-            log("website from %s: the previous copy could not be moved; the new one stays at %s",
-                sender, path)
-            return nil
-        end
+    if not website.retire(sender, dest) then
+        log("website from %s: the previous copy could not be moved; the new one stays at %s",
+            sender, path)
+        return nil
     end
     if not website.ran(os.execute("mv " .. shell_quote(path) .. " " .. shell_quote(dest))) then
         log("website from %s: could not be moved to %s; it stays at %s", sender, dest, path)
@@ -5238,6 +5229,34 @@ function website.received(sender, path)
     local pages = website.info_pages(dest)
     log("website from %s saved at %s (%d information page%s)", sender, dest, pages, pages == 1 and "" or "s")
     return dest
+end
+-- }}}
+
+-- {{{ website.retire(sender, dest) -> true once nothing is at dest
+-- The copy kept at `dest` moves to RAM, kept until the machine restarts;
+-- one too big for RAM is removed.  #715c's page-by-page copy uses it too.
+function website.retire(sender, dest)
+    if path_state(dest) == "absent" then return true end
+    local ram = TMPFS_PROGRESS_DIR .. "/old-websites"
+    os.execute("mkdir -p " .. shell_quote(ram))
+    local base = ram .. "/" .. MAIL:gsub("^/", ""):gsub("/", "-") .. "-" .. sanitize_filename(sender) .. "-" ..
+        os.date("%Y-%m-%d-%H-%M-%S")
+    local old, n = base, 2
+    while path_state(old) ~= "absent" do old = base .. "-" .. n; n = n + 1 end
+    -- RAM is small: a copy that does not fit is removed, not let
+    -- fill the machine's memory
+    local size, avail = measure_size(dest) or 0, check_disk_space(ram)
+    if avail and size >= avail then
+        os.execute("rm -rf " .. shell_quote(dest))
+        log("website from %s: the previous copy (%s) did not fit in RAM (%s free) and was removed",
+            sender, fmt_bytes(size), fmt_bytes(avail))
+        return true
+    elseif website.ran(os.execute("mv " .. shell_quote(dest) .. " " .. shell_quote(old))) then
+        log("website from %s: the previous copy moved to %s, kept until the machine restarts",
+            sender, old)
+        return true
+    end
+    return false
 end
 -- }}}
 
@@ -6536,15 +6555,137 @@ function website.allow(address, bytes, size)
 end
 -- }}}
 
+-- ---- #715c: a website read page by page ----
+--
+-- The owner's side answers one file at a time, in pieces of at most
+-- website.PIECE, sealed as #715b seals the zip:
+--   POST /website       {key, browse = true}  -> owner key .. sealed offer
+--   POST /website/page  {key, path, from}     -> sealed
+--       "rmail website page <from> <total> <fingerprint> <path>\n" .. bytes
+-- `path` is relative to the website folder; a folder means its
+-- index.html, and the answer names the file it sent.
+
+-- {{{ website.safe_path(rel) -> the clean path, or nil and why
+-- The path guard, used by both sides: no `..`, `.` or dotfile part
+-- (dotfiles are not published: .git, .htpasswd), no absolute path, no
+-- backslash, no NUL or other control byte, no `%` (the reader decodes a
+-- browser's %-escapes once; one left over is an escape inside an
+-- escape), no empty part.  A trailing slash is dropped.
+function website.safe_path(rel)
+    if type(rel) ~= "string" or #rel > 1024 then return nil, "not a path" end
+    if rel:sub(1, 1) == "/" then return nil, "an absolute path" end
+    if rel:find("[%c\\%%]") then return nil, "a control byte, backslash or % in the path" end
+    rel = rel:gsub("/$", "")
+    if rel == "" then return "" end
+    for part in (rel .. "/"):gmatch("([^/]*)/") do
+        if part == "" then return nil, "an empty part (//)" end
+        if part == ".." then return nil, "a .. part" end
+        if part:sub(1, 1) == "." then return nil, "a part that starts with a dot" end
+    end
+    return rel
+end
+-- }}}
+
+-- {{{ website.realpath(path) -> the path with every link resolved, or nil
+function website.realpath(path)
+    local h = io.popen("realpath -e -- " .. shell_quote(path) .. " 2>/dev/null")
+    if not h then return nil end
+    local real = h:read("*l")
+    h:close()
+    return real ~= "" and real or nil
+end
+-- }}}
+
+-- {{{ website.facts() -> {fingerprint, unpacked, real}, or nil and why
+-- Looked at most every five seconds, as website.packed does, so a
+-- page's many parts do not list the folder once each.
+function website.facts()
+    local now = os.time()
+    local f = website.known
+    if f and website.known_at and now - website.known_at < 5 then return f end
+    local fp = website.fingerprint()
+    local real = website.realpath(website.folder)
+    if not fp or not real then return nil, "the website folder could not be read" end
+    if not (f and f.fingerprint == fp) then
+        f = {fingerprint = fp, unpacked = measure_size(website.folder) or 0}
+    end
+    f.real = real
+    website.known, website.known_at = f, now
+    return f
+end
+-- }}}
+
+-- {{{ website.resolve(rel, root) -> the clean path and the file; or nil, status, why
+-- The guard's second half: links are followed, and what they reach must
+-- still be inside the website folder.
+function website.resolve(rel, root)
+    local clean, why = website.safe_path(rel)
+    if not clean then return nil, "400 Bad Request", why end
+    local full = website.folder .. (clean ~= "" and "/" .. clean or "")
+    if publink.is_folder(full) then
+        clean = (clean ~= "" and clean .. "/" or "") .. "index.html"
+        full = website.folder .. "/" .. clean
+    end
+    local real = website.realpath(full)
+    if not real then return nil, "404 Not Found", "no such page" end
+    if real:sub(1, #root + 1) ~= root .. "/" then
+        return nil, "403 Forbidden", "a link that leads outside the website"
+    end
+    if publink.is_folder(real) then return nil, "404 Not Found", "no such page" end
+    return clean, real
+end
+-- }}}
+
+-- {{{ website.page_answer(data, address, offer) -> status line, plaintext
+function website.page_answer(data, address, offer)
+    local facts, why = website.facts()
+    if not facts then
+        log("website: a stranger at %s asked, and %s", address, why)
+        return "503 Service Unavailable", why
+    end
+    if offer then
+        log("website: asked for page by page by a stranger at %s", address)
+        return "200 OK", json.encode({
+            v = 1, name = config.name, folder = website.folder:match("([^/]+)$"),
+            fingerprint = facts.fingerprint, unpacked = facts.unpacked,
+            piece = website.PIECE, browse = true,
+        })
+    end
+    local from = tonumber(data.from or 0)
+    if not from or from ~= math.floor(from) or from < 0 then
+        return "400 Bad Request", "\"from\" must be a whole number of bytes"
+    end
+    local clean, real, why2 = website.resolve(data.path, facts.real)
+    if not clean then
+        if real ~= "404 Not Found" then
+            log("website: a stranger at %s asked for %q, refused: %s", address, tostring(data.path), why2)
+        end
+        return real, why2
+    end
+    local f = io.open(real, "rb")
+    if not f then return "404 Not Found", "no such page" end
+    local total = f:seek("end")
+    if from > total then f:close(); return "400 Bad Request", "\"from\" is past the end" end
+    f:seek("set", from)
+    local bytes = f:read(website.PIECE) or ""
+    f:close()
+    if not website.allow(address, #bytes, facts.unpacked) then
+        return "429 Too Many Requests", "twice the website today already; try tomorrow"
+    end
+    return "200 OK", string.format("rmail website page %d %d %s %s\n", from, total, facts.fingerprint, clean) ..
+        bytes
+end
+-- }}}
+
+website.PATHS = {["/website"] = true, ["/website/piece"] = true, ["/website/page"] = true}
+
 -- {{{ website.public_web(sock, method, path, declared, answer) -> handled
--- A web request on the mailbox port.  Only /website and /website/piece,
--- and only in public mode; anything else, and everything in private
+-- A web request on the mailbox port.  Only /website, /website/piece and
+-- /website/page (#715c), and only in public mode; anything else, and everything in private
 -- mode, is answered as it always was.  `answer` sends a plain JSON
 -- answer: (sock, status line, extra headers, table).
 function website.public_web(sock, method, path, declared, answer)
-    if not website.public or (path ~= "/website" and path ~= "/website/piece") then
-        return false
-    end
+    if not website.public or not website.PATHS[path] then return false end
     if method ~= "POST" then
         answer(sock, "405 Method Not Allowed", "Allow: POST\r\n", {error = "ask with POST"})
         return true
@@ -6563,6 +6704,19 @@ function website.public_web(sock, method, path, declared, answer)
     end
     local key = website.session(shared, theirs, website.pub)
     local address = (sock:getpeername()) or "?"
+    -- #715c: page by page needs no zip; the offer for it is asked for
+    -- with "browse"
+    if path == "/website/page" or (path == "/website" and data.browse == true) then
+        local status, plain = website.page_answer(data, address, path == "/website")
+        if status ~= "200 OK" then
+            answer(sock, status, "", {error = plain})
+            return true
+        end
+        local sealed = (path == "/website" and website.pub or "") .. website.seal(key, plain)
+        send_all(sock, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" ..
+            "Content-Length: " .. #sealed .. "\r\nConnection: close\r\n\r\n" .. sealed)
+        return true
+    end
     local pack, why = website.packed()
     if not pack then
         log("website: a stranger at %s asked, and %s", address, why)
@@ -6633,40 +6787,48 @@ function website.post(host, port, path, tbl)
 end
 -- }}}
 
--- {{{ website.fetch(target, yes) -> exit status
--- The asker's side, run once: rmail.lua <config> --website=<host>:<port>.
-function website.fetch(target, yes)
-    local function say(fmt, ...) io.stdout:write(string.format(fmt, ...), "\n") end
-    local function refusal(status, data)
-        local d = json.decode(data or "")
-        return (type(d) == "table" and d.error) or ("answered " .. tostring(status))
-    end
+-- {{{ website.say(fmt, ...), website.refusal(status, data)
+function website.say(fmt, ...) io.stdout:write(string.format(fmt, ...), "\n") end
+function website.refusal(status, data)
+    local d = json.decode(data or "")
+    return (type(d) == "table" and d.error) or ("answered " .. tostring(status))
+end
+-- }}}
+
+-- {{{ website.meet(target, browse) -> the meeting, or nil
+-- The asker's first request, for the whole zip (#715b) or, with
+-- `browse`, for page by page (#715c): the key agreed, the offer opened,
+-- the owner's key checked against the one remembered for that address
+-- (trust on first use), and the words shown.  Prints why when it fails.
+function website.meet(target, browse)
+    local say = website.say
     local host, port = target:match("^%[(.+)%]:(%d+)$")
     if not host then host, port = target:match("^([^:]+):(%d+)$") end
     port = tonumber(port)
     if not host or not port or port < 1 or port > 65535 then
         say("--website needs <host>:<port>, such as 192.0.2.7:51234 or [2001:db8::7]:51234")
-        return 1
+        return nil
     end
     os.execute("mkdir -p " .. shell_quote(STATE) .. " " .. shell_quote(paths.pending) .. " " ..
         shell_quote(paths.attachments))
 
     local mine = crypto.random_bytes(32)
     local my_pub = crypto.x25519_public(mine)
-    local status, data = website.post(host, port, "/website", {key = website.hex(my_pub)})
-    if not status then say("%s", data); return 1 end
+    local status, data = website.post(host, port, "/website", {key = website.hex(my_pub), browse = browse or nil})
+    if not status then say("%s", data); return nil end
     if status ~= 200 then
-        say("%s:%d did not offer a website: %s", host, port, refusal(status, data))
-        return 1
+        say("%s:%d did not offer a website: %s", host, port, website.refusal(status, data))
+        return nil
     end
     local theirs = data:sub(1, 32)
     local shared = #theirs == 32 and crypto.x25519(mine, theirs)
     local key = shared and website.session(shared, my_pub, theirs)
     local offer = key and json.decode(website.open(key, data:sub(33)) or "")
-    if type(offer) ~= "table" or type(offer.fingerprint) ~= "string" or not tonumber(offer.pieces)
-       or not tonumber(offer.size) or type(offer.sha256) ~= "string" then
+    if type(offer) ~= "table" or type(offer.fingerprint) ~= "string" or
+       (browse and offer.browse ~= true) or
+       (not browse and (not tonumber(offer.pieces) or not tonumber(offer.size) or type(offer.sha256) ~= "string")) then
         say("%s:%d answered, but its offer did not open; nothing was fetched", host, port)
-        return 1
+        return nil
     end
 
     -- trust on first use: the key remembered per address, a change refused
@@ -6681,7 +6843,7 @@ function website.fetch(target, yes)
         say("Someone may be between you and it, or its owner made a new key.  Ask them some other")
         say("way (in person, by phone).  To take the new key, remove \"%s\" from %s/website-keys.json.", where, STATE)
         log("website from %s refused: its key changed since %s", where, pin.since or "?")
-        return 1
+        return nil
     end
     local name = tostring(offer.name or "?")
     say("%s's website, at %s.", name, where)
@@ -6695,6 +6857,34 @@ function website.fetch(target, yes)
         pins[where] = {key = website.hex(theirs), words = words, name = name, since = os.date("%Y-%m-%d")}
         save_state("website-keys.json", pins)
     end
+    return {host = host, port = port, where = where, name = name, key = key,
+            asker = website.hex(my_pub), offer = offer}
+end
+-- }}}
+
+-- {{{ website.consent(yes, question) -> true to go on; or false, exit status
+function website.consent(yes, question)
+    if yes then return true end
+    if not website.ran(os.execute("test -t 0")) then
+        website.say("No terminal to answer on: nothing fetched.  Add --yes to fetch without asking.")
+        return false, 1
+    end
+    io.stdout:write(question, " [y/N] ")
+    io.stdout:flush()
+    local a = io.stdin:read("*l") or ""
+    if a:match("^%s*[yY]") then return true end
+    website.say("Nothing fetched.")
+    return false, 0
+end
+-- }}}
+
+-- {{{ website.fetch(target, yes) -> exit status
+-- The asker's side, run once: rmail.lua <config> --website=<host>:<port>.
+function website.fetch(target, yes)
+    local say, refusal = website.say, website.refusal
+    local m = website.meet(target, false)
+    if not m then return 1 end
+    local host, port, name, key, offer = m.host, m.port, m.name, m.key, m.offer
     local size = fmt_bytes(tonumber(offer.size))
     say("")
     say("It is %s zipped (%s unpacked).  Say yes and all of it arrives, to read", size,
@@ -6702,17 +6892,9 @@ function website.fetch(target, yes)
     say("whenever you like, even offline.")
     say("Said the other way round: saying no costs you nothing and you can ask again later;")
     say("saying yes costs %s of download and disk, but then it is yours and works without", size)
-    say("%s's computer being on.", name)
-    if not yes then
-        if not website.ran(os.execute("test -t 0")) then
-            say("No terminal to answer on: nothing fetched.  Add --yes to fetch without asking.")
-            return 1
-        end
-        io.stdout:write("Fetch it? [y/N] ")
-        io.stdout:flush()
-        local a = io.stdin:read("*l") or ""
-        if not a:match("^%s*[yY]") then say("Nothing fetched."); return 0 end
-    end
+    say("%s's computer being on.  To read it page by page instead, add --browse.", name)
+    local go, status = website.consent(yes, "Fetch it?")
+    if not go then return status end
 
     local work = paths.pending .. "/website-fetch-" .. uuid()
     os.execute("mkdir -p " .. shell_quote(work))
@@ -6727,7 +6909,7 @@ function website.fetch(target, yes)
     local pieces, shown = tonumber(offer.pieces), -1
     for n = 0, pieces - 1 do
         local st, d = website.post(host, port, "/website/piece",
-            {key = website.hex(my_pub), n = n, fingerprint = offer.fingerprint})
+            {key = m.asker, n = n, fingerprint = offer.fingerprint})
         if not st then out:close(); return give_up("%s", d) end
         if st ~= 200 then out:close(); return give_up("piece %d: %s", n, refusal(st, d)) end
         local plain = website.open(key, d)
@@ -6754,8 +6936,236 @@ function website.fetch(target, yes)
     local dest = website.received(name .. "-at-" .. host .. "-" .. port, extract .. "/" .. folder)
     os.execute("rm -rf " .. shell_quote(work))
     if not dest then say("fetched, but it could not be filed; see the log"); return 1 end
+    -- #715c: which version this is, so --browse reads it from disk
+    write_file(dest .. "/" .. website.RECORD, json.encode({fingerprint = offer.fingerprint, whole = true}))
     say("Saved at %s", dest)
     return 0
+end
+-- }}}
+
+-- ---- #715c: the reader's side, page by page ----
+--
+-- rmail.lua <config> --website=<host>:<port> --browse[=PORT] serves the
+-- site to this computer's own browser at 127.0.0.1:PORT, and nowhere
+-- else.  Each file the browser asks for is fetched from the owner once,
+-- sealed as #715b's pieces are, and kept at
+-- attachments/websites/<owner>-at-<host>-<port>/, the place a whole
+-- fetch fills; the record there says which version it is.  A newer
+-- version moves the old copy to RAM, as #715a does.
+
+website.RECORD = ".rmail-website.json"
+website.TYPES = {
+    html = "text/html; charset=utf-8", htm = "text/html; charset=utf-8", xhtml = "application/xhtml+xml",
+    css = "text/css", js = "text/javascript", mjs = "text/javascript", json = "application/json",
+    txt = "text/plain; charset=utf-8", md = "text/plain; charset=utf-8", png = "image/png",
+    jpg = "image/jpeg", jpeg = "image/jpeg", gif = "image/gif", webp = "image/webp", avif = "image/avif",
+    svg = "image/svg+xml", ico = "image/x-icon", bmp = "image/bmp", woff = "font/woff", woff2 = "font/woff2",
+    ttf = "font/ttf", otf = "font/otf", pdf = "application/pdf", mp4 = "video/mp4", webm = "video/webm",
+    mp3 = "audio/mpeg", ogg = "audio/ogg",
+}
+website.REASONS = {[200] = "OK", [301] = "Moved Permanently", [400] = "Bad Request", [403] = "Forbidden",
+    [404] = "Not Found", [405] = "Method Not Allowed", [500] = "Internal Server Error", [502] = "Bad Gateway"}
+
+function website.ext(name)
+    local ext = name:match("%.([%w]+)$")
+    return ext and ext:lower()
+end
+
+-- {{{ website.begin(b, fingerprint) -> true once the copy is that version
+-- A copy of another version, or one with no record, goes to RAM, as a
+-- whole fetch's does; the new copy starts empty.
+function website.begin(b, fingerprint)
+    local rec = json.decode(read_file(b.dest .. "/" .. website.RECORD) or "")
+    if type(rec) == "table" and rec.fingerprint == fingerprint then
+        b.fingerprint = fingerprint
+        return true
+    end
+    if not website.retire(b.who, b.dest) then return false end
+    os.execute("mkdir -p " .. shell_quote(b.dest))
+    write_file(b.dest .. "/" .. website.RECORD, json.encode({fingerprint = fingerprint, pages = true}))
+    b.fingerprint = fingerprint
+    return true
+end
+-- }}}
+
+-- {{{ website.get(b, clean) -> the path it is kept at; or nil, status, why
+-- One file from the owner, in as many pieces as it takes, written beside
+-- the pending files first and moved into the copy whole.
+function website.get(b, clean)
+    local m = b.m
+    local part = paths.pending .. "/website-page-" .. uuid()
+    local out = io.open(part, "wb")
+    if not out then return nil, 500, "cannot write " .. part end
+    local function fail(status, why)
+        out:close()
+        os.remove(part)
+        return nil, status, why
+    end
+    local index = clean == "" and "index.html" or clean .. "/index.html"
+    local from, total, got = 0, nil, nil
+    repeat
+        local st, d = website.post(m.host, m.port, "/website/page", {key = m.asker, path = clean, from = from})
+        if not st then return fail(502, d) end
+        if st ~= 200 then return fail(st == 404 and 404 or 502, website.refusal(st, d)) end
+        local plain = website.open(m.key, d) or ""
+        local head, f, t, fp, name = plain:match("^(rmail website page (%d+) (%d+) (%x+) ([^\n]*)\n)")
+        if not head or tonumber(f) ~= from or (total and tonumber(t) ~= total) or (got and name ~= got) then
+            return fail(502, "an answer that did not open as the piece asked for")
+        end
+        if name ~= clean and name ~= index then return fail(502, "an answer for another page") end
+        if fp ~= b.fingerprint then
+            if from > 0 then return fail(502, "the website changed while this file came; load it again") end
+            log("website from %s: changed since it was last read; the pages kept so far are put away", m.where)
+            if not website.begin(b, fp) then return fail(500, "the copy kept from before could not be moved") end
+        end
+        total, got = tonumber(t), name
+        local bytes = plain:sub(#head + 1)
+        if #bytes == 0 and from < total then return fail(502, "an empty piece") end
+        out:write(bytes)
+        from = from + #bytes
+    until from >= total
+    out:close()
+    if from ~= total then os.remove(part); return nil, 502, "more bytes than the file has" end
+    local keep = b.dest .. "/" .. got
+    os.execute("mkdir -p " .. shell_quote(keep:match("^(.*)/")))
+    if not website.ran(os.execute("mv -f " .. shell_quote(part) .. " " .. shell_quote(keep))) then
+        os.remove(part)
+        return nil, 500, "could not be kept at " .. keep
+    end
+    log("website from %s: %s fetched (%s)", m.where, got, fmt_bytes(total))
+    return got
+end
+-- }}}
+
+-- {{{ website.browse_one(b, c) -- one request from this computer's browser
+function website.browse_one(b, c)
+    local line = c:receive("*l")
+    if not line then return end
+    local host
+    for _ = 1, 100 do
+        local h = c:receive("*l")
+        if not h or h == "" or h == "\r" then break end
+        host = h:match("^[Hh][Oo][Ss][Tt]:%s*(%S+)") or host
+    end
+    local method, target = line:match("^(%u+) (%S+) HTTP/%d")
+    local function reply(status, ctype, body, extra)
+        send_all(c, "HTTP/1.1 " .. status .. " " .. (website.REASONS[status] or "") .. "\r\n" ..
+            "Content-Type: " .. ctype .. "\r\nContent-Length: " .. #body .. "\r\n" .. (extra or "") ..
+            "Connection: close\r\n\r\n" .. (method == "HEAD" and "" or body))
+    end
+    local function trouble(status, what)
+        return reply(status, "text/html; charset=utf-8", table.concat({
+            '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n',
+            '<meta name="viewport" content="width=device-width, initial-scale=1">\n',
+            '<title>Not here</title>\n</head>\n<body>\n<p>', website.html(what), '</p>\n',
+            '<p>Pages already opened open from this computer, even with ', website.html(b.m.name),
+            "'s turned off.</p>\n</body>\n</html>\n"}))
+    end
+    if not method then return reply(400, "text/plain", "not a web request\n") end
+    -- only this computer's own name for itself: a page elsewhere that
+    -- renames itself to 127.0.0.1 cannot read the kept copy through the
+    -- browser
+    if host ~= "127.0.0.1:" .. b.port and host ~= "localhost:" .. b.port then
+        return reply(403, "text/plain", "ask as 127.0.0.1:" .. b.port .. "\n")
+    end
+    if method ~= "GET" and method ~= "HEAD" then
+        return reply(405, "text/plain", "only GET\n", "Allow: GET, HEAD\r\n")
+    end
+    local want = target:gsub("[?#].*$", "")
+    if want:find("%%2[fF]") or want:find("%%5[cC]") then return trouble(400, "Refused: an encoded slash.") end
+    if want:sub(1, 1) ~= "/" then return trouble(400, "Refused: not a path.") end
+    want = want:gsub("%%(%x%x)", function(x) return string.char(tonumber(x, 16)) end)
+    local clean, why = website.safe_path(want:sub(2))
+    if not clean then return trouble(400, "Refused: " .. why .. ".") end
+    local function kept(rel)
+        local p = b.dest .. "/" .. rel
+        if publink.is_folder(p) then return nil end
+        local f = io.open(p, "rb")
+        if f then f:close(); return rel end
+    end
+    local index = clean == "" and "index.html" or clean .. "/index.html"
+    local got = clean ~= "" and kept(clean) or nil
+    if not got and publink.is_folder(b.dest .. "/" .. clean) then got = kept(index) end
+    -- #715a writes an information page beside each file that is not a
+    -- page part when the site arrives; here, when one is first asked for
+    local base = clean:match("^(.+)%.info%.html$")
+    local base_ext = base and website.ext(base)
+    if not got and base and not (base_ext and website.PAGE_PARTS[base_ext]) then
+        local have, st, why2 = kept(base), nil, nil
+        if not have then have, st, why2 = website.get(b, base) end
+        if have ~= base then
+            return trouble(st or 404, "This file's information page cannot be made: " .. tostring(why2 or "no such file") .. ".")
+        end
+        write_file(b.dest .. "/" .. clean, website.info_page(b.dest .. "/" .. base, base:match("([^/]+)$"), base_ext))
+        got = clean
+    end
+    if not got then
+        local st, why2
+        got, st, why2 = website.get(b, clean)
+        if not got then
+            return trouble(st, b.m.name .. "'s computer did not give this page: " .. tostring(why2) .. ".")
+        end
+    end
+    -- a folder's page, asked for without its slash: its links are
+    -- relative to the folder
+    if got ~= clean and want:sub(-1) ~= "/" then
+        local href = clean:gsub("[^%w%-%._~/]", function(x) return string.format("%%%02X", x:byte()) end)
+        return reply(301, "text/plain", "moved\n", "Location: /" .. href .. "/\r\n")
+    end
+    local f = io.open(b.dest .. "/" .. got, "rb")
+    if not f then return trouble(404, "The kept copy of this page could not be read.") end
+    local size = f:seek("end")
+    f:seek("set", 0)
+    send_all(c, "HTTP/1.1 200 OK\r\nContent-Type: " ..
+        (website.TYPES[website.ext(got) or ""] or "application/octet-stream") ..
+        "\r\nContent-Length: " .. size .. "\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n")
+    while method == "GET" do
+        local block = f:read(65536)
+        if not block then break end
+        send_all(c, block)
+    end
+    f:close()
+end
+-- }}}
+
+-- {{{ website.browse(target, yes, port) -> exit status
+function website.browse(target, yes, port)
+    local say = website.say
+    if port < 1 or port > 65535 then say("--browse=PORT needs a port from 1 to 65535"); return 1 end
+    local m = website.meet(target, true)
+    if not m then return 1 end
+    local size = fmt_bytes(tonumber(m.offer.unpacked) or 0)
+    say("")
+    say("Page by page: each page you open is fetched from %s's computer and kept on yours,", m.name)
+    say("so opening it again costs nothing.  It costs only what you open, %s for all of it,", size)
+    say("but a page not yet opened needs %s's computer on.", m.name)
+    say("Said the other way round: without --browse all of it arrives at once, and then works")
+    say("offline.")
+    local go, status = website.consent(yes, "Read it page by page?")
+    if not go then return status end
+
+    local who = m.name .. "-at-" .. m.host .. "-" .. m.port
+    local b = {m = m, who = who, dest = paths.attachments .. "/websites/" .. sanitize_filename(who), port = port}
+    os.execute("mkdir -p " .. shell_quote(paths.attachments .. "/websites"))
+    if not website.begin(b, m.offer.fingerprint) then
+        say("The copy kept from before could not be moved; see the log.")
+        return 1
+    end
+    local server, err = socket.bind("127.0.0.1", port)
+    if not server then say("Cannot listen on 127.0.0.1 port %d: %s", port, tostring(err)); return 1 end
+    say("Open http://127.0.0.1:%d/ in your browser.  Pages are kept at %s.", port, b.dest)
+    say("Ctrl-C stops.")
+    io.stdout:flush()
+    log("website from %s: read page by page at 127.0.0.1:%d, kept at %s", m.where, port, b.dest)
+    while true do
+        local c = server:accept()
+        if c then
+            c:settimeout(30)
+            local ok, e = pcall(website.browse_one, b, c)
+            if not ok then log("website: browsing: %s", tostring(e)) end
+            c:close()
+        end
+    end
 end
 -- }}}
 
@@ -10821,7 +11231,14 @@ end
 local function main()
     -- #715b: fetching someone's public website is a visit, not a daemon:
     -- nothing is listened on, so it runs beside this mailbox's own daemon
-    if cfg.fetch_website then os.exit(website.fetch(cfg.fetch_website, cfg.fetch_yes)) end
+    if cfg.fetch_website and cfg.browse then
+        os.exit(website.browse(cfg.fetch_website, cfg.fetch_yes, cfg.browse))
+    elseif cfg.fetch_website then
+        os.exit(website.fetch(cfg.fetch_website, cfg.fetch_yes))
+    elseif cfg.browse then
+        io.stderr:write("error: --browse reads a website named with --website=<host>:<port>\n")
+        os.exit(1)
+    end
     local rt = init_runtime()
 
     -- Active client coroutines: raw_socket -> {co, wait_type, wait_sock, last_activity}

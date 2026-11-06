@@ -67,4 +67,6 @@ encrypted to only my peers."
 Open.  715a is built, both sides (2026-11-05), and its two open
 questions are answered there.  715b is built (2026-11-06): a stranger
 fetches a public website over a key the two agree, remembered on first
-use and shown as six words.  715c is deferred by the owner.
+use and shown as six words.  715c is deferred by the owner, but was
+built as a draft on 2026-11-06: a public website read page by page with
+`--browse`, each page kept once fetched.

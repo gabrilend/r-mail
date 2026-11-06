@@ -362,6 +362,14 @@ All three startup-only checks moved onto the timer, not just public IPv4.
 - [ ] An information page in Firefox, Chrome and a phone browser: the boxes look like ads, each opens its Wikipedia article, "Open this file" opens the file
 - [ ] A site of several GB: the offer's size matches the consent form's, and asking again while it transfers makes no second offer
 
+### A public website, read page by page (#715c) — 2026-11-06
+
+- [x] Pages, a folder's page, a file of three pieces and an information page arrive byte for byte and are kept; a second open asks the owner for nothing; with the owner off, opened pages still open (harness: scripts/test-website-browse.sh)
+- [x] Refused paths on both sides (.., encoded .., encoded slashes, //, dotfiles, NUL, links out of the site, another Host); a newer version moves the kept copy to RAM; pages count against the daily guard; private mode unchanged (harness)
+- [ ] A real site in Firefox, Chrome and a phone browser on the same computer: links, pictures and style sheets load, and the back button works
+- [ ] Two machines over the internet: the first open of each page is quick enough to read by, with the owner behind a port forward
+- [ ] Decide whether to keep this at all: the owner deferred it on 2026-10-13 (see #715c decision 1)
+
 ### A public website, for anyone who asks (#715b) — 2026-11-06
 
 - [x] A stranger's mailbox fetches the site with --website=<host>:<port>, byte for byte, filed with information pages; the words shown match the owner's log; the key is remembered (harness: scripts/test-public-website.sh)
