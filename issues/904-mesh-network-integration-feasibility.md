@@ -134,10 +134,49 @@ networks are the wrong solution to the problems they're trying to
 solve, but the people doing interesting work there are worth being
 reachable by.  Make it possible, not easy.*
 
+## Done (2026-11-06)
+
+All three suggested steps, the parallel-send mode only:
+
+1. **Documented**: "Mesh networks and other transports" in
+   `docs/.templates/scripting-tutorial.md`, with `rncp` as the worked
+   example.
+2. **An example hook**: `scripts/hooks/examples/on_send.reticulum-rncp.sh`.
+   install.sh copies only `scripts/hooks/*.sh`, so it is never installed;
+   a user copies it.
+3. **Field names kept**: `reticulum` and `lxmf`, in that section's table.
+
+`scripts/test-mesh-shim.sh` runs it with a stand-in `rncp` (14 cases):
+on its own, and as a sender's `on_send` between two mailboxes, where the
+receiver still gets the message over IP unchanged.  No daemon code
+changed.  Reticulum itself was not run here; nothing in this repository
+proves that a real `rncp` accepts what the hook gives it beyond its
+documented `rncp <file> <destination>`.
+
+## Decisions (2026-11-06)
+
+- **`reticulum` holds an rncp receiver's destination hash; `lxmf` an
+  LXMF address.**  They are different hashes in Reticulum: `rncp` sends
+  to a listening `rncp`, not to an LXMF client.  The steps above named
+  both fields without saying which held what, and the worked example uses
+  `rncp`, so its field is `reticulum`.
+- **A record per message, kept by the hook.**  Read from the daemon:
+  `on_send` runs while each pass builds its requests, so for a contact
+  the daemon cannot reach it runs on every retry.  Without a record the
+  hook would send a radio copy every pass.  The record lives beside the
+  hook (`hooks/.reticulum-sent/`), keyed by the sha-256 of recipient,
+  subject and body, because `on_send` is not given a message id.  rmail
+  is not changed for it.
+- **`rncp` runs in the background.**  The daemon waits for `on_send`, and
+  a transfer over a radio link can take minutes.  A `.sending` mark stops
+  a second copy meanwhile.
+- **Everything that goes wrong is silent to the mail.**  The hook exits
+  0 and prints nothing in every failure, so the IP copy is never touched;
+  it says what went wrong on stderr, which reaches the daemon's log.
+
 ## Status
 
-Open, docs-only work pending.  No code change required for the
-parallel-send mode.  If/when someone wants the fallback-only or
-mesh-only modes, file a follow-up for the hook-protocol extension
-(probably `on_delivery_failure` or an opt-out return code from
-`on_send`).
+Open for the other two modes only: mesh-as-fallback and mesh-only need a
+hook-protocol extension (an `on_delivery_failure` hook, or an answer from
+`on_send` meaning "delivered, skip IP"), to be filed if someone wants it.
+The parallel-send mode is done (2026-11-06).

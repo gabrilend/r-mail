@@ -437,6 +437,8 @@ that phase's work, with what came out and how long it took.
 
 Newest first. Each entry is the date, then what changed, in plain words.
 
+- **2026-11-06 →** A contact who runs a Reticulum mesh can be sent a copy of each message over it, by an example hook you copy in (#904): `scripts/hooks/examples/on_send.reticulum-rncp.sh` hands the message to `rncp` for a contact with a `reticulum` field, and rmail still sends it over IP. rmail itself has no mesh code. See "Mesh networks and other transports" in the scripting tutorial.
+
 - **2026-10-13 →** An arriving message never writes over a file already in your inbox. If its name is taken, it gets the next free `-2`, `-3` and so on, with no upper limit. Before this, three cases wrote over a file: one you made by hand (rmail had no record of it), a contact's second message under a subject another contact had already used, and the 100th message whose name clashed, which a contact could force on purpose.
 
 - **2026-10-12 →** The README now says plainly that rmail trusts the operating system it runs on. The new section "What encryption does not protect: your own computer", under Encryption, explains why the contacts file stays unencrypted (an encrypted file's key would have to sit on the same disk for the daemon to read it), lists what someone controlling your OS can do, and gives the steps that still help. This change log was started.

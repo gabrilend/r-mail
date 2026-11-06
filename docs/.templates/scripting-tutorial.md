@@ -27,6 +27,7 @@ on_update      = /path/to/script.sh
   - [C](#c)
 - [Patterns](#patterns)
   - [Periodic tasks via self-addressed messages](#periodic-tasks-via-self-addressed-messages)
+  - [Mesh networks and other transports](#mesh-networks-and-other-transports)
 - [Tips](#tips)
 
 ---
@@ -550,6 +551,66 @@ script can do.  Common examples:
 The payload runs on your machine with your permissions — same as any
 hook.  It can read and write anywhere the daemon can, including
 creating new outbox messages addressed to other contacts.
+
+### Mesh networks and other transports
+
+rmail sends over IP and nothing else, and it will stay that way: it has
+no mesh code and depends on no mesh.  A contact who also runs a mesh
+network can still be reached through one, by a hook you write yourself.
+This section is the recipe; the mesh, its software and its settings are
+yours (#904).
+
+**The fields.**  Contacts can hold any field (see [Read contact fields in
+a hook](#read-contact-fields-in-a-hook)).  Two names are kept for mesh
+addresses, so that different people's hooks agree on them; rmail itself
+never reads either:
+
+| field | holds |
+|---|---|
+| `reticulum` | the hexadecimal destination hash of the contact's Reticulum `rncp` receiver |
+| `lxmf` | the contact's LXMF address, for hooks that hand mail to an LXMF client (Sideband, MeshChat, NomadNet) |
+
+```
+alice.token     = "shared-secret"
+alice.reticulum = 256320d405d6d525d1e9
+```
+
+**The worked example** is `scripts/hooks/examples/on_send.reticulum-rncp.sh`
+in the rmail checkout.  It is not installed into any mailbox; copy it over
+your mailbox's `hooks/on_send.sh` to use it.  For a contact with a
+`reticulum` field, it writes the body to a file named after the subject
+and runs `rncp <file> <destination>` in the background, and prints
+nothing.  So:
+
+- **The mesh copy goes as well, not instead.**  rmail still sends the
+  message over IP, unchanged, whenever it reaches the contact.  The
+  contact may get it twice, once each way, as two files; nothing joins
+  them.
+- **It keeps a record, so a retry does not resend.**  `on_send` runs each
+  time the daemon prepares a message for a contact, and for a contact it
+  cannot reach that is every pass that tries again.  The example keeps one
+  empty file per message handed over, in `hooks/.reticulum-sent/`, named
+  by the sha-256 of recipient, subject and body.  An edit has a new body,
+  and goes again.  A failed `rncp` leaves no record, so the next pass
+  tries it again.
+- **Nothing it does can stop the mail.**  No field, no `rncp`, a field
+  that is not a hash, `rncp` failing: the hook exits 0 and prints
+  nothing, and the message goes over IP as written.  It needs `rncp` and
+  `rfield.sh` on the daemon's PATH, or `RNCP` and `RFIELD` set to them.
+
+On the contact's side, `rncp` in receive mode saves what arrives; its
+flags differ between Reticulum versions (`--receive` and `--allow` in the
+manual consulted on 2026-11-06), so check your own `rncp --help`.
+Pointing it at the mailbox's `inbox/` makes an arriving file show up
+there like any message.
+
+**What a hook cannot do yet.**  A hook cannot tell rmail "delivered, do
+not try IP": there is no such answer from `on_send`.  So mesh-only
+contacts, and a mesh used only when IP fails, need a change to rmail's
+hook protocol, which is a separate issue if someone wants it.  Sending
+both ways, as above, needs nothing from rmail.
+
+`scripts/test-mesh-shim.sh` runs the example against a stand-in `rncp`.
 
 ---
 

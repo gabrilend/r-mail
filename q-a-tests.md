@@ -39,6 +39,11 @@ jump around.
 - [ ] `rdeny.sh <consent-file>` leaves only the `deny` line in the consent file
 - [ ] Daemon's `check_consent_pending()` acts on the resulting single-decision file
 
+### Mesh copy through a hook (#904)
+- [x] The example `on_send.reticulum-rncp.sh` hands a contact with a `reticulum` field the body through `rncp`, once per message, in the background, and the IP copy is unchanged (harness: `scripts/test-mesh-shim.sh`, with a stand-in `rncp`)
+- [ ] With real Reticulum on two machines: the example on one side and `rncp` receiving into the other's `inbox/`, the message arrives both ways
+- [ ] A contact unreachable over IP for several passes gets one mesh copy, not one per pass
+
 ## 3. Sending messages (daemon outbox)
 
 ### Outbox file watching (inotify)
