@@ -411,3 +411,28 @@ kept while the daemon runs.  A stranger sends no note: the public link's
 notes (#714) are the place for that.  Keep `.state/website-key` as you keep
 your contacts file.  If it is lost, a new one is made, and everyone who has
 visited is told the key changed.
+
+### A public website, read page by page (#715c)
+
+Instead of the whole site at once, a visitor can read a public website the
+way a web site is read:
+
+    run-rmail.sh ~/mail/config --website=203.0.113.7:51234 --browse
+
+The meeting is the same as above (the six words, the remembered key, a
+yes or no), and the cost is said both ways: page by page costs only what
+is opened, but a page not yet opened needs the owner's computer on.  Then
+it serves the site at `http://127.0.0.1:8715/` (`--browse=PORT` for
+another port) to the browser on this computer only, until Ctrl-C.  Each
+file is fetched from the owner the first time the browser asks for it,
+and kept at `attachments/websites/<name>-at-<host>-<port>/`, the place a
+whole fetch fills.  Opening it again asks the owner for nothing.  A site
+fetched whole is browsed from disk.  When the owner changes the site, the
+kept copy moves to RAM and the new version's pages are fetched as they
+are opened.
+
+Paths are guarded on both sides: no `..`, no dotfiles, no absolute paths,
+no encoded slashes, and on the owner's side no link that leads outside the
+website folder.  The pages count against the same allowance as a whole
+fetch, twice the site a day per address.  A contact's website (private
+mode) is still sent whole.
