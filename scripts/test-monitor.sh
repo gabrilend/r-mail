@@ -42,7 +42,8 @@
 #               enabled is named with the command that enables it;
 #               --behind restarts only the running mailbox that last ran
 #               an older version, waits for its new pid, and says it now
-#               runs the version on disk; not root, sv goes through sudo;
+#               runs the version on disk; named, one already up to date
+#               is restarted all the same; not root, sv goes through sudo;
 #               a refused restart is said and fails; and with nothing
 #               behind, --behind says so
 #
@@ -143,7 +144,13 @@ EOF
 
 PIDS=""
 stop_all() {
-    for p in $PIDS $(cat "$WORK"/*.pid 2>/dev/null); do kill "$p" 2>/dev/null; done
+    # a stand-in restart still on its way (see "restarting") ends first, so
+    # the daemon it starts is stopped too and not left behind
+    for pending in $(cat "$WORK/restarts.pending" 2>/dev/null); do
+        n=0
+        while kill -0 "$pending" 2>/dev/null && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    done
+    for p in $PIDS $(cat "$WORK"/*.pid "$WORK/started" 2>/dev/null); do kill "$p" 2>/dev/null; done
     wait 2>/dev/null
 }
 trap stop_all EXIT
@@ -312,6 +319,7 @@ if [ -n "\$old" ]; then
 fi
 "$LAUNCHER" "$WORK/\$1/config" >> "$WORK/\$1.log" 2>&1 < /dev/null &
 echo \$! > "$WORK/\$1.pid"
+echo \$! >> "$WORK/started"
 EOF
 cat > "$WORK/bin/systemctl" <<EOF
 #!/bin/sh
@@ -320,6 +328,7 @@ echo "systemctl \$*" >> "$WORK/calls"
 # for the new pid rather than take the first one it sees
 if [ "\$*" = "--user restart rmail-running.service" ]; then
     (sleep 1; "$WORK/bin/restart-box" running) > /dev/null 2>&1 &
+    echo \$! >> "$WORK/restarts.pending"
     exit 0
 fi
 exit 1
@@ -389,6 +398,16 @@ NEW_RUNNING=$(cat "$WORK/running.pid")
     && [ "$(cat "$WORK/running/.state/version")" = "$VERSION" ] \
     && ok "it waits for the new pid and says the version it runs now" \
     || note_fail "after --behind: old $PID_RUNNING new $NEW_RUNNING: $(cat "$WORK/r-behind.out" | tr '\n' ' ')"
+
+# named, a mailbox already on the program's version is restarted too, and
+# the same version is no sign that the restart has happened: the pid is
+restart rmail-running > "$WORK/r-again.out" 2>&1
+status=$?
+AGAIN=$(cat "$WORK/running.pid")
+[ $status -eq 0 ] && [ "$AGAIN" != "$NEW_RUNNING" ] && ! kill -0 "$NEW_RUNNING" 2>/dev/null \
+    && grep -q "running again (pid $AGAIN), version $VERSION" "$WORK/r-again.out" \
+    && ok "a mailbox already up to date is restarted when named, and it waits for the new pid" \
+    || note_fail "restart rmail-running again ($status): old $NEW_RUNNING new $AGAIN: $(cat "$WORK/r-again.out" | tr '\n' ' ')"
 
 mkdir -p "$WORK/root/var/service"
 ln -s "$WORK/root/etc/sv/rmail-stopped" "$WORK/root/var/service/rmail-stopped"
