@@ -591,6 +591,9 @@ Also covered by `scripts/test-mailbox-selection.sh`.
 - [ ] After `git pull` raises `RMAIL_VERSION`, `rmail-monitor.lua list` says "restart it to run" for every running mailbox until its service is restarted, and once restarted, says once that it is new and names the story between (#713)
 - [ ] `monitor = no` in a mailbox's config keeps it out of `list` and `tell`, while its daemon still runs (#713)
 - [ ] With services under `/etc/systemd/system`, `/etc/sv` and `/etc/init.d`, as root and as a plain user, the monitor reads every rmail service file it is allowed to and says nothing about ones it is not (#713)
+- [x] `restart` goes through stand-ins for systemctl, sv, rc-service and sudo: by hand left alone, `--dry-run` runs nothing, an unenabled runit service named, `--behind` restarts only the mailbox behind and waits for its new pid (harness: scripts/test-monitor.sh) (#713, 2026-11-06)
+- [ ] After a `git pull` that raises `RMAIL_VERSION`, `rmail-monitor.lua restart --behind` on Void (runit, as a plain user through sudo) restarts every mailbox and `list` then shows each on the new version (#713)
+- [ ] The same with a systemd user service (no sudo asked) and a systemd system service (sudo asked once) (#713)
 
 ## 12b. State files are plaintext (#505 reversed)
 
