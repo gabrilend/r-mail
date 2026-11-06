@@ -11,8 +11,12 @@ build the app, install it, and send a file from the phone once.
 
 **Until the new app is installed, uploads from the phone fail**: the
 daemon now refuses a resume without `total_checksum`, which the installed
-app does not send.  The daemon logs nothing for this (the refusal is a
-400 answer); the phone shows its usual upload failure.
+app does not send.  The phone shows its usual upload failure.  Since
+2026-11-06 the daemon logs every such refusal ("phone upload refused:
+<file>: <reason>"), and a request with every piece checksum but no
+whole-file checksum (the app from before this issue) is logged and
+answered (`update_app: true`) as "the phone app must be updated" —
+`upload.refused_checksums`, checked by `scripts/test-phone-upload-checks.sh`.
 
 ## Current Behavior
 
@@ -91,7 +95,23 @@ phone app sends the whole-file checksum.
    Android SDK; install; upload one file from the phone and see it in
    Files.  Then mark this issue complete.
 4. Test `scripts/test-phone-upload-checks.sh` — done, passing.
+6. Daemon, 2026-11-06 — done: a refused start or resume is logged, and
+   the old app's request is named as such in the log and the answer
+   (decision below).
 5. `docs/.templates/attachments.md` — done.
+
+## Decisions (2026-11-06)
+
+Made by the builder under the owner's standing instruction of 2026-11-02
+("If there are open questions, answer them yourself"); the owner may
+overturn it.
+
+1. **An old app is told apart from a damaged request** by what is
+   missing: every piece checksum present and `total_checksum` absent is
+   the app from before 2026-09-29, which never sent it; a malformed
+   `total_checksum` is a damaged request and is not blamed on the app.
+   Only the first gets the "update the app" words, so the log does not
+   send the owner after the wrong cause.
 
 ## Related
 
